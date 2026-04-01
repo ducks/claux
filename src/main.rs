@@ -20,11 +20,11 @@ async fn main() -> Result<()> {
 
     // Init logging
     let filter = if args.debug {
-        "claude_rs=debug"
+        "claux=debug"
     } else if args.verbose {
-        "claude_rs=info"
+        "claux=info"
     } else {
-        "claude_rs=warn"
+        "claux=warn"
     };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     let auth = config
         .resolve_auth()
         .ok_or_else(|| anyhow::anyhow!(
-            "No authentication found. Set ANTHROPIC_API_KEY, configure ~/.claude-rs/config.toml, or run `claude login`."
+            "No authentication found. Set ANTHROPIC_API_KEY, configure ~/.config/claux/config.toml, or run `claude login`."
         ))?;
 
     let auth_label = match &auth {

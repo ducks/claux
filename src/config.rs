@@ -163,13 +163,13 @@ impl Config {
     fn global_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("claude-rs")
+            .join("claux")
             .join("config.toml")
     }
 
     fn project_path() -> Option<PathBuf> {
         let cwd = std::env::current_dir().ok()?;
-        let path = cwd.join(".claude-rs.toml");
+        let path = cwd.join(".claux.toml");
         Some(path)
     }
 }

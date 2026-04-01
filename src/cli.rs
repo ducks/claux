@@ -1,8 +1,8 @@
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "claude-rs")]
-#[command(about = "Claude Code — rewritten in Rust")]
+#[command(name = "claux")]
+#[command(about = "claux — Claude Code rewritten in Rust")]
 pub struct Cli {
     /// One-shot prompt (non-interactive)
     #[arg(short = 'p', long = "print")]
