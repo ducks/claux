@@ -110,3 +110,51 @@ impl Tool for BashTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bash_echo() {
+        let tool = BashTool;
+        let result = tool
+            .execute(json!({"command": "echo hello"}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.trim().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn bash_exit_code() {
+        let tool = BashTool;
+        let result = tool
+            .execute(json!({"command": "exit 1"}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("Exit code"));
+    }
+
+    #[tokio::test]
+    async fn bash_captures_stderr() {
+        let tool = BashTool;
+        let result = tool
+            .execute(json!({"command": "echo err >&2"}))
+            .await
+            .unwrap();
+        assert!(result.content.contains("err"));
+    }
+
+    #[tokio::test]
+    async fn bash_timeout() {
+        let tool = BashTool;
+        let result = tool
+            .execute(json!({"command": "sleep 10", "timeout": 100}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("timed out"));
+    }
+}

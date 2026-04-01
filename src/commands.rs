@@ -140,6 +140,94 @@ fn execute_model(new_model: Option<String>, engine: &mut Engine) -> Result<Strin
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_command_returns_none() {
+        assert!(parse_command("hello world").is_none());
+    }
+
+    #[test]
+    fn help_returns_text() {
+        let result = parse_command("/help");
+        assert!(matches!(result, Some(CommandResult::Text(_))));
+    }
+
+    #[test]
+    fn exit_returns_exit() {
+        assert!(matches!(parse_command("/exit"), Some(CommandResult::Exit)));
+        assert!(matches!(parse_command("/quit"), Some(CommandResult::Exit)));
+    }
+
+    #[test]
+    fn cost_returns_sentinel() {
+        if let Some(CommandResult::Text(text)) = parse_command("/cost") {
+            assert_eq!(text, "__cost__");
+        } else {
+            panic!("expected Text");
+        }
+    }
+
+    #[test]
+    fn compact_returns_async() {
+        assert!(matches!(
+            parse_command("/compact"),
+            Some(CommandResult::Async(AsyncCommand::Compact))
+        ));
+    }
+
+    #[test]
+    fn model_no_args_returns_none_model() {
+        if let Some(CommandResult::Async(AsyncCommand::Model(m))) = parse_command("/model") {
+            assert!(m.is_none());
+        } else {
+            panic!("expected Model(None)");
+        }
+    }
+
+    #[test]
+    fn model_with_args() {
+        if let Some(CommandResult::Async(AsyncCommand::Model(Some(m)))) =
+            parse_command("/model claude-opus-4-20250514")
+        {
+            assert_eq!(m, "claude-opus-4-20250514");
+        } else {
+            panic!("expected Model(Some)");
+        }
+    }
+
+    #[test]
+    fn resume_no_args() {
+        if let Some(CommandResult::Async(AsyncCommand::Resume(id))) = parse_command("/resume") {
+            assert!(id.is_none());
+        } else {
+            panic!("expected Resume(None)");
+        }
+    }
+
+    #[test]
+    fn resume_with_id() {
+        if let Some(CommandResult::Async(AsyncCommand::Resume(Some(id)))) =
+            parse_command("/resume 20260401-143022")
+        {
+            assert_eq!(id, "20260401-143022");
+        } else {
+            panic!("expected Resume(Some)");
+        }
+    }
+
+    #[test]
+    fn unknown_command_returns_error_text() {
+        if let Some(CommandResult::Text(text)) = parse_command("/bogus") {
+            assert!(text.contains("Unknown command"));
+        } else {
+            panic!("expected Text");
+        }
+    }
+}
+
 fn help_text() -> String {
     r#"Available commands:
   /help           Show this help

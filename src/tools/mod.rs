@@ -101,3 +101,77 @@ impl ToolRegistry {
             .is_some_and(|t| t.is_read_only())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_has_core_tools() {
+        let reg = ToolRegistry::new();
+        let defs = reg.definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"Read"));
+        assert!(names.contains(&"Write"));
+        assert!(names.contains(&"Edit"));
+        assert!(names.contains(&"Glob"));
+        assert!(names.contains(&"Grep"));
+        assert!(names.contains(&"Bash"));
+    }
+
+    #[test]
+    fn registry_without_agent_has_no_agent() {
+        let reg = ToolRegistry::without_agent();
+        let defs = reg.definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(!names.contains(&"Agent"));
+    }
+
+    #[test]
+    fn registry_with_agent_has_agent() {
+        let reg = ToolRegistry::new_with_agent("fake-key".into(), "model".into());
+        let defs = reg.definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"Agent"));
+    }
+
+    #[test]
+    fn read_tools_are_read_only() {
+        let reg = ToolRegistry::new();
+        assert!(reg.is_read_only("Read"));
+        assert!(reg.is_read_only("Glob"));
+        assert!(reg.is_read_only("Grep"));
+    }
+
+    #[test]
+    fn write_tools_are_not_read_only() {
+        let reg = ToolRegistry::new();
+        assert!(!reg.is_read_only("Write"));
+        assert!(!reg.is_read_only("Edit"));
+        assert!(!reg.is_read_only("Bash"));
+    }
+
+    #[test]
+    fn unknown_tool_is_not_read_only() {
+        let reg = ToolRegistry::new();
+        assert!(!reg.is_read_only("NonexistentTool"));
+    }
+
+    #[tokio::test]
+    async fn execute_unknown_tool_errors() {
+        let reg = ToolRegistry::new();
+        let result = reg.execute("FakeTool", serde_json::json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn all_tools_have_valid_schemas() {
+        let reg = ToolRegistry::new();
+        for def in reg.definitions() {
+            assert!(!def.name.is_empty());
+            assert!(!def.description.is_empty());
+            assert_eq!(def.input_schema["type"], "object");
+            assert!(def.input_schema.get("properties").is_some());
+        }
+    }
+}

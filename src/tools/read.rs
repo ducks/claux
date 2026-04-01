@@ -93,6 +93,79 @@ impl Tool for ReadTool {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[tokio::test]
+    async fn read_existing_file() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "line one").unwrap();
+        writeln!(tmp, "line two").unwrap();
+        writeln!(tmp, "line three").unwrap();
+
+        let tool = ReadTool;
+        let result = tool
+            .execute(json!({"file_path": tmp.path().to_str().unwrap()}))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("line one"));
+        assert!(result.content.contains("line two"));
+        assert!(result.content.contains("1\t"));
+    }
+
+    #[tokio::test]
+    async fn read_with_offset_and_limit() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        for i in 1..=10 {
+            writeln!(tmp, "line {}", i).unwrap();
+        }
+
+        let tool = ReadTool;
+        let result = tool
+            .execute(json!({
+                "file_path": tmp.path().to_str().unwrap(),
+                "offset": 3,
+                "limit": 2
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("line 3"));
+        assert!(result.content.contains("line 4"));
+        assert!(!result.content.contains("line 5"));
+    }
+
+    #[tokio::test]
+    async fn read_nonexistent_file() {
+        let tool = ReadTool;
+        let result = tool
+            .execute(json!({"file_path": "/tmp/definitely_does_not_exist_12345"}))
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("does not exist"));
+    }
+
+    #[test]
+    fn expand_tilde_works() {
+        let path = expand_tilde("~/test.txt");
+        assert!(!path.to_str().unwrap().contains('~'));
+        assert!(path.to_str().unwrap().contains("test.txt"));
+    }
+
+    #[test]
+    fn expand_tilde_absolute_unchanged() {
+        let path = expand_tilde("/tmp/test.txt");
+        assert_eq!(path.to_str().unwrap(), "/tmp/test.txt");
+    }
+}
+
 pub fn expand_tilde(path: &str) -> std::path::PathBuf {
     if let Some(stripped) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {

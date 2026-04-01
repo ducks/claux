@@ -114,3 +114,111 @@ fn truncate(s: &str, max: usize) -> &str {
         &s[..max]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn bypass_allows_everything() {
+        let checker = PermissionChecker::new(PermissionMode::Bypass);
+        let input = json!({"command": "rm -rf /"});
+        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Allow));
+    }
+
+    #[test]
+    fn plan_denies_writes() {
+        let checker = PermissionChecker::new(PermissionMode::Plan);
+        let input = json!({"file_path": "/tmp/test"});
+        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Deny(_)));
+    }
+
+    #[test]
+    fn plan_allows_reads() {
+        let checker = PermissionChecker::new(PermissionMode::Plan);
+        let input = json!({"file_path": "/tmp/test"});
+        assert!(matches!(checker.check("Read", &input, true), PermissionResult::Allow));
+    }
+
+    #[test]
+    fn default_allows_read_only() {
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({"pattern": "*.rs"});
+        assert!(matches!(checker.check("Glob", &input, true), PermissionResult::Allow));
+    }
+
+    #[test]
+    fn default_asks_for_bash() {
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({"command": "cargo test"});
+        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask(_)));
+    }
+
+    #[test]
+    fn default_asks_for_write() {
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({"file_path": "/tmp/test", "content": "hello"});
+        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Ask(_)));
+    }
+
+    #[test]
+    fn accept_edits_allows_write_and_edit() {
+        let checker = PermissionChecker::new(PermissionMode::AcceptEdits);
+        let input = json!({"file_path": "/tmp/test"});
+        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Allow));
+        assert!(matches!(checker.check("Edit", &input, false), PermissionResult::Allow));
+    }
+
+    #[test]
+    fn accept_edits_asks_for_bash() {
+        let checker = PermissionChecker::new(PermissionMode::AcceptEdits);
+        let input = json!({"command": "rm -rf /"});
+        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask(_)));
+    }
+
+    #[test]
+    fn always_allow_overrides_mode() {
+        let mut checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({"command": "cargo test"});
+
+        // First call should ask
+        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask(_)));
+
+        // After always_allow, should allow
+        checker.always_allow("Bash");
+        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Allow));
+    }
+
+    #[test]
+    fn always_allow_is_tool_specific() {
+        let mut checker = PermissionChecker::new(PermissionMode::Default);
+        checker.always_allow("Bash");
+
+        let input = json!({"file_path": "/tmp/test"});
+        // Write should still ask
+        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Ask(_)));
+    }
+
+    #[test]
+    fn ask_summary_contains_command() {
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({"command": "cargo test"});
+        if let PermissionResult::Ask(summary) = checker.check("Bash", &input, false) {
+            assert!(summary.contains("cargo test"));
+        } else {
+            panic!("expected Ask");
+        }
+    }
+
+    #[test]
+    fn ask_summary_contains_file_path() {
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({"file_path": "/home/ducks/important.rs"});
+        if let PermissionResult::Ask(summary) = checker.check("Edit", &input, false) {
+            assert!(summary.contains("important.rs"));
+        } else {
+            panic!("expected Ask");
+        }
+    }
+}

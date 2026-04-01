@@ -56,6 +56,7 @@ impl Tool for EditTool {
         false
     }
 
+    #[allow(clippy::manual_find)]
     async fn execute(&self, input: Value) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let path = crate::tools::read::expand_tilde(&params.file_path);
@@ -117,5 +118,104 @@ impl Tool for EditTool {
             content: format!("Updated {}", params.file_path),
             is_error: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn edit_replaces_string() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "hello world").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(json!({
+                "file_path": tmp.path().to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye"
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(content, "goodbye world");
+    }
+
+    #[tokio::test]
+    async fn edit_fails_on_missing_string() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "hello world").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(json!({
+                "file_path": tmp.path().to_str().unwrap(),
+                "old_string": "nonexistent",
+                "new_string": "replacement"
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn edit_fails_on_ambiguous_match() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "aaa bbb aaa").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(json!({
+                "file_path": tmp.path().to_str().unwrap(),
+                "old_string": "aaa",
+                "new_string": "ccc"
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("2 times"));
+    }
+
+    #[tokio::test]
+    async fn edit_replace_all() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "aaa bbb aaa").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(json!({
+                "file_path": tmp.path().to_str().unwrap(),
+                "old_string": "aaa",
+                "new_string": "ccc",
+                "replace_all": true
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(content, "ccc bbb ccc");
+    }
+
+    #[tokio::test]
+    async fn edit_nonexistent_file() {
+        let tool = EditTool;
+        let result = tool
+            .execute(json!({
+                "file_path": "/tmp/definitely_does_not_exist_12345",
+                "old_string": "a",
+                "new_string": "b"
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
     }
 }
