@@ -32,6 +32,18 @@ pub struct Config {
 
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+
+    /// OpenAI-compatible endpoint (e.g. "http://localhost:11434/v1")
+    #[serde(default)]
+    pub openai_base_url: Option<String>,
+
+    /// API key for the OpenAI-compatible endpoint
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+
+    /// Display name for the provider (e.g. "ollama", "openai", "lmstudio")
+    #[serde(default)]
+    pub openai_provider_name: Option<String>,
 }
 
 fn default_model() -> String {
@@ -55,6 +67,9 @@ impl Default for Config {
             api_key_cmd: None,
             permission_mode: PermissionMode::Default,
             max_tokens: default_max_tokens(),
+            openai_base_url: None,
+            openai_api_key: None,
+            openai_provider_name: None,
         }
     }
 }

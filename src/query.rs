@@ -1,17 +1,15 @@
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::api::{self, ApiEvent, ContentBlock, Message};
+use crate::api::{self, ApiEvent, ContentBlock, Message, Provider};
 use crate::cost::CostTracker;
 use crate::permissions::{PermissionChecker, PermissionResponse, PermissionResult};
 use crate::tools::ToolRegistry;
 
 /// The query engine: conversation loop that sends messages, streams responses,
 /// dispatches tools, and continues until the assistant stops.
-///
-/// This is the Rust equivalent of Claude Code's query.ts + QueryEngine.ts.
 pub struct Engine {
-    client: api::Client,
+    provider: Box<dyn Provider>,
     tools: ToolRegistry,
     permissions: PermissionChecker,
     messages: Vec<Message>,
@@ -38,13 +36,13 @@ pub enum StreamEvent {
 
 impl Engine {
     pub fn new(
-        client: api::Client,
+        provider: Box<dyn Provider>,
         tools: ToolRegistry,
         permissions: PermissionChecker,
         model: &str,
     ) -> Self {
         Self {
-            client,
+            provider,
             tools,
             permissions,
             messages: Vec::new(),
@@ -77,7 +75,7 @@ impl Engine {
 
     pub fn set_model(&mut self, model: &str) {
         self.model = model.to_string();
-        self.client.set_model(model);
+        self.provider.set_model(model);
         self.cost = CostTracker::new(model);
     }
 
@@ -95,7 +93,7 @@ impl Engine {
         &self,
         tool_defs: &[crate::api::ToolDefinition],
     ) -> Result<mpsc::Receiver<ApiEvent>> {
-        self.client
+        self.provider
             .stream(&self.messages, &self.system_prompt, tool_defs, self.max_tokens)
             .await
     }
@@ -145,7 +143,7 @@ impl Engine {
         summary_messages.push(Message::user(summary_prompt));
 
         let mut rx = self
-            .client
+            .provider
             .stream(&summary_messages, &self.system_prompt, &[], self.max_tokens)
             .await?;
 
@@ -199,7 +197,7 @@ impl Engine {
         loop {
             let tool_defs = self.tools.definitions();
             let mut rx = self
-                .client
+                .provider
                 .stream(&self.messages, &self.system_prompt, &tool_defs, self.max_tokens)
                 .await?;
 
@@ -300,7 +298,7 @@ impl Engine {
         loop {
             let tool_defs = self.tools.definitions();
             let mut rx = self
-                .client
+                .provider
                 .stream(&self.messages, &self.system_prompt, &tool_defs, self.max_tokens)
                 .await?;
 

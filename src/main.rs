@@ -34,31 +34,30 @@ async fn main() -> Result<()> {
     // Load config (global + project)
     let config = config::Config::load()?;
 
-    // Resolve auth
-    let auth = config
-        .resolve_auth()
-        .ok_or_else(|| anyhow::anyhow!(
-            "No authentication found. Set ANTHROPIC_API_KEY, configure ~/.config/claux/config.toml, or run `claude login`."
-        ))?;
-
-    let auth_label = match &auth {
-        config::AuthMethod::ApiKey(_) => "API key",
-        config::AuthMethod::OAuthToken(_) => "Claude login (OAuth)",
-    };
-    tracing::info!("Auth: {}", auth_label);
-
     let model = args
         .model
         .as_deref()
         .unwrap_or(&config.model)
         .to_string();
 
+    // Build the provider
+    let provider = build_provider(&config, &model)?;
+    let provider_name = provider.name().to_string();
+    tracing::info!("Provider: {} ({})", provider_name, model);
+
+    // Build a factory for agent sub-providers
+    let config_for_factory = config.clone();
+    let model_for_factory = model.clone();
+    let agent_factory: tools::agent::ProviderFactory = Box::new(move || {
+        build_provider(&config_for_factory, &model_for_factory)
+            .expect("failed to build agent provider")
+    });
+
     // One-shot mode: --print / -p
     if let Some(ref prompt) = args.prompt {
-        let client = api::Client::new(auth.clone(), &model);
-        let tool_registry = tools::ToolRegistry::new_with_agent(auth, model.clone());
+        let tool_registry = tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
-        let mut engine = query::Engine::new(client, tool_registry, permission_checker, &model);
+        let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
 
         let system_prompt = context::build_system_prompt().await?;
         engine.set_system_prompt(system_prompt);
@@ -69,10 +68,9 @@ async fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    let client = api::Client::new(auth.clone(), &model);
-    let tool_registry = tools::ToolRegistry::new_with_agent(auth, model.clone());
+    let tool_registry = tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
     let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
-    let mut engine = query::Engine::new(client, tool_registry, permission_checker, &model);
+    let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
 
     // Resume a previous session if requested
     if let Some(ref session_id) = args.resume {
@@ -103,4 +101,28 @@ async fn main() -> Result<()> {
     } else {
         repl::run(engine, &config).await
     }
+}
+
+/// Build a provider from config.
+fn build_provider(
+    config: &config::Config,
+    model: &str,
+) -> Result<Box<dyn api::Provider>> {
+    // Check for OpenAI-compatible provider in config
+    if let Some(ref base_url) = config.openai_base_url {
+        let api_key = config.openai_api_key.as_deref().unwrap_or("");
+        let name = config.openai_provider_name.as_deref().unwrap_or("openai");
+        return Ok(Box::new(api::OpenAICompatProvider::new(
+            base_url, api_key, model, name,
+        )));
+    }
+
+    // Default: Anthropic
+    let auth = config
+        .resolve_auth()
+        .ok_or_else(|| anyhow::anyhow!(
+            "No authentication found. Set ANTHROPIC_API_KEY, configure ~/.config/claux/config.toml, or run `claude login`."
+        ))?;
+
+    Ok(Box::new(api::AnthropicProvider::new(auth, model)))
 }

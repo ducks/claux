@@ -4,20 +4,25 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Tool, ToolOutput, ToolRegistry};
-use crate::api;
-use crate::config::AuthMethod;
+use crate::api::Provider;
 use crate::context;
 use crate::permissions::{PermissionChecker, PermissionMode};
 use crate::query::Engine;
 
+/// Factory function to create a provider for sub-agents.
+pub type ProviderFactory = Box<dyn Fn() -> Box<dyn Provider> + Send + Sync>;
+
 pub struct AgentTool {
-    auth: AuthMethod,
+    make_provider: ProviderFactory,
     model: String,
 }
 
 impl AgentTool {
-    pub fn new(auth: AuthMethod, model: String) -> Self {
-        Self { auth, model }
+    pub fn new(make_provider: ProviderFactory, model: String) -> Self {
+        Self {
+            make_provider,
+            model,
+        }
     }
 }
 
@@ -64,14 +69,12 @@ impl Tool for AgentTool {
     async fn execute(&self, input: Value) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
 
-        // Build a child engine with restricted tools (no Agent to prevent recursion)
-        let client = api::Client::new(self.auth.clone(), &self.model);
+        let provider = (self.make_provider)();
         let tools = ToolRegistry::without_agent();
-        let permissions = PermissionChecker::new(PermissionMode::Bypass); // agents run unattended
+        let permissions = PermissionChecker::new(PermissionMode::Bypass);
 
-        let mut engine = Engine::new(client, tools, permissions, &self.model);
+        let mut engine = Engine::new(provider, tools, permissions, &self.model);
 
-        // Build a scoped system prompt
         let base_prompt = context::build_system_prompt().await?;
         let agent_prompt = format!(
             "{}\n\n# Agent Mode\n\
@@ -83,16 +86,13 @@ impl Tool for AgentTool {
         );
         engine.set_system_prompt(agent_prompt);
 
-        // Run the agent's query
         match engine.submit(&params.prompt).await {
             Ok(response) => {
                 let cost_summary = engine.cost.format_summary();
-
                 let mut content = response;
                 if !cost_summary.is_empty() {
                     content.push_str(&format!("\n\n[Agent {}]", cost_summary));
                 }
-
                 Ok(ToolOutput {
                     content,
                     is_error: false,
