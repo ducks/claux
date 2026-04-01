@@ -1,0 +1,54 @@
+[package]
+name = "claude-rs"
+version = "20260401.0.1"
+edition = "2021"
+description = "Claude Code rewritten in Rust"
+license = "MIT"
+
+[[bin]]
+name = "claude-rs"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# CLI
+clap = { version = "4.0", features = ["derive"] }
+
+# HTTP + streaming
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Terminal
+crossterm = "0.28"
+
+# File search
+walkdir = "2.5"
+glob = "0.3"
+
+# Content search (ripgrep)
+grep-regex = "0.1"
+grep-matcher = "0.1"
+grep-searcher = "0.1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Streaming
+futures-util = "0.3"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+uuid = { version = "1.0", features = ["v4"] }
