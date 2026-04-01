@@ -36,7 +36,7 @@ pub async fn build_system_prompt() -> Result<String> {
 }
 
 fn base_system_prompt() -> String {
-    r#"You are Claude, an AI assistant by Anthropic. You are running inside claude-rs, a Rust rewrite of Claude Code.
+    r#"You are Claude, an AI assistant by Anthropic. You are running inside claux, a Rust rewrite of Claude Code.
 
 You are an interactive agent that helps users with software engineering tasks. Use the tools available to you to assist the user.
 

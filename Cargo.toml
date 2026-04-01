@@ -1,12 +1,12 @@
 [package]
-name = "claude-rs"
+name = "claux"
 version = "20260401.0.1"
 edition = "2021"
 description = "Claude Code rewritten in Rust"
 license = "MIT"
 
 [[bin]]
-name = "claude-rs"
+name = "claux"
 path = "src/main.rs"
 
 [dependencies]

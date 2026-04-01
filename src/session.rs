@@ -29,7 +29,7 @@ pub enum SessionEntry {
 fn sessions_dir() -> Result<PathBuf> {
     let base = dirs::data_local_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?;
-    let dir = base.join("claude-rs").join("sessions");
+    let dir = base.join("claux").join("sessions");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }

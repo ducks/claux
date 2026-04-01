@@ -18,7 +18,7 @@ pub async fn run(mut engine: Engine, _config: &Config) -> Result<()> {
     // Create session
     let (_session_id, session_path) = session::create_session(engine.model())?;
 
-    println!("\x1b[1;36mclaude-rs\x1b[0m v{}", env!("CARGO_PKG_VERSION"));
+    println!("\x1b[1;36mclaux\x1b[0m v{}", env!("CARGO_PKG_VERSION"));
     println!("Model: \x1b[33m{}\x1b[0m", engine.model());
     println!("Type /help for commands, Ctrl+D to exit.\n");
 

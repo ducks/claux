@@ -30,7 +30,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Header
     let header = Paragraph::new(Line::from(vec![
-        Span::styled(" claude-rs ", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
+        Span::styled(" claux ", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!("v{}", env!("CARGO_PKG_VERSION")),
             Style::default().fg(GRAY),
