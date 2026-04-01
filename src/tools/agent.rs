@@ -5,18 +5,19 @@ use serde_json::{Value, json};
 
 use super::{Tool, ToolOutput, ToolRegistry};
 use crate::api;
+use crate::config::AuthMethod;
 use crate::context;
 use crate::permissions::{PermissionChecker, PermissionMode};
 use crate::query::Engine;
 
 pub struct AgentTool {
-    api_key: String,
+    auth: AuthMethod,
     model: String,
 }
 
 impl AgentTool {
-    pub fn new(api_key: String, model: String) -> Self {
-        Self { api_key, model }
+    pub fn new(auth: AuthMethod, model: String) -> Self {
+        Self { auth, model }
     }
 }
 
@@ -64,7 +65,7 @@ impl Tool for AgentTool {
         let params: Params = serde_json::from_value(input)?;
 
         // Build a child engine with restricted tools (no Agent to prevent recursion)
-        let client = api::Client::new(self.api_key.clone(), &self.model);
+        let client = api::Client::new(self.auth.clone(), &self.model);
         let tools = ToolRegistry::without_agent();
         let permissions = PermissionChecker::new(PermissionMode::Bypass); // agents run unattended
 
@@ -85,7 +86,6 @@ impl Tool for AgentTool {
         // Run the agent's query
         match engine.submit(&params.prompt).await {
             Ok(response) => {
-                // Merge cost tracking
                 let cost_summary = engine.cost.format_summary();
 
                 let mut content = response;

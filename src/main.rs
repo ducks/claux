@@ -34,10 +34,18 @@ async fn main() -> Result<()> {
     // Load config (global + project)
     let config = config::Config::load()?;
 
-    // Resolve API key
-    let api_key = config
-        .resolve_api_key()
-        .ok_or_else(|| anyhow::anyhow!("No API key found. Set ANTHROPIC_API_KEY or configure in ~/.claude-rs/config.toml"))?;
+    // Resolve auth
+    let auth = config
+        .resolve_auth()
+        .ok_or_else(|| anyhow::anyhow!(
+            "No authentication found. Set ANTHROPIC_API_KEY, configure ~/.claude-rs/config.toml, or run `claude login`."
+        ))?;
+
+    let auth_label = match &auth {
+        config::AuthMethod::ApiKey(_) => "API key",
+        config::AuthMethod::OAuthToken(_) => "Claude login (OAuth)",
+    };
+    tracing::info!("Auth: {}", auth_label);
 
     let model = args
         .model
@@ -47,8 +55,8 @@ async fn main() -> Result<()> {
 
     // One-shot mode: --print / -p
     if let Some(ref prompt) = args.prompt {
-        let client = api::Client::new(api_key.clone(), &model);
-        let tool_registry = tools::ToolRegistry::new_with_agent(api_key, model.clone());
+        let client = api::Client::new(auth.clone(), &model);
+        let tool_registry = tools::ToolRegistry::new_with_agent(auth, model.clone());
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
         let mut engine = query::Engine::new(client, tool_registry, permission_checker, &model);
 
@@ -61,8 +69,8 @@ async fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    let client = api::Client::new(api_key.clone(), &model);
-    let tool_registry = tools::ToolRegistry::new_with_agent(api_key, model.clone());
+    let client = api::Client::new(auth.clone(), &model);
+    let tool_registry = tools::ToolRegistry::new_with_agent(auth, model.clone());
     let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
     let mut engine = query::Engine::new(client, tool_registry, permission_checker, &model);
 

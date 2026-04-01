@@ -8,18 +8,20 @@ use anyhow::Result;
 use serde_json::json;
 use tokio::sync::mpsc;
 
+use crate::config::AuthMethod;
+
 /// Claude Messages API client with SSE streaming.
 pub struct Client {
-    api_key: String,
+    auth: AuthMethod,
     model: String,
     api_url: String,
     http: reqwest::Client,
 }
 
 impl Client {
-    pub fn new(api_key: String, model: &str) -> Self {
+    pub fn new(auth: AuthMethod, model: &str) -> Self {
         Self {
-            api_key,
+            auth,
             model: model.to_string(),
             api_url: "https://api.anthropic.com/v1/messages".to_string(),
             http: reqwest::Client::new(),
@@ -52,15 +54,21 @@ impl Client {
             body["tools"] = json!(tools);
         }
 
-        let response = self
+        let mut request = self
             .http
             .post(&self.api_url)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+            .header("content-type", "application/json");
+
+        // Set auth header based on method
+        request = match &self.auth {
+            AuthMethod::ApiKey(key) => request.header("x-api-key", key),
+            AuthMethod::OAuthToken(token) => {
+                request.header("Authorization", format!("Bearer {}", token))
+            }
+        };
+
+        let response = request.json(&body).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();

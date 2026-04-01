@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::api::ToolDefinition;
+use crate::config::AuthMethod;
 
 /// Output from a tool execution.
 #[derive(Debug, Clone)]
@@ -37,7 +38,7 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     /// Create a registry with all tools including Agent.
-    pub fn new_with_agent(api_key: String, model: String) -> Self {
+    pub fn new_with_agent(auth: AuthMethod, model: String) -> Self {
         Self {
             tools: vec![
                 Box::new(read::ReadTool),
@@ -46,7 +47,7 @@ impl ToolRegistry {
                 Box::new(glob::GlobTool),
                 Box::new(grep::GrepTool),
                 Box::new(bash::BashTool),
-                Box::new(agent::AgentTool::new(api_key, model)),
+                Box::new(agent::AgentTool::new(auth, model)),
             ],
         }
     }
@@ -129,7 +130,10 @@ mod tests {
 
     #[test]
     fn registry_with_agent_has_agent() {
-        let reg = ToolRegistry::new_with_agent("fake-key".into(), "model".into());
+        let reg = ToolRegistry::new_with_agent(
+            AuthMethod::ApiKey("fake-key".into()),
+            "model".into(),
+        );
         let defs = reg.definitions();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"Agent"));
