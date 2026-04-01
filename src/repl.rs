@@ -1,10 +1,11 @@
 use anyhow::Result;
-use std::io::{Write, stdout};
+use std::io::{BufRead, Write, stdout};
 use tokio::sync::mpsc;
 
 use crate::commands::{self, CommandResult};
 use crate::config::Config;
 use crate::context;
+use crate::permissions::PermissionResponse;
 use crate::query::{Engine, StreamEvent};
 use crate::session;
 
@@ -88,6 +89,18 @@ pub async fn run(mut engine: Engine, _config: &Config) -> Result<()> {
                         let _ = stdout().flush();
                         in_tool = false;
                     }
+                    StreamEvent::PermissionRequest {
+                        tool_name,
+                        summary,
+                        respond,
+                    } => {
+                        if in_tool {
+                            println!();
+                            in_tool = false;
+                        }
+                        let response = prompt_permission(&tool_name, &summary);
+                        let _ = respond.send(response);
+                    }
                     StreamEvent::Error(e) => {
                         eprintln!("\n\x1b[31mError: {}\x1b[0m", e);
                     }
@@ -115,6 +128,26 @@ pub async fn run(mut engine: Engine, _config: &Config) -> Result<()> {
     println!("\n{}", engine.cost.format_summary());
     println!("Goodbye!");
     Ok(())
+}
+
+/// Prompt the user for permission to execute a tool.
+fn prompt_permission(_tool_name: &str, summary: &str) -> PermissionResponse {
+    print!(
+        "\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m ",
+        summary
+    );
+    let _ = stdout().flush();
+
+    let mut input = String::new();
+    if std::io::stdin().lock().read_line(&mut input).is_err() {
+        return PermissionResponse::Deny;
+    }
+
+    match input.trim().to_lowercase().as_str() {
+        "y" | "yes" | "" => PermissionResponse::Allow,
+        "a" | "always" => PermissionResponse::AlwaysAllow,
+        _ => PermissionResponse::Deny,
+    }
 }
 
 /// Read a line of input from the user (cooked mode).

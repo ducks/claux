@@ -1,9 +1,9 @@
 use anyhow::Result;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::api::{self, ApiEvent, ContentBlock, Message};
 use crate::cost::CostTracker;
-use crate::permissions::{PermissionChecker, PermissionResult};
+use crate::permissions::{PermissionChecker, PermissionResponse, PermissionResult};
 use crate::tools::ToolRegistry;
 
 /// The query engine: conversation loop that sends messages, streams responses,
@@ -21,11 +21,17 @@ pub struct Engine {
     pub cost: CostTracker,
 }
 
-/// Callback for streaming text and status updates to the UI.
+/// Events sent from the engine to the UI during streaming.
 pub enum StreamEvent {
     Text(String),
     ToolStart { name: String, id: String },
     ToolResult { name: String, content: String, is_error: bool },
+    /// Permission prompt — UI must respond via the oneshot sender.
+    PermissionRequest {
+        tool_name: String,
+        summary: String,
+        respond: oneshot::Sender<PermissionResponse>,
+    },
     Error(String),
     Done,
 }
@@ -303,10 +309,30 @@ impl Engine {
                         content: format!("Permission denied: {}", reason),
                         is_error: true,
                     },
-                    PermissionResult::Ask(prompt) => {
-                        // TODO: interactive permission prompt via tx channel
-                        eprintln!("  [allow] {}", prompt);
-                        self.tools.execute(name, input.clone()).await?
+                    PermissionResult::Ask(summary) => {
+                        // Send permission request to UI, wait for response
+                        let (resp_tx, resp_rx) = oneshot::channel();
+                        let _ = tx
+                            .send(StreamEvent::PermissionRequest {
+                                tool_name: name.clone(),
+                                summary,
+                                respond: resp_tx,
+                            })
+                            .await;
+
+                        match resp_rx.await {
+                            Ok(PermissionResponse::Allow) => {
+                                self.tools.execute(name, input.clone()).await?
+                            }
+                            Ok(PermissionResponse::AlwaysAllow) => {
+                                self.permissions.always_allow(name);
+                                self.tools.execute(name, input.clone()).await?
+                            }
+                            Ok(PermissionResponse::Deny) | Err(_) => crate::tools::ToolOutput {
+                                content: "Permission denied by user.".to_string(),
+                                is_error: true,
+                            },
+                        }
                     }
                 };
 

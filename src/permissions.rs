@@ -22,17 +22,43 @@ pub enum PermissionResult {
     Ask(String),
 }
 
+/// User's response to a permission prompt.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PermissionResponse {
+    /// Allow this one time
+    Allow,
+    /// Deny this one time
+    Deny,
+    /// Always allow this tool for the rest of the session
+    AlwaysAllow,
+}
+
 pub struct PermissionChecker {
     mode: PermissionMode,
+    /// Tools the user has "always allowed" this session
+    session_allows: std::collections::HashSet<String>,
 }
 
 impl PermissionChecker {
     pub fn new(mode: PermissionMode) -> Self {
-        Self { mode }
+        Self {
+            mode,
+            session_allows: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Record that the user chose "always allow" for a tool.
+    pub fn always_allow(&mut self, tool_name: &str) {
+        self.session_allows.insert(tool_name.to_string());
     }
 
     /// Check whether a tool invocation should be allowed.
     pub fn check(&self, tool_name: &str, input: &serde_json::Value, is_read_only: bool) -> PermissionResult {
+        // Session-level always-allow overrides
+        if self.session_allows.contains(tool_name) {
+            return PermissionResult::Allow;
+        }
+
         match self.mode {
             PermissionMode::Bypass => PermissionResult::Allow,
 
