@@ -78,33 +78,55 @@ async fn git_status() -> Option<String> {
 }
 
 async fn read_claude_md() -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
     let cwd = std::env::current_dir().ok()?;
-    let candidates = [
-        cwd.join("CLAUDE.md"),
-        cwd.join(".claude").join("CLAUDE.md"),
-    ];
 
-    for path in &candidates {
+    // 1. Check cwd and .claude/ subdir
+    for name in &["CLAUDE.md", ".claude/CLAUDE.md"] {
+        let path = cwd.join(name);
         if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                return Some(content);
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                parts.push(format!("# {} ({})\n{}", name, cwd.display(), content));
             }
         }
     }
 
-    // Walk up to find CLAUDE.md in parent dirs
+    // 2. Walk up parent directories
     let mut dir = cwd.as_path();
     while let Some(parent) = dir.parent() {
-        let path = parent.join("CLAUDE.md");
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                return Some(content);
+        // Don't re-read cwd
+        if parent == cwd {
+            dir = parent;
+            continue;
+        }
+        for name in &["CLAUDE.md", ".claude/CLAUDE.md"] {
+            let path = parent.join(name);
+            if path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    parts.push(format!("# {} ({})\n{}", name, parent.display(), content));
+                }
             }
         }
         dir = parent;
     }
 
-    None
+    // 3. Check ~/.claude/CLAUDE.md (user-global)
+    if let Ok(home) = std::env::var("HOME") {
+        let path = std::path::PathBuf::from(&home)
+            .join(".claude")
+            .join("CLAUDE.md");
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                parts.push(format!("# ~/.claude/CLAUDE.md\n{}", content));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
 }
 
 async fn run_cmd(program: &str, args: &[&str]) -> Option<String> {

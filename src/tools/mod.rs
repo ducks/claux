@@ -1,3 +1,4 @@
+pub(crate) mod agent;
 mod bash;
 mod edit;
 mod glob;
@@ -35,7 +36,23 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn new() -> Self {
+    /// Create a registry with all tools including Agent.
+    pub fn new_with_agent(api_key: String, model: String) -> Self {
+        Self {
+            tools: vec![
+                Box::new(read::ReadTool),
+                Box::new(write::WriteTool),
+                Box::new(edit::EditTool),
+                Box::new(glob::GlobTool),
+                Box::new(grep::GrepTool),
+                Box::new(bash::BashTool),
+                Box::new(agent::AgentTool::new(api_key, model)),
+            ],
+        }
+    }
+
+    /// Create a registry without Agent (for sub-agents to prevent recursion).
+    pub fn without_agent() -> Self {
         Self {
             tools: vec![
                 Box::new(read::ReadTool),
@@ -46,6 +63,11 @@ impl ToolRegistry {
                 Box::new(bash::BashTool),
             ],
         }
+    }
+
+    /// Create a basic registry (no Agent). Kept for backwards compat.
+    pub fn new() -> Self {
+        Self::without_agent()
     }
 
     /// Get tool definitions for the API request.

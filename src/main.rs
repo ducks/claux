@@ -47,8 +47,8 @@ async fn main() -> Result<()> {
 
     // One-shot mode: --print / -p
     if let Some(ref prompt) = args.prompt {
-        let client = api::Client::new(api_key, &model);
-        let tool_registry = tools::ToolRegistry::new();
+        let client = api::Client::new(api_key.clone(), &model);
+        let tool_registry = tools::ToolRegistry::new_with_agent(api_key, model.clone());
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
         let mut engine = query::Engine::new(client, tool_registry, permission_checker, &model);
 
@@ -61,8 +61,8 @@ async fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    let client = api::Client::new(api_key, &model);
-    let tool_registry = tools::ToolRegistry::new();
+    let client = api::Client::new(api_key.clone(), &model);
+    let tool_registry = tools::ToolRegistry::new_with_agent(api_key, model.clone());
     let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
     let mut engine = query::Engine::new(client, tool_registry, permission_checker, &model);
 

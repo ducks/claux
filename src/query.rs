@@ -174,9 +174,23 @@ impl Engine {
         ))
     }
 
+    /// Auto-compact if conversation is getting large.
+    /// Rough heuristic: compact when we exceed 80 messages.
+    async fn maybe_auto_compact(&mut self) {
+        const AUTO_COMPACT_THRESHOLD: usize = 80;
+        if self.messages.len() > AUTO_COMPACT_THRESHOLD {
+            tracing::info!(
+                "Auto-compacting: {} messages exceeds threshold",
+                self.messages.len()
+            );
+            let _ = self.compact().await;
+        }
+    }
+
     /// Submit a user message and run the full turn loop (chat → tools → chat → ...).
     /// Returns the final assistant text response.
     pub async fn submit(&mut self, user_input: &str) -> Result<String> {
+        self.maybe_auto_compact().await;
         self.messages.push(Message::user(user_input));
 
         let mut full_response = String::new();
@@ -280,6 +294,7 @@ impl Engine {
         user_input: &str,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
+        self.maybe_auto_compact().await;
         self.messages.push(Message::user(user_input));
 
         loop {
