@@ -27,4 +27,8 @@ pub struct Cli {
     /// Debug output
     #[arg(long)]
     pub debug: bool,
+
+    /// Use full-screen TUI instead of inline REPL
+    #[arg(long)]
+    pub tui: bool,
 }

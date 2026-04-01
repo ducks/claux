@@ -85,6 +85,50 @@ impl Engine {
         self.messages.len()
     }
 
+    /// Get tool definitions for the API.
+    pub fn tool_definitions(&self) -> Vec<crate::api::ToolDefinition> {
+        self.tools.definitions()
+    }
+
+    /// Start a streaming API call. Returns the event receiver.
+    pub async fn start_stream(
+        &self,
+        tool_defs: &[crate::api::ToolDefinition],
+    ) -> Result<mpsc::Receiver<ApiEvent>> {
+        self.client
+            .stream(&self.messages, &self.system_prompt, tool_defs, self.max_tokens)
+            .await
+    }
+
+    /// Check permission for a tool.
+    pub fn check_permission(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        is_read_only: bool,
+    ) -> PermissionResult {
+        self.permissions.check(tool_name, input, is_read_only)
+    }
+
+    /// Check if a tool is read-only.
+    pub fn is_tool_read_only(&self, name: &str) -> bool {
+        self.tools.is_read_only(name)
+    }
+
+    /// Execute a tool by name.
+    pub async fn execute_tool(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+    ) -> Result<crate::tools::ToolOutput> {
+        self.tools.execute(name, input).await
+    }
+
+    /// Record a tool as always-allowed for the session.
+    pub fn always_allow_tool(&mut self, name: &str) {
+        self.permissions.always_allow(name);
+    }
+
     /// Compact the conversation by summarizing it via the API.
     pub async fn compact(&mut self) -> Result<String> {
         if self.messages.is_empty() {

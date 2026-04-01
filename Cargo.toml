@@ -31,6 +31,7 @@ thiserror = "2.0"
 
 # Terminal
 crossterm = "0.28"
+ratatui = "0.29"
 
 # File search
 walkdir = "2.5"

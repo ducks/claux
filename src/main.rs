@@ -9,6 +9,7 @@ mod query;
 mod repl;
 mod session;
 mod tools;
+mod tui;
 
 use anyhow::Result;
 use clap::Parser;
@@ -89,5 +90,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    repl::run(engine, &config).await
+    if args.tui {
+        tui::run(engine, &config).await
+    } else {
+        repl::run(engine, &config).await
+    }
 }
