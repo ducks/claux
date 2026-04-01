@@ -41,6 +41,10 @@ pub struct Config {
     #[serde(default)]
     pub openai_api_key: Option<String>,
 
+    /// Shell command that returns the OpenAI-compatible API key
+    #[serde(default)]
+    pub openai_api_key_cmd: Option<String>,
+
     /// Display name for the provider (e.g. "ollama", "openai", "lmstudio")
     #[serde(default)]
     pub openai_provider_name: Option<String>,
@@ -69,6 +73,7 @@ impl Default for Config {
             max_tokens: default_max_tokens(),
             openai_base_url: None,
             openai_api_key: None,
+            openai_api_key_cmd: None,
             openai_provider_name: None,
         }
     }
@@ -141,6 +146,28 @@ impl Config {
         // Fall back to Claude Code OAuth credentials
         if let Some(token) = Self::read_claude_oauth_token() {
             return Some(AuthMethod::OAuthToken(token));
+        }
+
+        None
+    }
+
+    /// Resolve the OpenAI API key: direct value, then command.
+    pub fn resolve_openai_key(&self) -> Option<String> {
+        if let Some(ref key) = self.openai_api_key {
+            if !key.is_empty() {
+                return Some(key.clone());
+            }
+        }
+
+        if let Some(ref cmd) = self.openai_api_key_cmd {
+            if let Ok(output) = std::process::Command::new("sh").arg("-c").arg(cmd).output() {
+                if output.status.success() {
+                    let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !key.is_empty() {
+                        return Some(key);
+                    }
+                }
+            }
         }
 
         None
