@@ -160,12 +160,22 @@ impl Config {
         }
 
         if let Some(ref cmd) = self.openai_api_key_cmd {
-            if let Ok(output) = std::process::Command::new("sh").arg("-c").arg(cmd).output() {
-                if output.status.success() {
-                    let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !key.is_empty() {
-                        return Some(key);
+            match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
+                Ok(output) => {
+                    if output.status.success() {
+                        let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !key.is_empty() {
+                            tracing::debug!("openai_api_key_cmd succeeded, key len={}", key.len());
+                            return Some(key);
+                        }
+                        tracing::warn!("openai_api_key_cmd returned empty output");
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::warn!("openai_api_key_cmd failed ({}): {}", output.status, stderr.trim());
                     }
+                }
+                Err(e) => {
+                    tracing::warn!("openai_api_key_cmd exec error: {}", e);
                 }
             }
         }

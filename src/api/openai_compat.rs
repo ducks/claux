@@ -162,6 +162,9 @@ impl Provider for OpenAICompatProvider {
             body["tools"] = json!(Self::convert_tools(tools));
         }
 
+        tracing::debug!("OpenAI request: {} model={}", url, self.model);
+        tracing::debug!("API key present: {}, len: {}", !self.api_key.is_empty(), self.api_key.len());
+
         let mut request = self
             .http
             .post(&url)
