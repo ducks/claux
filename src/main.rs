@@ -110,10 +110,10 @@ fn build_provider(
 ) -> Result<Box<dyn api::Provider>> {
     // Check for OpenAI-compatible provider in config
     if let Some(ref base_url) = config.openai_base_url {
-        let api_key = config.openai_api_key.as_deref().unwrap_or("");
+        let api_key = config.resolve_openai_key().unwrap_or_default();
         let name = config.openai_provider_name.as_deref().unwrap_or("openai");
         return Ok(Box::new(api::OpenAICompatProvider::new(
-            base_url, api_key, model, name,
+            base_url, &api_key, model, name,
         )));
     }
 
