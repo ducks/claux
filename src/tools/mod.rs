@@ -10,8 +10,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::api::ToolDefinition;
-use crate::config::AuthMethod;
+use crate::api::{Provider, ToolDefinition};
 
 /// Output from a tool execution.
 #[derive(Debug, Clone)]
@@ -37,8 +36,11 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Create a registry with all tools including Agent.
-    pub fn new_with_agent(auth: AuthMethod, model: String) -> Self {
+    /// Create a registry with Agent tool using a provider factory.
+    pub fn new_with_agent_factory(
+        factory: agent::ProviderFactory,
+        model: String,
+    ) -> Self {
         Self {
             tools: vec![
                 Box::new(read::ReadTool),
@@ -47,7 +49,7 @@ impl ToolRegistry {
                 Box::new(glob::GlobTool),
                 Box::new(grep::GrepTool),
                 Box::new(bash::BashTool),
-                Box::new(agent::AgentTool::new(auth, model)),
+                Box::new(agent::AgentTool::new(factory, model)),
             ],
         }
     }
@@ -66,7 +68,7 @@ impl ToolRegistry {
         }
     }
 
-    /// Create a basic registry (no Agent). Kept for backwards compat.
+    /// Create a basic registry (no Agent).
     pub fn new() -> Self {
         Self::without_agent()
     }
@@ -130,10 +132,16 @@ mod tests {
 
     #[test]
     fn registry_with_agent_has_agent() {
-        let reg = ToolRegistry::new_with_agent(
-            AuthMethod::ApiKey("fake-key".into()),
-            "model".into(),
-        );
+        use crate::api::AnthropicProvider;
+        use crate::config::AuthMethod;
+
+        let factory: agent::ProviderFactory = Box::new(|| {
+            Box::new(AnthropicProvider::new(
+                AuthMethod::ApiKey("fake".into()),
+                "model",
+            ))
+        });
+        let reg = ToolRegistry::new_with_agent_factory(factory, "model".into());
         let defs = reg.definitions();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"Agent"));
