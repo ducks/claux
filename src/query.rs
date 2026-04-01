@@ -57,6 +57,73 @@ impl Engine {
         &self.messages
     }
 
+    pub fn messages_mut(&mut self) -> &mut Vec<Message> {
+        &mut self.messages
+    }
+
+    pub fn set_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn set_model(&mut self, model: &str) {
+        self.model = model.to_string();
+        self.client.set_model(model);
+        self.cost = CostTracker::new(model);
+    }
+
+    pub fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Compact the conversation by summarizing it via the API.
+    pub async fn compact(&mut self) -> Result<String> {
+        if self.messages.is_empty() {
+            return Ok("Nothing to compact.".to_string());
+        }
+
+        // Build a summary request
+        let summary_prompt = "Summarize the conversation so far in a concise paragraph. \
+            Focus on what was discussed, what decisions were made, what files were modified, \
+            and any outstanding tasks. Be specific about file paths and changes.";
+
+        // Temporarily add the summary request
+        let mut summary_messages = self.messages.clone();
+        summary_messages.push(Message::user(summary_prompt));
+
+        let mut rx = self
+            .client
+            .stream(&summary_messages, &self.system_prompt, &[], self.max_tokens)
+            .await?;
+
+        let mut summary = String::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                ApiEvent::Text(t) => summary.push_str(&t),
+                ApiEvent::Usage(usage) => self.cost.add_usage(&usage),
+                ApiEvent::Done => break,
+                ApiEvent::Error(e) => return Err(anyhow::anyhow!("Compact error: {}", e)),
+                _ => {}
+            }
+        }
+
+        let old_count = self.messages.len();
+
+        // Replace conversation with the summary
+        self.messages = vec![
+            Message::user("Here is a summary of our conversation so far:"),
+            Message::assistant_text(&summary),
+        ];
+
+        Ok(format!(
+            "Compacted {} messages into summary.\n\n\x1b[2m{}\x1b[0m",
+            old_count, summary
+        ))
+    }
+
     /// Submit a user message and run the full turn loop (chat → tools → chat → ...).
     /// Returns the final assistant text response.
     pub async fn submit(&mut self, user_input: &str) -> Result<String> {

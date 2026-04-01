@@ -9,16 +9,16 @@ use crate::query::{Engine, StreamEvent};
 use crate::session;
 
 /// Run the interactive REPL.
-pub async fn run(mut engine: Engine, config: &Config) -> Result<()> {
+pub async fn run(mut engine: Engine, _config: &Config) -> Result<()> {
     // Build system prompt
     let system_prompt = context::build_system_prompt().await?;
     engine.set_system_prompt(system_prompt);
 
     // Create session
-    let (_session_id, session_path) = session::create_session(&config.model)?;
+    let (_session_id, session_path) = session::create_session(engine.model())?;
 
     println!("\x1b[1;36mclaude-rs\x1b[0m v{}", env!("CARGO_PKG_VERSION"));
-    println!("Model: \x1b[33m{}\x1b[0m", config.model);
+    println!("Model: \x1b[33m{}\x1b[0m", engine.model());
     println!("Type /help for commands, Ctrl+D to exit.\n");
 
     loop {
@@ -34,11 +34,19 @@ pub async fn run(mut engine: Engine, config: &Config) -> Result<()> {
         }
 
         // Check for slash commands
-        if let Some(result) = commands::handle_command(trimmed, &engine.cost) {
+        if let Some(result) = commands::parse_command(trimmed) {
             match result {
+                CommandResult::Text(ref text) if text == "__cost__" => {
+                    println!("{}", commands::format_cost(&engine));
+                }
                 CommandResult::Text(text) => println!("{}", text),
                 CommandResult::Exit => break,
-                CommandResult::Skip => {}
+                CommandResult::Async(async_cmd) => {
+                    match commands::execute_async(async_cmd, &mut engine).await {
+                        Ok(output) => println!("{}", output),
+                        Err(e) => eprintln!("\x1b[31mError: {}\x1b[0m", e),
+                    }
+                }
             }
             continue;
         }
@@ -71,10 +79,7 @@ pub async fn run(mut engine: Engine, config: &Config) -> Result<()> {
                         let _ = stdout().flush();
                         in_tool = true;
                     }
-                    StreamEvent::ToolResult {
-                        is_error,
-                        ..
-                    } => {
+                    StreamEvent::ToolResult { is_error, .. } => {
                         if is_error {
                             print!("\x1b[31m✗\x1b[0m");
                         } else {

@@ -63,7 +63,31 @@ async fn main() -> Result<()> {
     let client = api::Client::new(api_key, &model);
     let tool_registry = tools::ToolRegistry::new();
     let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
-    let engine = query::Engine::new(client, tool_registry, permission_checker, &model);
+    let mut engine = query::Engine::new(client, tool_registry, permission_checker, &model);
+
+    // Resume a previous session if requested
+    if let Some(ref session_id) = args.resume {
+        let sessions = session::list_sessions()?;
+        let found = sessions
+            .iter()
+            .find(|(sid, _)| sid == session_id || sid.starts_with(session_id));
+
+        match found {
+            Some((_, path)) => {
+                let (meta, messages) = session::load_session(path)?;
+                engine.set_messages(messages);
+                eprintln!(
+                    "Resumed session {} ({}, {} messages)",
+                    meta.id,
+                    meta.model,
+                    engine.message_count()
+                );
+            }
+            None => {
+                eprintln!("Session not found: {}. Starting new session.", session_id);
+            }
+        }
+    }
 
     repl::run(engine, &config).await
 }

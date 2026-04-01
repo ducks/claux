@@ -26,6 +26,10 @@ impl Client {
         }
     }
 
+    pub fn set_model(&mut self, model: &str) {
+        self.model = model.to_string();
+    }
+
     /// Send a streaming chat request. Returns a channel receiver of events.
     pub async fn stream(
         &self,
