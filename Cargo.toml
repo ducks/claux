@@ -2,7 +2,7 @@
 name = "claux"
 version = "20260401.0.1"
 edition = "2021"
-description = "Claude Code rewritten in Rust"
+description = "Terminal AI coding assistant with tool execution"
 license = "MIT"
 
 [[bin]]
