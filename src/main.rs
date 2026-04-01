@@ -40,6 +40,9 @@ async fn main() -> Result<()> {
         .unwrap_or(&config.model)
         .to_string();
 
+    tracing::debug!("Config loaded: openai_base_url={:?} openai_api_key_cmd={:?} model={}",
+        config.openai_base_url, config.openai_api_key_cmd, config.model);
+
     // Build the provider
     let provider = build_provider(&config, &model)?;
     let provider_name = provider.name().to_string();
