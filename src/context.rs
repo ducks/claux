@@ -3,9 +3,13 @@ use anyhow::Result;
 /// Build the system prompt from environment context.
 /// Mirrors Claude Code's context.ts: git status, CLAUDE.md, date, env info.
 pub async fn build_system_prompt() -> Result<String> {
+    build_system_prompt_for_model("an AI assistant").await
+}
+
+pub async fn build_system_prompt_for_model(model: &str) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
 
-    parts.push(base_system_prompt());
+    parts.push(base_system_prompt(model));
 
     // Environment
     parts.push(format!("# Environment"));
@@ -35,8 +39,8 @@ pub async fn build_system_prompt() -> Result<String> {
     Ok(parts.join("\n"))
 }
 
-fn base_system_prompt() -> String {
-    r#"You are Claude, an AI assistant by Anthropic. You are running inside claux, a Rust rewrite of Claude Code.
+fn base_system_prompt(model: &str) -> String {
+    format!(r#"You are {}, running inside claux, a terminal AI coding assistant.
 
 You are an interactive agent that helps users with software engineering tasks. Use the tools available to you to assist the user.
 
@@ -52,8 +56,7 @@ You are an interactive agent that helps users with software engineering tasks. U
 - Be concise and direct
 - Lead with the answer, not the reasoning
 - When referencing code, include file_path:line_number
-"#
-    .to_string()
+"#, model)
 }
 
 async fn git_status() -> Option<String> {

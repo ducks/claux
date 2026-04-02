@@ -12,7 +12,7 @@ use crate::session;
 /// Run the interactive REPL.
 pub async fn run(mut engine: Engine, _config: &Config) -> Result<()> {
     // Build system prompt
-    let system_prompt = context::build_system_prompt().await?;
+    let system_prompt = context::build_system_prompt_for_model(engine.model()).await?;
     engine.set_system_prompt(system_prompt);
 
     // Create session
