@@ -2,6 +2,7 @@ use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::api::{self, ApiEvent, ContentBlock, Message, Provider};
+use crate::compact::{self, CompactStrategy};
 use crate::cost::CostTracker;
 use crate::permissions::{PermissionChecker, PermissionResponse, PermissionResult};
 use crate::tools::ToolRegistry;
@@ -127,18 +128,51 @@ impl Engine {
         self.permissions.always_allow(name);
     }
 
-    /// Compact the conversation by summarizing it via the API.
+    /// Compact the conversation using the multi-strategy pipeline.
+    /// Strategies (in order of aggressiveness):
+    /// 1. Snip — collapse old messages, keep recent ones
+    /// 2. Summarize — send conversation to API for full summary
     pub async fn compact(&mut self) -> Result<String> {
         if self.messages.is_empty() {
             return Ok("Nothing to compact.".to_string());
         }
 
-        // Build a summary request
+        let old_count = self.messages.len();
+        let old_tokens = compact::estimate_tokens(&self.messages);
+
+        // Try snip first (cheaper, no API call)
+        if let Some(snipped) = compact::snip_old_messages(&self.messages, 10) {
+            let new_tokens = compact::estimate_tokens(&snipped);
+            self.messages = snipped;
+            tracing::info!(
+                "Snip compaction: {} msgs → {}, ~{} → ~{} tokens",
+                old_count,
+                self.messages.len(),
+                old_tokens,
+                new_tokens
+            );
+
+            // If snip freed enough, we're done
+            let ctx_window = compact::context_window_for_model(&self.model);
+            if new_tokens < ctx_window * 70 / 100 {
+                return Ok(format!(
+                    "Snipped {} old messages (~{} tokens freed)",
+                    old_count - self.messages.len() + 1, // +1 for snip marker
+                    old_tokens - new_tokens
+                ));
+            }
+        }
+
+        // Full summarization
+        self.summarize_conversation().await
+    }
+
+    /// Full API-based conversation summary.
+    async fn summarize_conversation(&mut self) -> Result<String> {
         let summary_prompt = "Summarize the conversation so far in a concise paragraph. \
             Focus on what was discussed, what decisions were made, what files were modified, \
             and any outstanding tasks. Be specific about file paths and changes.";
 
-        // Temporarily add the summary request
         let mut summary_messages = self.messages.clone();
         summary_messages.push(Message::user(summary_prompt));
 
@@ -160,7 +194,6 @@ impl Engine {
 
         let old_count = self.messages.len();
 
-        // Replace conversation with the summary
         self.messages = vec![
             Message::user("Here is a summary of our conversation so far:"),
             Message::assistant_text(&summary),
@@ -172,37 +205,78 @@ impl Engine {
         ))
     }
 
-    /// Auto-compact if conversation is getting large.
-    /// Rough heuristic: compact when we exceed 80 messages.
+    /// Auto-compact based on estimated token usage vs context window.
     async fn maybe_auto_compact(&mut self) {
-        const AUTO_COMPACT_THRESHOLD: usize = 80;
-        if self.messages.len() > AUTO_COMPACT_THRESHOLD {
-            tracing::info!(
-                "Auto-compacting: {} messages exceeds threshold",
-                self.messages.len()
-            );
-            let _ = self.compact().await;
+        let ctx_window = compact::context_window_for_model(&self.model);
+        match compact::should_compact(&self.messages, ctx_window) {
+            CompactStrategy::None => {}
+            CompactStrategy::Snip => {
+                tracing::info!("Auto-snip: token estimate approaching context limit");
+                if let Some(snipped) = compact::snip_old_messages(&self.messages, 10) {
+                    self.messages = snipped;
+                }
+            }
+            CompactStrategy::Summarize => {
+                tracing::info!("Auto-summarize: token estimate near context limit");
+                let _ = self.compact().await;
+            }
         }
     }
 
+    /// Check if an API error is a prompt-too-long error (413 or specific error message).
+    fn is_prompt_too_long(err: &str) -> bool {
+        err.contains("413")
+            || err.contains("prompt is too long")
+            || err.contains("maximum context length")
+            || err.contains("max_tokens")
+            || err.contains("context_length_exceeded")
+    }
+
+    /// Check if an API error is a max-output-tokens error.
+    fn is_max_output_tokens(err: &str) -> bool {
+        err.contains("max_output_tokens") || err.contains("max_tokens_exceeded")
+    }
+
     /// Submit a user message and run the full turn loop (chat → tools → chat → ...).
+    /// Includes error recovery for prompt-too-long and max-output-tokens.
     /// Returns the final assistant text response.
     pub async fn submit(&mut self, user_input: &str) -> Result<String> {
         self.maybe_auto_compact().await;
         self.messages.push(Message::user(user_input));
 
         let mut full_response = String::new();
+        let mut recovery_attempts = 0;
+        const MAX_RECOVERY: u32 = 3;
 
         // Turn loop: keep going as long as the assistant requests tool use
         loop {
             let tool_defs = self.tools.definitions();
-            let mut rx = self
+            let stream_result = self
                 .provider
                 .stream(&self.messages, &self.system_prompt, &tool_defs, self.max_tokens)
-                .await?;
+                .await;
+
+            // Handle connection-level errors (413, etc.)
+            let mut rx = match stream_result {
+                Ok(rx) => rx,
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if Self::is_prompt_too_long(&err_str) && recovery_attempts < MAX_RECOVERY {
+                        recovery_attempts += 1;
+                        tracing::warn!(
+                            "Prompt too long (attempt {}), compacting and retrying",
+                            recovery_attempts
+                        );
+                        self.compact().await?;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
 
             let mut text_buf = String::new();
-            let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new(); // (id, name, input)
+            let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
+            let mut had_error = false;
 
             while let Some(event) = rx.recv().await {
                 match event {
@@ -217,9 +291,37 @@ impl Engine {
                     }
                     ApiEvent::Done => break,
                     ApiEvent::Error(e) => {
+                        // Check for recoverable stream-level errors
+                        if Self::is_prompt_too_long(&e) && recovery_attempts < MAX_RECOVERY {
+                            recovery_attempts += 1;
+                            tracing::warn!(
+                                "Prompt too long during stream (attempt {}), compacting",
+                                recovery_attempts
+                            );
+                            had_error = true;
+                            break;
+                        }
+                        if Self::is_max_output_tokens(&e) && self.max_tokens < 64_000 {
+                            tracing::warn!(
+                                "Max output tokens hit, escalating {} -> {}",
+                                self.max_tokens,
+                                self.max_tokens * 2
+                            );
+                            self.max_tokens = (self.max_tokens * 2).min(64_000);
+                            had_error = true;
+                            break;
+                        }
                         return Err(anyhow::anyhow!("API error: {}", e));
                     }
                 }
+            }
+
+            // If we hit a recoverable error, compact/adjust and retry
+            if had_error {
+                if recovery_attempts > 0 {
+                    self.compact().await?;
+                }
+                continue;
             }
 
             // Build the assistant message
@@ -247,7 +349,7 @@ impl Engine {
                 break;
             }
 
-            // Execute tools and collect results
+            // Execute tools and collect results (with output truncation)
             let mut result_blocks = Vec::new();
             for (id, name, input) in &tool_uses {
                 let is_read_only = self.tools.is_read_only(name);
@@ -260,17 +362,21 @@ impl Engine {
                         is_error: true,
                     },
                     PermissionResult::Ask(prompt) => {
-                        // In non-interactive (--print) mode, deny
-                        // In interactive mode, the REPL handles this
-                        // For now, auto-allow (the REPL will override this)
                         eprintln!("  [tool] {} — auto-allowing", prompt);
                         self.tools.execute(name, input.clone()).await?
                     }
                 };
 
+                // Truncate large tool outputs to avoid context overflow
+                let (content, was_truncated) =
+                    compact::truncate_tool_output(&tool_output.content);
+                if was_truncated {
+                    tracing::debug!("Truncated tool output for {}", name);
+                }
+
                 result_blocks.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
-                    content: tool_output.content,
+                    content,
                     is_error: if tool_output.is_error {
                         Some(true)
                     } else {
@@ -279,7 +385,6 @@ impl Engine {
                 });
             }
 
-            // Push tool results as a user message and continue the loop
             self.messages.push(Message::tool_results(result_blocks));
         }
 
@@ -295,15 +400,36 @@ impl Engine {
         self.maybe_auto_compact().await;
         self.messages.push(Message::user(user_input));
 
+        let mut recovery_attempts = 0;
+        const MAX_RECOVERY: u32 = 3;
+
         loop {
             let tool_defs = self.tools.definitions();
-            let mut rx = self
+            let stream_result = self
                 .provider
                 .stream(&self.messages, &self.system_prompt, &tool_defs, self.max_tokens)
-                .await?;
+                .await;
+
+            let mut rx = match stream_result {
+                Ok(rx) => rx,
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if Self::is_prompt_too_long(&err_str) && recovery_attempts < MAX_RECOVERY {
+                        recovery_attempts += 1;
+                        let _ = tx.send(StreamEvent::Text(
+                            "\n[compacting conversation...]\n".to_string(),
+                        )).await;
+                        self.compact().await?;
+                        continue;
+                    }
+                    let _ = tx.send(StreamEvent::Error(err_str.clone())).await;
+                    return Err(e);
+                }
+            };
 
             let mut text_buf = String::new();
             let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
+            let mut had_error = false;
 
             while let Some(event) = rx.recv().await {
                 match event {
@@ -325,10 +451,28 @@ impl Engine {
                     }
                     ApiEvent::Done => break,
                     ApiEvent::Error(e) => {
+                        if Self::is_prompt_too_long(&e) && recovery_attempts < MAX_RECOVERY {
+                            recovery_attempts += 1;
+                            let _ = tx.send(StreamEvent::Text(
+                                "\n[compacting conversation...]\n".to_string(),
+                            )).await;
+                            self.compact().await?;
+                            had_error = true;
+                            break;
+                        }
+                        if Self::is_max_output_tokens(&e) && self.max_tokens < 64_000 {
+                            self.max_tokens = (self.max_tokens * 2).min(64_000);
+                            had_error = true;
+                            break;
+                        }
                         let _ = tx.send(StreamEvent::Error(e.clone())).await;
                         return Err(anyhow::anyhow!("API error: {}", e));
                     }
                 }
+            }
+
+            if had_error {
+                continue;
             }
 
             // Record assistant message
@@ -393,17 +537,24 @@ impl Engine {
                     }
                 };
 
+                // Truncate large tool outputs
+                let (content, was_truncated) =
+                    compact::truncate_tool_output(&tool_output.content);
+                if was_truncated {
+                    tracing::debug!("Truncated tool output for {}", name);
+                }
+
                 let _ = tx
                     .send(StreamEvent::ToolResult {
                         name: name.clone(),
-                        content: tool_output.content.clone(),
+                        content: content.clone(),
                         is_error: tool_output.is_error,
                     })
                     .await;
 
                 result_blocks.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
-                    content: tool_output.content,
+                    content,
                     is_error: if tool_output.is_error {
                         Some(true)
                     } else {
