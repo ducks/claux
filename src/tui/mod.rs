@@ -337,9 +337,8 @@ async fn drive_streaming(
                             terminal.draw(|f| ui::draw(f, app))?;
                         }
                         crate::api::ApiEvent::ToolUse { id, name, input } => {
-                            let summary = engine.summarize_tool(&name, &input);
-                            app.stream_buffer.push_str(&format!("\n  [{}] {} ", name, summary));
-                            terminal.draw(|f| ui::draw(f, app))?;
+                            // Don't show tool starts yet — show them with results
+                            // to keep summaries and checkmarks aligned
                             tool_uses.push((id, name, input));
                         }
                         crate::api::ApiEvent::Usage(usage) => {
@@ -392,9 +391,14 @@ async fn drive_streaming(
             break;
         }
 
-        // Execute tools
+        // Execute tools — show summary before each, checkmark after
         let mut result_blocks = Vec::new();
         for (id, name, input) in &tool_uses {
+            // Show tool summary before execution
+            let summary = engine.summarize_tool(name, input);
+            app.stream_buffer.push_str(&format!("\n  [{}] {} ", name, summary));
+            terminal.draw(|f| ui::draw(f, app))?;
+
             let is_read_only = engine.is_tool_read_only(name);
             let perm = engine.check_permission(name, input, is_read_only);
 
