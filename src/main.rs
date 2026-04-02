@@ -1,6 +1,7 @@
 mod api;
 mod cli;
 mod commands;
+mod compact;
 mod config;
 mod context;
 mod cost;
