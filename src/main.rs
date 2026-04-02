@@ -6,6 +6,7 @@ mod config;
 mod context;
 mod cost;
 mod permissions;
+mod plugin;
 mod query;
 mod repl;
 mod session;
@@ -35,6 +36,19 @@ async fn main() -> Result<()> {
     // Load config (global + project)
     let config = config::Config::load()?;
 
+    // Build plugin registry
+    let mut plugin_registry = plugin::PluginRegistry::new();
+    for plugin_config in &config.plugins {
+        plugin_registry.add(Box::new(plugin::CommandPlugin::new(
+            &plugin_config.name,
+            &plugin_config.command,
+            &plugin_config.args,
+        )));
+    }
+    if !plugin_registry.is_empty() {
+        tracing::info!("Loaded {} plugin(s)", plugin_registry.len());
+    }
+
     let model = args
         .model
         .as_deref()
@@ -63,7 +77,7 @@ async fn main() -> Result<()> {
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
         let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
 
-        let system_prompt = context::build_system_prompt_for_model(&model).await?;
+        let system_prompt = context::build_system_prompt_for_model(&model, Some(&plugin_registry)).await?;
         engine.set_system_prompt(system_prompt);
 
         let response = engine.submit(prompt).await?;
@@ -75,6 +89,10 @@ async fn main() -> Result<()> {
     let tool_registry = tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
     let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
     let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
+
+    // Build system prompt with plugins for REPL mode
+    let system_prompt = context::build_system_prompt_for_model(&model, Some(&plugin_registry)).await?;
+    engine.set_system_prompt(system_prompt);
 
     // Resume a previous session if requested
     if let Some(ref session_id) = args.resume {
@@ -101,9 +119,9 @@ async fn main() -> Result<()> {
     }
 
     if args.tui {
-        tui::run(engine, &config).await
+        tui::run(engine, &config, &plugin_registry).await
     } else {
-        repl::run(engine, &config).await
+        repl::run(engine, &config, &plugin_registry).await
     }
 }
 

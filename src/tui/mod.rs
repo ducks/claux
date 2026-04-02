@@ -17,6 +17,7 @@ use crate::commands::{self, CommandResult};
 use crate::config::Config;
 use crate::context;
 use crate::permissions::PermissionResponse;
+use crate::plugin::PluginRegistry;
 use crate::query::Engine;
 use crate::session;
 
@@ -191,8 +192,8 @@ impl App {
 }
 
 /// Run the TUI.
-pub async fn run(mut engine: Engine, _config: &Config) -> Result<()> {
-    let system_prompt = context::build_system_prompt_for_model(engine.model()).await?;
+pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry) -> Result<()> {
+    let system_prompt = context::build_system_prompt_for_model(engine.model(), Some(plugins)).await?;
     engine.set_system_prompt(system_prompt);
 
     let (_session_id, session_path) = session::create_session(engine.model())?;

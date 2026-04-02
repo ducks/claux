@@ -48,6 +48,18 @@ pub struct Config {
     /// Display name for the provider (e.g. "ollama", "openai", "lmstudio")
     #[serde(default)]
     pub openai_provider_name: Option<String>,
+
+    /// Plugin configuration
+    #[serde(default)]
+    pub plugins: Vec<PluginConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 fn default_model() -> String {
@@ -75,6 +87,7 @@ impl Default for Config {
             openai_api_key: None,
             openai_api_key_cmd: None,
             openai_provider_name: None,
+            plugins: Vec::new(),
         }
     }
 }
