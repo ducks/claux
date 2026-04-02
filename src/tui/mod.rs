@@ -1,3 +1,4 @@
+mod markdown;
 mod ui;
 
 use anyhow::Result;

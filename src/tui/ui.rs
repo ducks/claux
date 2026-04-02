@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use super::{App, Mode};
+use super::markdown;
 
 const FG: Color = Color::Rgb(213, 196, 161); // gruvbox fg2
 const BG_DARK: Color = Color::Rgb(40, 40, 40); // gruvbox bg
@@ -45,42 +46,53 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let mut lines: Vec<Line> = Vec::new();
 
     for msg in &app.messages {
-        let (prefix, style) = match msg.role.as_str() {
-            "user" => (
-                "> ",
-                Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
-            ),
-            "assistant" => ("", Style::default().fg(FG)),
-            "system" => ("", Style::default().fg(YELLOW)),
-            "error" => ("", Style::default().fg(RED)),
-            _ => ("", Style::default().fg(FG)),
-        };
-
         // Add a blank line before each message
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
 
-        // Role label
-        if msg.role == "user" {
-            lines.push(Line::from(Span::styled("You", style)));
-        }
-
-        // Wrap message content
-        for line in msg.content.lines() {
-            let display = if !prefix.is_empty() && lines.last().map_or(true, |l| l.spans.is_empty()) {
-                format!("{}{}", prefix, line)
-            } else {
-                line.to_string()
-            };
-
-            let text_style = if msg.role == "user" {
-                Style::default().fg(BLUE)
-            } else {
-                Style::default().fg(FG)
-            };
-
-            lines.push(Line::from(Span::styled(display, text_style)));
+        match msg.role.as_str() {
+            "user" => {
+                lines.push(Line::from(Span::styled(
+                    "You",
+                    Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
+                )));
+                for line in msg.content.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("> {}", line),
+                        Style::default().fg(BLUE),
+                    )));
+                }
+            }
+            "assistant" => {
+                // Render with markdown formatting
+                let rendered = markdown::render(&msg.content, Style::default().fg(FG));
+                lines.extend(rendered);
+            }
+            "system" => {
+                for line in msg.content.lines() {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(YELLOW),
+                    )));
+                }
+            }
+            "error" => {
+                for line in msg.content.lines() {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(RED),
+                    )));
+                }
+            }
+            _ => {
+                for line in msg.content.lines() {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(FG),
+                    )));
+                }
+            }
         }
     }
 
@@ -89,12 +101,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        for line in app.stream_buffer.lines() {
-            lines.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(GREEN),
-            )));
-        }
+        let rendered = markdown::render(&app.stream_buffer, Style::default().fg(GREEN));
+        lines.extend(rendered);
         // Cursor indicator
         lines.push(Line::from(Span::styled("▊", Style::default().fg(GREEN))));
     }
