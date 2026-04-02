@@ -4,6 +4,7 @@ mod edit;
 mod glob;
 mod grep;
 pub(crate) mod read;
+mod web_fetch;
 mod write;
 
 use anyhow::Result;
@@ -49,6 +50,7 @@ impl ToolRegistry {
                 Box::new(glob::GlobTool),
                 Box::new(grep::GrepTool),
                 Box::new(bash::BashTool),
+                Box::new(web_fetch::WebFetchTool::new()),
                 Box::new(agent::AgentTool::new(factory, model)),
             ],
         }
@@ -64,6 +66,7 @@ impl ToolRegistry {
                 Box::new(glob::GlobTool),
                 Box::new(grep::GrepTool),
                 Box::new(bash::BashTool),
+                Box::new(web_fetch::WebFetchTool::new()),
             ],
         }
     }
