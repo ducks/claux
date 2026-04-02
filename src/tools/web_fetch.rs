@@ -64,6 +64,10 @@ impl Tool for WebFetchTool {
         true
     }
 
+    fn summarize(&self, input: &Value) -> String {
+        input["url"].as_str().unwrap_or("?").to_string()
+    }
+
     async fn execute(&self, input: Value) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let max_length = params.max_length.unwrap_or(DEFAULT_MAX_LENGTH);

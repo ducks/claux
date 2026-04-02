@@ -23,7 +23,7 @@ pub struct Engine {
 /// Events sent from the engine to the UI during streaming.
 pub enum StreamEvent {
     Text(String),
-    ToolStart { name: String, id: String },
+    ToolStart { name: String, id: String, summary: String },
     ToolResult { name: String, content: String, is_error: bool },
     /// Permission prompt — UI must respond via the oneshot sender.
     PermissionRequest {
@@ -107,6 +107,11 @@ impl Engine {
         is_read_only: bool,
     ) -> PermissionResult {
         self.permissions.check(tool_name, input, is_read_only)
+    }
+
+    /// Get a human-readable summary of a tool invocation.
+    pub fn summarize_tool(&self, name: &str, input: &serde_json::Value) -> String {
+        self.tools.summarize(name, input)
     }
 
     /// Check if a tool is read-only.
@@ -438,10 +443,12 @@ impl Engine {
                         text_buf.push_str(&t);
                     }
                     ApiEvent::ToolUse { id, name, input } => {
+                        let summary = self.tools.summarize(&name, &input);
                         let _ = tx
                             .send(StreamEvent::ToolStart {
                                 name: name.clone(),
                                 id: id.clone(),
+                                summary,
                             })
                             .await;
                         tool_uses.push((id, name, input));

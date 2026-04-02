@@ -337,7 +337,8 @@ async fn drive_streaming(
                             terminal.draw(|f| ui::draw(f, app))?;
                         }
                         crate::api::ApiEvent::ToolUse { id, name, input } => {
-                            app.stream_buffer.push_str(&format!("\n  [{}] ", name));
+                            let summary = engine.summarize_tool(&name, &input);
+                            app.stream_buffer.push_str(&format!("\n  [{}] {} ", name, summary));
                             terminal.draw(|f| ui::draw(f, app))?;
                             tool_uses.push((id, name, input));
                         }

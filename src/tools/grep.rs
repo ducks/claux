@@ -63,6 +63,14 @@ impl Tool for GrepTool {
         true
     }
 
+    fn summarize(&self, input: &Value) -> String {
+        let pattern = input["pattern"].as_str().unwrap_or("?");
+        match input["path"].as_str() {
+            Some(path) => format!("\"{}\" in {}", pattern, path),
+            None => format!("\"{}\"", pattern),
+        }
+    }
+
     async fn execute(&self, input: Value) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let base = params.path.as_deref().unwrap_or(".");

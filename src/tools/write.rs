@@ -44,6 +44,10 @@ impl Tool for WriteTool {
         false
     }
 
+    fn summarize(&self, input: &Value) -> String {
+        input["file_path"].as_str().unwrap_or("?").to_string()
+    }
+
     async fn execute(&self, input: Value) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let path = crate::tools::read::expand_tilde(&params.file_path);
