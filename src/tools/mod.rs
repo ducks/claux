@@ -28,6 +28,12 @@ pub trait Tool: Send + Sync {
     fn input_schema(&self) -> Value;
     fn is_read_only(&self) -> bool;
 
+    /// Short human-readable summary of what this invocation does.
+    /// Shown to the user while the tool runs.
+    fn summarize(&self, input: &Value) -> String {
+        self.name().to_string()
+    }
+
     async fn execute(&self, input: Value) -> Result<ToolOutput>;
 }
 
@@ -97,6 +103,15 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("unknown tool: {}", name))?;
 
         tool.execute(input).await
+    }
+
+    /// Get a human-readable summary of what the tool invocation will do.
+    pub fn summarize(&self, name: &str, input: &Value) -> String {
+        self.tools
+            .iter()
+            .find(|t| t.name() == name)
+            .map(|t| t.summarize(input))
+            .unwrap_or_else(|| name.to_string())
     }
 
     /// Check if a tool is read-only.

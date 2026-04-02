@@ -53,6 +53,16 @@ impl Tool for BashTool {
         false // conservative default; could be smarter with command analysis
     }
 
+    fn summarize(&self, input: &Value) -> String {
+        let cmd = input["command"].as_str().unwrap_or("?");
+        // Truncate long commands
+        if cmd.len() > 80 {
+            format!("{}...", &cmd[..77])
+        } else {
+            cmd.to_string()
+        }
+    }
+
     async fn execute(&self, input: Value) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
 

@@ -52,6 +52,14 @@ impl Tool for ReadTool {
         true
     }
 
+    fn summarize(&self, input: &Value) -> String {
+        let path = input["file_path"].as_str().unwrap_or("?");
+        match input["offset"].as_u64() {
+            Some(offset) => format!("{} (from line {})", path, offset),
+            None => path.to_string(),
+        }
+    }
+
     async fn execute(&self, input: Value) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let path = expand_tilde(&params.file_path);

@@ -75,8 +75,8 @@ pub async fn run(mut engine: Engine, _config: &Config) -> Result<()> {
                         print!("{}", t);
                         let _ = stdout().flush();
                     }
-                    StreamEvent::ToolStart { name, .. } => {
-                        print!("\n  \x1b[2m[{}]\x1b[0m ", name);
+                    StreamEvent::ToolStart { name, summary, .. } => {
+                        print!("\n  \x1b[2m[{}]\x1b[0m {} ", name, summary);
                         let _ = stdout().flush();
                         in_tool = true;
                     }

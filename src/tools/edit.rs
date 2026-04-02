@@ -56,6 +56,10 @@ impl Tool for EditTool {
         false
     }
 
+    fn summarize(&self, input: &Value) -> String {
+        input["file_path"].as_str().unwrap_or("?").to_string()
+    }
+
     #[allow(clippy::manual_find)]
     async fn execute(&self, input: Value) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;

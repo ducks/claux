@@ -66,6 +66,18 @@ impl Tool for AgentTool {
         false
     }
 
+    fn summarize(&self, input: &Value) -> String {
+        input["description"]
+            .as_str()
+            .or_else(|| {
+                input["prompt"].as_str().map(|p| {
+                    if p.len() > 60 { &p[..57] } else { p }
+                })
+            })
+            .unwrap_or("sub-agent task")
+            .to_string()
+    }
+
     async fn execute(&self, input: Value) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
 
