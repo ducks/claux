@@ -57,8 +57,10 @@ pub struct App {
     stream_buffer: String,
     /// Status line text
     status: String,
-    /// Permission prompt text (when in Permission mode)
+    /// Permission prompt summary (when in Permission mode)
     permission_prompt: Option<String>,
+    /// Full permission details (tool name + input preview)
+    permission_details: Option<Vec<String>>,
     /// Channel to send permission responses
     permission_respond: Option<tokio::sync::oneshot::Sender<PermissionResponse>>,
     /// Should we exit?
@@ -81,6 +83,7 @@ impl App {
             stream_buffer: String::new(),
             status: String::new(),
             permission_prompt: None,
+            permission_details: None,
             permission_respond: None,
             should_exit: false,
             model: model.to_string(),
@@ -414,8 +417,10 @@ async fn drive_streaming(
                     }
                 }
                 crate::permissions::PermissionResult::Ask(summary) => {
-                    // Show permission prompt in TUI
+                    // Build detailed preview of what the tool wants to do
+                    let details = format_permission_details(name, input);
                     app.permission_prompt = Some(summary.clone());
+                    app.permission_details = Some(details);
                     app.mode = Mode::Permission;
                     terminal.draw(|f| ui::draw(f, app))?;
 
@@ -440,6 +445,7 @@ async fn drive_streaming(
                     };
 
                     app.permission_prompt = None;
+                    app.permission_details = None;
                     app.mode = Mode::Streaming;
 
                     match response {
@@ -485,4 +491,73 @@ async fn drive_streaming(
     }
 
     Ok(())
+}
+
+/// Format detailed permission preview for a tool invocation.
+fn format_permission_details(tool_name: &str, input: &serde_json::Value) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    match tool_name {
+        "Bash" => {
+            if let Some(cmd) = input["command"].as_str() {
+                lines.push("Command:".to_string());
+                for line in cmd.lines() {
+                    lines.push(format!("  {}", line));
+                }
+            }
+            if let Some(desc) = input["description"].as_str() {
+                lines.push(format!("Description: {}", desc));
+            }
+        }
+        "Write" => {
+            if let Some(path) = input["file_path"].as_str() {
+                lines.push(format!("File: {}", path));
+            }
+            if let Some(content) = input["content"].as_str() {
+                let preview: Vec<&str> = content.lines().take(10).collect();
+                lines.push("Content:".to_string());
+                for line in &preview {
+                    lines.push(format!("  {}", line));
+                }
+                let total = content.lines().count();
+                if total > 10 {
+                    lines.push(format!("  ... ({} more lines)", total - 10));
+                }
+            }
+        }
+        "Edit" => {
+            if let Some(path) = input["file_path"].as_str() {
+                lines.push(format!("File: {}", path));
+            }
+            if let Some(old) = input["old_string"].as_str() {
+                lines.push("Replace:".to_string());
+                for line in old.lines().take(5) {
+                    lines.push(format!("  - {}", line));
+                }
+            }
+            if let Some(new) = input["new_string"].as_str() {
+                lines.push("With:".to_string());
+                for line in new.lines().take(5) {
+                    lines.push(format!("  + {}", line));
+                }
+            }
+        }
+        "Agent" => {
+            if let Some(prompt) = input["prompt"].as_str() {
+                lines.push("Task:".to_string());
+                for line in prompt.lines().take(5) {
+                    lines.push(format!("  {}", line));
+                }
+            }
+        }
+        _ => {
+            // Generic: show the JSON input compactly
+            let json_str = serde_json::to_string_pretty(input).unwrap_or_default();
+            for line in json_str.lines().take(8) {
+                lines.push(format!("  {}", line));
+            }
+        }
+    }
+
+    lines
 }

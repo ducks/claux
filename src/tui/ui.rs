@@ -19,13 +19,21 @@ const PURPLE: Color = Color::Rgb(211, 134, 155); // gruvbox purple
 const GRAY: Color = Color::Rgb(146, 131, 116); // gruvbox gray
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    // Expand input area when showing permission details
+    let input_height = if app.permission_details.is_some() {
+        let detail_lines = app.permission_details.as_ref().map(|d| d.len()).unwrap_or(0);
+        (detail_lines as u16 + 4).min(f.area().height / 2) // +4 for borders, summary, controls
+    } else {
+        3
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // Header
-            Constraint::Min(1),    // Messages
-            Constraint::Length(3), // Input
-            Constraint::Length(1), // Status bar
+            Constraint::Length(1),          // Header
+            Constraint::Min(1),            // Messages
+            Constraint::Length(input_height), // Input (expands for permissions)
+            Constraint::Length(1),          // Status bar
         ])
         .split(f.area());
 
@@ -152,33 +160,62 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Streaming => Style::default().fg(GRAY),
     };
 
-    let input_text = if let Some(ref prompt) = app.permission_prompt {
-        format!("⚡ {}  (y)es / (n)o / (a)lways", prompt)
-    } else if app.mode == Mode::Streaming {
-        "...".to_string()
-    } else {
-        app.input.clone()
-    };
+    if let (Some(ref prompt), Some(ref details)) = (&app.permission_prompt, &app.permission_details) {
+        // Expanded permission panel
+        let mut perm_lines: Vec<Line> = Vec::new();
+        perm_lines.push(Line::from(vec![
+            Span::styled("⚡ ", Style::default().fg(YELLOW)),
+            Span::styled(prompt.as_str(), Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)),
+        ]));
+        perm_lines.push(Line::from(""));
+        for detail in details {
+            let style = if detail.starts_with("  +") {
+                Style::default().fg(GREEN)
+            } else if detail.starts_with("  -") {
+                Style::default().fg(RED)
+            } else if detail.ends_with(':') {
+                Style::default().fg(FG).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(GRAY)
+            };
+            perm_lines.push(Line::from(Span::styled(detail.clone(), style)));
+        }
+        perm_lines.push(Line::from(""));
+        perm_lines.push(Line::from(vec![
+            Span::styled("  (y)es  ", Style::default().fg(GREEN)),
+            Span::styled("(n)o  ", Style::default().fg(RED)),
+            Span::styled("(a)lways allow", Style::default().fg(YELLOW)),
+        ]));
 
-    let input_widget = Paragraph::new(input_text)
-        .style(input_style)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(if app.mode == Mode::Input {
-                    BLUE
-                } else if app.mode == Mode::Permission {
-                    YELLOW
-                } else {
-                    GRAY
-                }))
-                .title(if app.mode == Mode::Permission {
-                    " Permission "
-                } else {
-                    " > "
-                }),
-        );
-    f.render_widget(input_widget, chunks[2]);
+        let perm_widget = Paragraph::new(perm_lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(YELLOW))
+                    .title(" Permission Required "),
+            );
+        f.render_widget(perm_widget, chunks[2]);
+    } else {
+        let input_text = if app.mode == Mode::Streaming {
+            "...".to_string()
+        } else {
+            app.input.clone()
+        };
+
+        let input_widget = Paragraph::new(input_text)
+            .style(input_style)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(if app.mode == Mode::Input {
+                        BLUE
+                    } else {
+                        GRAY
+                    }))
+                    .title(" > "),
+            );
+        f.render_widget(input_widget, chunks[2]);
+    }
 
     // Set cursor position in input mode
     if app.mode == Mode::Input {
