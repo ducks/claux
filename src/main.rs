@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
         let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
 
-        let system_prompt = context::build_system_prompt().await?;
+        let system_prompt = context::build_system_prompt_for_model(&model).await?;
         engine.set_system_prompt(system_prompt);
 
         let response = engine.submit(prompt).await?;

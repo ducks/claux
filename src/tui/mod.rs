@@ -191,7 +191,7 @@ impl App {
 
 /// Run the TUI.
 pub async fn run(mut engine: Engine, _config: &Config) -> Result<()> {
-    let system_prompt = context::build_system_prompt().await?;
+    let system_prompt = context::build_system_prompt_for_model(engine.model()).await?;
     engine.set_system_prompt(system_prompt);
 
     let (_session_id, session_path) = session::create_session(engine.model())?;
