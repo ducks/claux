@@ -43,10 +43,17 @@ async fn main() -> Result<()> {
             &plugin_config.name,
             &plugin_config.command,
             &plugin_config.args,
+            plugin_config.trigger.clone(),
         )));
     }
     if !plugin_registry.is_empty() {
-        tracing::info!("Loaded {} plugin(s)", plugin_registry.len());
+        tracing::info!("Loaded {} plugin(s): {} context, {} tool-start, {} tool-complete, {} session-start",
+            plugin_registry.len(),
+            plugin_registry.get_by_trigger(&config::HookTrigger::OnContextBuild),
+            plugin_registry.get_by_trigger(&config::HookTrigger::OnToolStart),
+            plugin_registry.get_by_trigger(&config::HookTrigger::OnToolComplete),
+            plugin_registry.get_by_trigger(&config::HookTrigger::OnSessionStart),
+        );
     }
 
     let model = args
@@ -77,7 +84,7 @@ async fn main() -> Result<()> {
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
         let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
 
-        let system_prompt = context::build_system_prompt_for_model(&model, Some(&plugin_registry)).await?;
+        let system_prompt = context::build_system_prompt_for_model(&model, Some(&plugin_registry), &config::HookTrigger::OnContextBuild).await?;
         engine.set_system_prompt(system_prompt);
 
         let response = engine.submit(prompt).await?;
@@ -91,8 +98,11 @@ async fn main() -> Result<()> {
     let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
 
     // Build system prompt with plugins for REPL mode
-    let system_prompt = context::build_system_prompt_for_model(&model, Some(&plugin_registry)).await?;
+    let system_prompt = context::build_system_prompt_for_model(&model, Some(&plugin_registry), &config::HookTrigger::OnContextBuild).await?;
     engine.set_system_prompt(system_prompt);
+
+    // Run session-start hooks
+    plugin::PluginRegistry::execute_side_effects(&plugin_registry, &config::HookTrigger::OnSessionStart, None)?;
 
     // Resume a previous session if requested
     if let Some(ref session_id) = args.resume {

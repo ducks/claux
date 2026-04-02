@@ -3,7 +3,7 @@ use std::io::{BufRead, Write, stdout};
 use tokio::sync::mpsc;
 
 use crate::commands::{self, CommandResult};
-use crate::config::Config;
+use crate::config::{Config, HookTrigger};
 use crate::context;
 use crate::permissions::PermissionResponse;
 use crate::plugin::PluginRegistry;
@@ -13,7 +13,7 @@ use crate::session;
 /// Run the interactive REPL.
 pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry) -> Result<()> {
     // Build system prompt
-    let system_prompt = context::build_system_prompt_for_model(engine.model(), Some(plugins)).await?;
+    let system_prompt = context::build_system_prompt_for_model(engine.model(), Some(plugins), &HookTrigger::OnContextBuild).await?;
     engine.set_system_prompt(system_prompt);
 
     // Create session

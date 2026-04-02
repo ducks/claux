@@ -60,6 +60,22 @@ pub struct PluginConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default = "default_trigger")]
+    pub trigger: HookTrigger,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HookTrigger {
+    #[default]
+    OnContextBuild,
+    OnToolStart,
+    OnToolComplete,
+    OnSessionStart,
+}
+
+fn default_trigger() -> HookTrigger {
+    HookTrigger::OnContextBuild
 }
 
 fn default_model() -> String {
