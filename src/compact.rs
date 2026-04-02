@@ -11,31 +11,52 @@ use crate::api::types::{ContentBlock, Message, MessageContent};
 /// Maximum characters for a single tool result before truncation.
 const TOOL_OUTPUT_MAX_CHARS: usize = 30_000;
 
-/// Rough estimate: 1 token ≈ 4 characters.
-const CHARS_PER_TOKEN: usize = 4;
+use std::collections::HashSet;
+use std::sync::LazyLock;
+use tiktoken_rs::{cl100k_base, CoreBPE};
 
-/// Estimate the token count of the conversation.
+/// Global tokenizer (initialized once, thread-safe).
+static TOKENIZER: LazyLock<CoreBPE> = LazyLock::new(|| {
+    cl100k_base().expect("failed to initialize cl100k tokenizer")
+});
+
+/// Empty set for encode's allowed_special parameter.
+static NO_SPECIAL: LazyLock<HashSet<&'static str>> = LazyLock::new(HashSet::new);
+
+/// Count tokens in a string using tiktoken.
+fn count_tokens(text: &str) -> usize {
+    TOKENIZER.encode(text, &NO_SPECIAL).0.len()
+}
+
+/// Estimate the token count of the conversation using tiktoken.
 pub fn estimate_tokens(messages: &[Message]) -> usize {
-    let mut chars = 0;
+    let mut total = 0;
+
     for msg in messages {
         match &msg.content {
-            MessageContent::Text(text) => chars += text.len(),
+            MessageContent::Text(text) => {
+                total += count_tokens(text);
+            }
             MessageContent::Blocks(blocks) => {
                 for block in blocks {
                     match block {
-                        ContentBlock::Text { text } => chars += text.len(),
+                        ContentBlock::Text { text } => {
+                            total += count_tokens(text);
+                        }
                         ContentBlock::ToolUse { input, name, .. } => {
-                            chars += name.len() + input.to_string().len();
+                            total += count_tokens(name);
+                            total += count_tokens(&input.to_string());
                         }
                         ContentBlock::ToolResult { content, .. } => {
-                            chars += content.len();
+                            total += count_tokens(content);
                         }
                     }
                 }
             }
         }
     }
-    chars / CHARS_PER_TOKEN
+
+    total
 }
 
 /// Truncate a tool output string if it exceeds the maximum.
