@@ -1,12 +1,13 @@
 use anyhow::Result;
+use crate::plugin::PluginRegistry;
 
 /// Build the system prompt from environment context.
 /// Mirrors Claude Code's context.ts: git status, CLAUDE.md, date, env info.
 pub async fn build_system_prompt() -> Result<String> {
-    build_system_prompt_for_model("an AI assistant").await
+    build_system_prompt_for_model("an AI assistant", None).await
 }
 
-pub async fn build_system_prompt_for_model(model: &str) -> Result<String> {
+pub async fn build_system_prompt_for_model(model: &str, plugins: Option<&PluginRegistry>) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
 
     parts.push(base_system_prompt(model));
@@ -34,6 +35,15 @@ pub async fn build_system_prompt_for_model(model: &str) -> Result<String> {
     // CLAUDE.md / project context
     if let Some(claude_md) = read_claude_md().await {
         parts.push(format!("\n# Project Context (CLAUDE.md)\n{}", claude_md));
+    }
+
+    // Plugin context
+    if let Some(registry) = plugins {
+        if let Ok(plugin_context) = registry.execute_all() {
+            if !plugin_context.is_empty() {
+                parts.push(format!("\n# Plugin Context\n{}", plugin_context));
+            }
+        }
     }
 
     Ok(parts.join("\n"))
