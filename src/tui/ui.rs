@@ -53,42 +53,50 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
         match msg.role.as_str() {
             "user" => {
-                lines.push(Line::from(Span::styled(
-                    "You",
-                    Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
-                )));
+                lines.push(Line::from(vec![
+                    Span::styled("● ", Style::default().fg(BLUE)),
+                    Span::styled("You", Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
+                ]));
                 for line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
-                        format!("> {}", line),
+                        format!("  {}", line),
                         Style::default().fg(BLUE),
                     )));
                 }
             }
             "assistant" => {
-                // Render with markdown formatting
+                lines.push(Line::from(Span::styled("● ", Style::default().fg(PURPLE))));
                 let rendered = markdown::render(&msg.content, Style::default().fg(FG));
-                lines.extend(rendered);
+                // Indent assistant content to align with the dot
+                for line in rendered {
+                    let mut indented = vec![Span::raw("  ")];
+                    indented.extend(line.spans);
+                    lines.push(Line::from(indented));
+                }
             }
             "system" => {
+                lines.push(Line::from(Span::styled("● ", Style::default().fg(YELLOW))));
                 for line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
-                        line.to_string(),
+                        format!("  {}", line),
                         Style::default().fg(YELLOW),
                     )));
                 }
             }
             "error" => {
+                lines.push(Line::from(Span::styled("● ", Style::default().fg(RED))));
                 for line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
-                        line.to_string(),
+                        format!("  {}", line),
                         Style::default().fg(RED),
                     )));
                 }
             }
             _ => {
+                lines.push(Line::from(Span::styled("● ", Style::default().fg(GRAY))));
                 for line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
-                        line.to_string(),
+                        format!("  {}", line),
                         Style::default().fg(FG),
                     )));
                 }
@@ -101,10 +109,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
+        lines.push(Line::from(Span::styled("● ", Style::default().fg(GREEN))));
         let rendered = markdown::render(&app.stream_buffer, Style::default().fg(GREEN));
-        lines.extend(rendered);
+        for line in rendered {
+            let mut indented = vec![Span::raw("  ")];
+            indented.extend(line.spans);
+            lines.push(Line::from(indented));
+        }
         // Cursor indicator
-        lines.push(Line::from(Span::styled("▊", Style::default().fg(GREEN))));
+        lines.push(Line::from(Span::styled("  ▊", Style::default().fg(GREEN))));
     }
 
     app.total_lines = lines.len() as u16;
