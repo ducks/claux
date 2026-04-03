@@ -12,6 +12,7 @@ mod repl;
 mod session;
 mod tools;
 mod tui;
+mod utils;
 
 use anyhow::Result;
 use clap::Parser;

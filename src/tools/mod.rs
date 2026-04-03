@@ -30,7 +30,7 @@ pub trait Tool: Send + Sync {
 
     /// Short human-readable summary of what this invocation does.
     /// Shown to the user while the tool runs.
-    fn summarize(&self, input: &Value) -> String {
+    fn summarize(&self, _input: &Value) -> String {
         self.name().to_string()
     }
 

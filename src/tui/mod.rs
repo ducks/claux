@@ -416,10 +416,20 @@ async fn drive_streaming(
                         is_error: true,
                     }
                 }
-                crate::permissions::PermissionResult::Ask(summary) => {
+                crate::permissions::PermissionResult::Ask { message, diff } => {
                     // Build detailed preview of what the tool wants to do
-                    let details = format_permission_details(name, input);
-                    app.permission_prompt = Some(summary.clone());
+                    let mut details = format_permission_details(name, input);
+                    
+                    // Add diff preview if available
+                    if let Some(d) = diff {
+                        details.push("\n  \x1b[2m--- Diff Preview ---\x1b[0m".to_string());
+                        for line in crate::utils::diff::colorize_diff(&d).lines() {
+                            details.push(format!("  {}", line));
+                        }
+                        details.push("  \x1b[2m--- End Diff ---\x1b[0m".to_string());
+                    }
+                    
+                    app.permission_prompt = Some(message.clone());
                     app.permission_details = Some(details);
                     app.mode = Mode::Permission;
                     terminal.draw(|f| ui::draw(f, app))?;

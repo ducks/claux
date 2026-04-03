@@ -9,6 +9,7 @@ use crate::permissions::PermissionResponse;
 use crate::plugin::PluginRegistry;
 use crate::query::{Engine, StreamEvent};
 use crate::session;
+use crate::utils::diff::colorize_diff;
 
 /// Run the interactive REPL.
 pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry) -> Result<()> {
@@ -102,6 +103,19 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
                         let response = prompt_permission(&tool_name, &summary);
                         let _ = respond.send(response);
                     }
+                    StreamEvent::PermissionRequestWithDiff {
+                        tool_name,
+                        summary,
+                        diff,
+                        respond,
+                    } => {
+                        if in_tool {
+                            println!();
+                            in_tool = false;
+                        }
+                        let response = prompt_permission_with_diff(&tool_name, &summary, &diff);
+                        let _ = respond.send(response);
+                    }
                     StreamEvent::Error(e) => {
                         eprintln!("\n\x1b[31mError: {}\x1b[0m", e);
                     }
@@ -137,6 +151,34 @@ fn prompt_permission(_tool_name: &str, summary: &str) -> PermissionResponse {
         "\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m ",
         summary
     );
+    let _ = stdout().flush();
+
+    let mut input = String::new();
+    if std::io::stdin().lock().read_line(&mut input).is_err() {
+        return PermissionResponse::Deny;
+    }
+
+    match input.trim().to_lowercase().as_str() {
+        "y" | "yes" | "" => PermissionResponse::Allow,
+        "a" | "always" => PermissionResponse::AlwaysAllow,
+        _ => PermissionResponse::Deny,
+    }
+}
+
+/// Prompt the user for permission with a diff preview.
+fn prompt_permission_with_diff(_tool_name: &str, summary: &str, diff: &str) -> PermissionResponse {
+    println!("\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m", summary);
+    println!("\n  \x1b[2m--- Diff Preview ---\x1b[0m");
+    
+    // Print the colorized diff
+    let colored_diff = colorize_diff(diff);
+    for line in colored_diff.lines() {
+        println!("  {}", line);
+    }
+    
+    println!("  \x1b[2m--- End Diff ---\x1b[0m\n");
+    
+    print!("  Allow? ");
     let _ = stdout().flush();
 
     let mut input = String::new();

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::api::{self, ApiEvent, ContentBlock, Message, Provider};
+use crate::api::{ApiEvent, ContentBlock, Message, Provider};
 use crate::compact::{self, CompactStrategy};
 use crate::cost::CostTracker;
 use crate::permissions::{PermissionChecker, PermissionResponse, PermissionResult};
@@ -29,6 +29,13 @@ pub enum StreamEvent {
     PermissionRequest {
         tool_name: String,
         summary: String,
+        respond: oneshot::Sender<PermissionResponse>,
+    },
+    /// Permission prompt with diff preview
+    PermissionRequestWithDiff {
+        tool_name: String,
+        summary: String,
+        diff: String,
         respond: oneshot::Sender<PermissionResponse>,
     },
     Error(String),
@@ -366,8 +373,9 @@ impl Engine {
                         content: format!("Permission denied: {}", reason),
                         is_error: true,
                     },
-                    PermissionResult::Ask(prompt) => {
-                        eprintln!("  [tool] {} — auto-allowing", prompt);
+                    PermissionResult::Ask { message, diff: _ } => {
+                        // For non-streaming mode, just auto-allow (this path shouldn't normally be reached)
+                        eprintln!("  [tool] {} — auto-allowing", message);
                         self.tools.execute(name, input.clone()).await?
                     }
                 };
@@ -517,16 +525,26 @@ impl Engine {
                         content: format!("Permission denied: {}", reason),
                         is_error: true,
                     },
-                    PermissionResult::Ask(summary) => {
+                    PermissionResult::Ask { message, diff } => {
                         // Send permission request to UI, wait for response
                         let (resp_tx, resp_rx) = oneshot::channel();
-                        let _ = tx
-                            .send(StreamEvent::PermissionRequest {
+                        
+                        let event = if let Some(d) = diff {
+                            StreamEvent::PermissionRequestWithDiff {
                                 tool_name: name.clone(),
-                                summary,
+                                summary: message,
+                                diff: d,
                                 respond: resp_tx,
-                            })
-                            .await;
+                            }
+                        } else {
+                            StreamEvent::PermissionRequest {
+                                tool_name: name.clone(),
+                                summary: message,
+                                respond: resp_tx,
+                            }
+                        };
+                        
+                        let _ = tx.send(event).await;
 
                         match resp_rx.await {
                             Ok(PermissionResponse::Allow) => {

@@ -57,5 +57,8 @@ uuid = { version = "1.0", features = ["v4"] }
 # Token estimation
 tiktoken-rs = "0.9"
 
+# Diff generation
+similar = "2.6"
+
 [dev-dependencies]
 tempfile = "3.0"

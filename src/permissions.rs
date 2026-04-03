@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::utils::diff::generate_diff;
+
 /// How permissions are handled.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -19,7 +21,10 @@ pub enum PermissionMode {
 pub enum PermissionResult {
     Allow,
     Deny(String),
-    Ask(String),
+    Ask {
+        message: String,
+        diff: Option<String>,
+    },
 }
 
 /// User's response to a permission prompt.
@@ -75,7 +80,10 @@ impl PermissionChecker {
                     PermissionResult::Allow
                 } else if tool_name == "Bash" {
                     let cmd = input["command"].as_str().unwrap_or("");
-                    PermissionResult::Ask(format!("Allow bash: {}?", truncate(cmd, 80)))
+                    PermissionResult::Ask {
+                        message: format!("Allow bash: {}?", truncate(cmd, 80)),
+                        diff: None,
+                    }
                 } else {
                     PermissionResult::Allow
                 }
@@ -85,22 +93,42 @@ impl PermissionChecker {
                 if is_read_only {
                     PermissionResult::Allow
                 } else {
-                    let summary = match tool_name {
+                    match tool_name {
                         "Bash" => {
                             let cmd = input["command"].as_str().unwrap_or("");
-                            format!("bash: {}", truncate(cmd, 80))
+                            PermissionResult::Ask {
+                                message: format!("bash: {}", truncate(cmd, 80)),
+                                diff: None,
+                            }
                         }
                         "Write" => {
                             let path = input["file_path"].as_str().unwrap_or("?");
-                            format!("write: {}", path)
+                            PermissionResult::Ask {
+                                message: format!("write: {}", path),
+                                diff: None,
+                            }
                         }
                         "Edit" => {
                             let path = input["file_path"].as_str().unwrap_or("?");
-                            format!("edit: {}", path)
+                            let old_text = input["old_text"].as_str().unwrap_or("");
+                            let new_text = input["new_text"].as_str().unwrap_or("");
+                            
+                            let diff = if !old_text.is_empty() && !new_text.is_empty() {
+                                Some(generate_diff(old_text, new_text, path))
+                            } else {
+                                None
+                            };
+                            
+                            PermissionResult::Ask {
+                                message: format!("edit: {}", path),
+                                diff,
+                            }
                         }
-                        _ => format!("{}", tool_name),
-                    };
-                    PermissionResult::Ask(summary)
+                        _ => PermissionResult::Ask {
+                            message: format!("{}", tool_name),
+                            diff: None,
+                        },
+                    }
                 }
             }
         }
@@ -152,14 +180,14 @@ mod tests {
     fn default_asks_for_bash() {
         let checker = PermissionChecker::new(PermissionMode::Default);
         let input = json!({"command": "cargo test"});
-        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask(_)));
+        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask { .. }));
     }
 
     #[test]
     fn default_asks_for_write() {
         let checker = PermissionChecker::new(PermissionMode::Default);
         let input = json!({"file_path": "/tmp/test", "content": "hello"});
-        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Ask(_)));
+        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Ask { .. }));
     }
 
     #[test]
@@ -174,7 +202,7 @@ mod tests {
     fn accept_edits_asks_for_bash() {
         let checker = PermissionChecker::new(PermissionMode::AcceptEdits);
         let input = json!({"command": "rm -rf /"});
-        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask(_)));
+        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask { .. }));
     }
 
     #[test]
@@ -183,7 +211,7 @@ mod tests {
         let input = json!({"command": "cargo test"});
 
         // First call should ask
-        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask(_)));
+        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask { .. }));
 
         // After always_allow, should allow
         checker.always_allow("Bash");
@@ -197,15 +225,15 @@ mod tests {
 
         let input = json!({"file_path": "/tmp/test"});
         // Write should still ask
-        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Ask(_)));
+        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Ask { .. }));
     }
 
     #[test]
     fn ask_summary_contains_command() {
         let checker = PermissionChecker::new(PermissionMode::Default);
         let input = json!({"command": "cargo test"});
-        if let PermissionResult::Ask(summary) = checker.check("Bash", &input, false) {
-            assert!(summary.contains("cargo test"));
+        if let PermissionResult::Ask { message, diff: _ } = checker.check("Bash", &input, false) {
+            assert!(message.contains("cargo test"));
         } else {
             panic!("expected Ask");
         }
@@ -215,8 +243,8 @@ mod tests {
     fn ask_summary_contains_file_path() {
         let checker = PermissionChecker::new(PermissionMode::Default);
         let input = json!({"file_path": "/home/ducks/important.rs"});
-        if let PermissionResult::Ask(summary) = checker.check("Edit", &input, false) {
-            assert!(summary.contains("important.rs"));
+        if let PermissionResult::Ask { message, diff: _ } = checker.check("Edit", &input, false) {
+            assert!(message.contains("important.rs"));
         } else {
             panic!("expected Ask");
         }
