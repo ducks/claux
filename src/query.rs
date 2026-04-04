@@ -362,46 +362,101 @@ impl Engine {
             }
 
             // Execute tools and collect results (with output truncation)
-            let mut result_blocks = Vec::new();
-            for (id, name, input) in &tool_uses {
-                let is_read_only = self.tools.is_read_only(name);
-                let perm = self.permissions.check(name, input, is_read_only);
-
-                let tool_output = match perm {
-                    PermissionResult::Allow => self.tools.execute(name, input.clone()).await?,
-                    PermissionResult::Deny(reason) => crate::tools::ToolOutput {
-                        content: format!("Permission denied: {}", reason),
-                        is_error: true,
-                    },
-                    PermissionResult::Ask { message, diff: _ } => {
-                        // For non-streaming mode, just auto-allow (this path shouldn't normally be reached)
-                        eprintln!("  [tool] {} — auto-allowing", message);
-                        self.tools.execute(name, input.clone()).await?
-                    }
-                };
-
-                // Truncate large tool outputs to avoid context overflow
-                let (content, was_truncated) =
-                    compact::truncate_tool_output(&tool_output.content);
-                if was_truncated {
-                    tracing::debug!("Truncated tool output for {}", name);
-                }
-
-                result_blocks.push(ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content,
-                    is_error: if tool_output.is_error {
-                        Some(true)
-                    } else {
-                        None
-                    },
-                });
-            }
+            // Partition tools into parallel (read-only) and sequential (write) groups
+            let result_blocks = self.execute_tools_parallel(&tool_uses).await?;
 
             self.messages.push(Message::tool_results(result_blocks));
         }
 
         Ok(full_response)
+    }
+
+    /// Execute tools with parallel execution for read-only tools.
+    /// Returns result blocks in the same order as tool_uses.
+    async fn execute_tools_parallel(
+        &mut self,
+        tool_uses: &[(String, String, serde_json::Value)],
+    ) -> Result<Vec<ContentBlock>> {
+        // Partition tools into read-only (parallel) and write (sequential)
+        let mut parallel_tools = Vec::new();
+        let mut sequential_tools = Vec::new();
+
+        for (idx, (id, name, input)) in tool_uses.iter().enumerate() {
+            let is_read_only = self.tools.is_read_only(name);
+            let perm = self.permissions.check(name, input, is_read_only);
+
+            // Only read-only AND auto-allowed tools can run in parallel
+            let can_parallelize = is_read_only && matches!(perm, PermissionResult::Allow);
+
+            if can_parallelize {
+                parallel_tools.push((idx, id.clone(), name.clone(), input.clone()));
+            } else {
+                sequential_tools.push((idx, id.clone(), name.clone(), input.clone(), perm));
+            }
+        }
+
+        // Execute parallel tools concurrently
+        // Since all tool implementations use &self (immutable), we can safely
+        // execute multiple read-only tools in parallel
+        let tools_ref = &self.tools;
+        let parallel_futures: Vec<_> = parallel_tools
+            .iter()
+            .map(|(idx, id, name, input)| async move {
+                let result = tools_ref.execute(name, input.clone()).await;
+                (*idx, id.clone(), result)
+            })
+            .collect();
+
+        let parallel_results = futures_util::future::join_all(parallel_futures).await;
+
+        // Execute sequential tools one by one
+        let mut sequential_results = Vec::new();
+        for (idx, id, name, input, perm) in sequential_tools {
+            let tool_output = match perm {
+                PermissionResult::Allow => self.tools.execute(&name, input.clone()).await?,
+                PermissionResult::Deny(reason) => crate::tools::ToolOutput {
+                    content: format!("Permission denied: {}", reason),
+                    is_error: true,
+                },
+                PermissionResult::Ask { message, diff: _ } => {
+                    // For non-streaming mode, just auto-allow (this path shouldn't normally be reached)
+                    eprintln!("  [tool] {} — auto-allowing", message);
+                    self.tools.execute(&name, input.clone()).await?
+                }
+            };
+            sequential_results.push((idx, id, Ok(tool_output)));
+        }
+
+        // Combine and sort results back into original order
+        let mut all_results: Vec<(usize, String, Result<crate::tools::ToolOutput>)> = Vec::new();
+        all_results.extend(parallel_results);
+        all_results.extend(sequential_results);
+        all_results.sort_by_key(|(idx, _, _)| *idx);
+
+        // Build result blocks
+        let mut result_blocks = Vec::new();
+        for (_, id, result) in all_results {
+            let tool_output = result?;
+
+            // Truncate large tool outputs to avoid context overflow
+            let (content, was_truncated) =
+                compact::truncate_tool_output(&tool_output.content);
+            if was_truncated {
+                tracing::debug!("Truncated tool output for {}", id);
+            }
+
+            result_blocks.push(ContentBlock::ToolResult {
+                tool_use_id: id,
+                content,
+                is_error: if tool_output.is_error {
+                    Some(true)
+                } else {
+                    None
+                },
+            });
+        }
+
+        Ok(result_blocks)
     }
 
     /// Submit with streaming callbacks (for the REPL).
@@ -592,5 +647,153 @@ impl Engine {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{ToolDefinition, Usage};
+    use crate::permissions::PermissionMode;
+    use std::time::Instant;
+
+    // Mock provider for testing
+    struct MockProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for MockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn model(&self) -> &str {
+            "test-model"
+        }
+
+        fn set_model(&mut self, _model: &str) {
+            // No-op for mock
+        }
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+        ) -> Result<mpsc::Receiver<ApiEvent>> {
+            let (tx, rx) = mpsc::channel(10);
+            // Return empty stream for testing
+            drop(tx);
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parallel_tool_execution() {
+        // Create a mock engine with read-only tools
+        let provider = Box::new(MockProvider);
+        let tools = ToolRegistry::without_agent();
+        let permissions = PermissionChecker::new(PermissionMode::Bypass);
+
+        let mut engine = Engine {
+            provider,
+            tools,
+            permissions,
+            messages: vec![],
+            system_prompt: String::new(),
+            model: "test".to_string(),
+            max_tokens: 1000,
+            cost: CostTracker::new("test"),
+        };
+
+        // Create multiple read-only tool uses (Read and Glob)
+        let tool_uses = vec![
+            (
+                "test1".to_string(),
+                "Read".to_string(),
+                serde_json::json!({"file_path": "/dev/null"}),
+            ),
+            (
+                "test2".to_string(),
+                "Glob".to_string(),
+                serde_json::json!({"pattern": "*.rs"}),
+            ),
+            (
+                "test3".to_string(),
+                "Read".to_string(),
+                serde_json::json!({"file_path": "/dev/null"}),
+            ),
+        ];
+
+        let start = Instant::now();
+        let result = engine.execute_tools_parallel(&tool_uses).await;
+        let duration = start.elapsed();
+
+        assert!(result.is_ok(), "Parallel execution should succeed");
+        let blocks = result.unwrap();
+        assert_eq!(blocks.len(), 3, "Should have 3 result blocks");
+
+        // Verify results are in correct order
+        for (i, block) in blocks.iter().enumerate() {
+            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                let expected_id = format!("test{}", i + 1);
+                assert_eq!(tool_use_id, &expected_id, "Results should be in original order");
+            } else {
+                panic!("Expected ToolResult block");
+            }
+        }
+
+        println!("Parallel execution took: {:?}", duration);
+    }
+
+    #[tokio::test]
+    async fn test_mixed_readonly_and_write_tools() {
+        let provider = Box::new(MockProvider);
+        let tools = ToolRegistry::without_agent();
+        let permissions = PermissionChecker::new(PermissionMode::Bypass);
+
+        let mut engine = Engine {
+            provider,
+            tools,
+            permissions,
+            messages: vec![],
+            system_prompt: String::new(),
+            model: "test".to_string(),
+            max_tokens: 1000,
+            cost: CostTracker::new("test"),
+        };
+
+        // Mix read-only and write tools
+        let tool_uses = vec![
+            (
+                "test1".to_string(),
+                "Read".to_string(), // read-only
+                serde_json::json!({"file_path": "/dev/null"}),
+            ),
+            (
+                "test2".to_string(),
+                "Bash".to_string(), // write (not read-only)
+                serde_json::json!({"command": "echo test"}),
+            ),
+            (
+                "test3".to_string(),
+                "Glob".to_string(), // read-only
+                serde_json::json!({"pattern": "*.rs"}),
+            ),
+        ];
+
+        let result = engine.execute_tools_parallel(&tool_uses).await;
+
+        assert!(result.is_ok(), "Mixed execution should succeed");
+        let blocks = result.unwrap();
+        assert_eq!(blocks.len(), 3, "Should have 3 result blocks");
+
+        // Verify order is maintained
+        for (i, block) in blocks.iter().enumerate() {
+            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                let expected_id = format!("test{}", i + 1);
+                assert_eq!(tool_use_id, &expected_id, "Results should maintain order");
+            }
+        }
     }
 }
