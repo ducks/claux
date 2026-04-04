@@ -59,6 +59,7 @@ tiktoken-rs = "0.9"
 
 # Diff generation
 similar = "2.6"
+pulldown-cmark = "0.13.3"
 
 [dev-dependencies]
 tempfile = "3.0"
