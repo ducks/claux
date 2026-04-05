@@ -70,9 +70,9 @@ impl Provider for AnthropicProvider {
 
         request = match &self.auth {
             AuthMethod::ApiKey(key) => request.header("x-api-key", key),
-            AuthMethod::OAuthToken(token) => {
-                request.header("Authorization", format!("Bearer {}", token))
-            }
+            AuthMethod::OAuthToken(token) => request
+                .header("Authorization", format!("Bearer {}", token))
+                .header("anthropic-beta", "oauth-2025-04-20"),
         };
 
         let response = request.json(&body).send().await?;
