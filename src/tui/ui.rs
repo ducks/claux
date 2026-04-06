@@ -53,15 +53,25 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
         match msg.role.as_str() {
             "user" => {
+                // Create a "bubble" effect with background color
+                let bubble_lines: Vec<Line> = msg.content.lines().map(|line| {
+                    Line::from(Span::styled(
+                        format!("  {}", line),
+                        Style::default()
+                            .fg(app.theme.user_message_fg)
+                            .bg(app.theme.user_message_bg),
+                    ))
+                }).collect();
+                
+                // Add header line
                 lines.push(Line::from(vec![
                     Span::styled("● ", Style::default().fg(app.theme.user)),
                     Span::styled("You", Style::default().fg(app.theme.user).add_modifier(Modifier::BOLD)),
                 ]));
-                for line in msg.content.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", line),
-                        Style::default().fg(app.theme.user),
-                    )));
+                
+                // Add each line with background
+                for line in bubble_lines {
+                    lines.push(line);
                 }
             }
             "assistant" => {
