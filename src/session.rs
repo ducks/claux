@@ -1,118 +1,114 @@
-use anyhow::Result;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+//! Session storage using SQLite.
+//!
+//! Provides persistent storage for chat sessions with fast random access,
+//! metadata tracking, and querying capabilities.
+
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 use crate::api::types::Message;
+use crate::db::{Db, SessionInfo};
 
-/// A conversation session, persisted as JSONL.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionMeta {
-    pub id: String,
-    pub cwd: String,
-    pub model: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// An entry in the session JSONL file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum SessionEntry {
-    #[serde(rename = "meta")]
-    Meta(SessionMeta),
-    #[serde(rename = "message")]
-    Message { message: Message },
-}
-
-/// Get the session storage directory.
-fn sessions_dir() -> Result<PathBuf> {
+/// Get the database path.
+fn db_path() -> Result<PathBuf> {
     let base = dirs::data_local_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?;
-    let dir = base.join("claux").join("sessions");
+    let dir = base.join("claux");
     std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    Ok(dir.join("sessions.db"))
 }
 
-/// Create a new session and return its ID.
+/// Get the database instance (lazy initialization).
+fn get_db() -> Result<Db> {
+    let path = db_path()?;
+    Db::open(&path).context("Failed to open session database")
+}
+
+/// Create a new session and return its ID and a dummy path for compatibility.
 pub fn create_session(model: &str) -> Result<(String, PathBuf)> {
-    let id = Utc::now().format("%Y%m%d-%H%M%S").to_string();
-    let dir = sessions_dir()?;
-    let path = dir.join(format!("{}.jsonl", id));
-
-    let cwd = std::env::current_dir()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-
-    let meta = SessionMeta {
-        id: id.clone(),
-        cwd,
-        model: model.to_string(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
-
-    let entry = SessionEntry::Meta(meta);
-    let line = serde_json::to_string(&entry)?;
-    std::fs::write(&path, format!("{}\n", line))?;
-
-    Ok((id, path))
+    let id = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let db = get_db()?;
+    db.create_session(&id, model)?;
+    
+    // Return a dummy path for API compatibility
+    let dummy_path = PathBuf::from(format!("sqlite://{}", id));
+    Ok((id, dummy_path))
 }
 
-/// Append a message to a session file.
+/// Append a message to a session.
+/// The session_id is extracted from the path's file stem for compatibility.
 pub fn append_message(path: &PathBuf, message: &Message) -> Result<()> {
-    use std::io::Write;
-
-    let entry = SessionEntry::Message {
-        message: message.clone(),
-    };
-    let line = serde_json::to_string(&entry)?;
-
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)?;
-    writeln!(file, "{}", line)?;
-
+    let session_id = extract_session_id(path);
+    let db = get_db()?;
+    db.append_message(&session_id, message)?;
     Ok(())
 }
 
-/// Load all messages from a session file.
+/// Load all messages from a session.
 pub fn load_session(path: &PathBuf) -> Result<(SessionMeta, Vec<Message>)> {
-    let content = std::fs::read_to_string(path)?;
-    let mut meta = None;
-    let mut messages = Vec::new();
-
-    for line in content.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let entry: SessionEntry = serde_json::from_str(line)?;
-        match entry {
-            SessionEntry::Meta(m) => meta = Some(m),
-            SessionEntry::Message { message } => messages.push(message),
-        }
-    }
-
-    let meta = meta.ok_or_else(|| anyhow::anyhow!("Session file missing metadata"))?;
+    let session_id = extract_session_id(path);
+    let db = get_db()?;
+    
+    let session_info = db.get_session(&session_id)?
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
+    
+    let messages = db.get_messages(&session_id)?;
+    
+    // Convert SessionInfo to SessionMeta for compatibility
+    let meta = SessionMeta {
+        id: session_info.id,
+        cwd: String::new(), // Not tracked in SQLite version
+        model: session_info.model,
+        created_at: session_info.created_at.parse().unwrap_or_else(|_| chrono::Utc::now()),
+        updated_at: session_info.last_active.parse().unwrap_or_else(|_| chrono::Utc::now()),
+    };
+    
     Ok((meta, messages))
 }
 
 /// List available sessions, most recent first.
 pub fn list_sessions() -> Result<Vec<(String, PathBuf)>> {
-    let dir = sessions_dir()?;
-    let mut sessions: Vec<(String, PathBuf)> = Vec::new();
+    let db = get_db()?;
+    let sessions = db.list_sessions()?;
+    
+    let result: Vec<(String, PathBuf)> = sessions
+        .into_iter()
+        .map(|s| {
+            let dummy_path = PathBuf::from(format!("sqlite://{}", s.id));
+            (s.id, dummy_path)
+        })
+        .collect();
+    
+    Ok(result)
+}
 
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "jsonl") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                sessions.push((stem.to_string(), path));
-            }
-        }
-    }
+/// Extract session ID from path (file stem for file paths, or after "sqlite://" for SQLite paths).
+fn extract_session_id(path: &PathBuf) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "default".to_string())
+}
 
-    sessions.sort_by(|a, b| b.0.cmp(&a.0));
-    Ok(sessions)
+/// Update session statistics (message count, token count).
+pub fn update_session_stats(session_id: &str, message_count: usize, token_count: usize) -> Result<()> {
+    let db = get_db()?;
+    db.update_session_stats(session_id, message_count, token_count)?;
+    Ok(())
+}
+
+/// Search sessions by content.
+pub fn search_sessions(query: &str) -> Result<Vec<SessionInfo>> {
+    let db = get_db()?;
+    db.search_sessions(query)
+}
+
+/// Session metadata (kept for API compatibility).
+#[derive(Debug, Clone)]
+pub struct SessionMeta {
+    pub id: String,
+    pub cwd: String,
+    pub model: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
