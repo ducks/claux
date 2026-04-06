@@ -87,6 +87,12 @@ impl Engine {
         self.cost = CostTracker::new(model);
     }
 
+    pub fn set_theme(&mut self, _theme: crate::theme::ThemeName) {
+        // Theme is handled by the TUI layer, not the engine.
+        // This method exists for command parsing consistency.
+        // The actual theme switch happens in the TUI's execute_async handler.
+    }
+
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
