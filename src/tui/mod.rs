@@ -20,6 +20,7 @@ use crate::permissions::PermissionResponse;
 use crate::plugin::PluginRegistry;
 use crate::query::Engine;
 use crate::session;
+use crate::theme::{Theme, ThemeName};
 
 /// A displayed message in the chat.
 #[derive(Debug, Clone)]
@@ -71,6 +72,8 @@ pub struct App {
     total_lines: u16,
     /// Whether we're waiting for the first token (thinking state)
     thinking: bool,
+    /// Current theme
+    theme: Theme,
 }
 
 impl App {
@@ -91,6 +94,7 @@ impl App {
             model: model.to_string(),
             total_lines: 0,
             thinking: false,
+            theme: Theme::dark(),
         }
     }
 
@@ -99,6 +103,11 @@ impl App {
             role: role.to_string(),
             content: content.to_string(),
         });
+    }
+
+    /// Switch to a different theme.
+    fn set_theme(&mut self, theme_name: ThemeName) {
+        self.theme = Theme::from_name(theme_name);
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -258,9 +267,43 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
                         app.should_exit = true;
                     }
                     CommandResult::Async(async_cmd) => {
-                        match commands::execute_async(async_cmd, &mut engine).await {
-                            Ok(output) => app.add_message("system", &output),
-                            Err(e) => app.add_message("error", &format!("Error: {}", e)),
+                        match async_cmd {
+                            commands::AsyncCommand::Theme(theme_name) => {
+                                // Handle theme switching directly in TUI
+                                match theme_name {
+                                    Some(name) => {
+                                        let theme = match name.to_lowercase().as_str() {
+                                            "dark" => ThemeName::Dark,
+                                            "light" => ThemeName::Light,
+                                            "ansi" => ThemeName::Ansi,
+                                            _ => {
+                                                app.add_message("error", &format!(
+                                                    "Unknown theme: {}. Available: dark, light, ansi",
+                                                    name
+                                                ));
+                                                continue;
+                                            }
+                                        };
+                                        app.set_theme(theme);
+                                        app.add_message("system", &format!("Theme set to: {}", name));
+                                    }
+                                    None => {
+                                        app.add_message("system", 
+                                            "Current theme: dark\n\n\
+                                             Available themes:\n\
+                                             - dark: gruvbox-inspired (default)\n\
+                                             - light: high-contrast for bright terminals\n\
+                                             - ansi: 16-color fallback\n\n\
+                                             Use /theme <name> to switch.");
+                                    }
+                                }
+                            }
+                            _ => {
+                                match commands::execute_async(async_cmd, &mut engine).await {
+                                    Ok(output) => app.add_message("system", &output),
+                                    Err(e) => app.add_message("error", &format!("Error: {}", e)),
+                                }
+                            }
                         }
                     }
                 }

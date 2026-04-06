@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use crate::query::Engine;
 use crate::session;
+use crate::theme::ThemeName;
 
 pub enum CommandResult {
     /// Print text to the user
@@ -16,6 +17,7 @@ pub enum AsyncCommand {
     Compact,
     Resume(Option<String>),
     Model(Option<String>),
+    Theme(Option<String>),
 }
 
 /// Parse a slash command. Returns None if input isn't a command.
@@ -51,6 +53,14 @@ pub fn parse_command(input: &str) -> Option<CommandResult> {
             };
             Some(CommandResult::Async(AsyncCommand::Model(model)))
         }
+        "/theme" => {
+            let theme = if args.is_empty() {
+                None
+            } else {
+                Some(args.to_string())
+            };
+            Some(CommandResult::Async(AsyncCommand::Theme(theme)))
+        }
         "/cost" => Some(CommandResult::Text("__cost__".to_string())),
         _ => Some(CommandResult::Text(format!(
             "Unknown command: {}. Type /help for available commands.",
@@ -65,6 +75,7 @@ pub async fn execute_async(cmd: AsyncCommand, engine: &mut Engine) -> Result<Str
         AsyncCommand::Compact => engine.compact().await,
         AsyncCommand::Resume(id) => execute_resume(id, engine),
         AsyncCommand::Model(new_model) => execute_model(new_model, engine),
+        AsyncCommand::Theme(theme_name) => execute_theme(theme_name, engine).await,
     }
 }
 
@@ -137,6 +148,40 @@ fn execute_model(new_model: Option<String>, engine: &mut Engine) -> Result<Strin
              Use /model <name> to switch.",
             engine.model()
         )),
+    }
+}
+
+async fn execute_theme(theme_name: Option<String>, engine: &mut Engine) -> Result<String> {
+    match theme_name {
+        Some(name) => {
+            let _theme = match name.to_lowercase().as_str() {
+                "dark" => ThemeName::Dark,
+                "light" => ThemeName::Light,
+                "ansi" => ThemeName::Ansi,
+                _ => {
+                    return Ok(format!(
+                        "Unknown theme: {}\n\n\
+                         Available themes:\n\
+                         - dark: gruvbox-inspired (default)\n\
+                         - light: high-contrast for bright terminals\n\
+                         - ansi: 16-color fallback",
+                        name
+                    ));
+                }
+            };
+            engine.set_theme(_theme);
+            Ok(format!("Theme set to: {}", name))
+        }
+        None => {
+            Ok(format!(
+                "Current theme: dark\n\n\
+                 Available themes:\n\
+                 - dark: gruvbox-inspired (default)\n\
+                 - light: high-contrast for bright terminals\n\
+                 - ansi: 16-color fallback\n\n\
+                 Use /theme <name> to switch."
+            ))
+        }
     }
 }
 
@@ -229,17 +274,18 @@ mod tests {
 }
 
 fn help_text() -> String {
-    r#"Available commands:
+    "Available commands:
   /help           Show this help
   /cost           Show token usage and cost
   /compact        Summarize conversation to free context
   /model [name]   Show or switch model
+  /theme [name]   Show or switch theme (dark, light, ansi)
   /resume [id]    List or resume past sessions
   /clear          Clear screen
-  /exit           Exit claude-rs
+  /exit           Exit claux
 
 Keyboard:
   Ctrl+C    Cancel current request
-  Ctrl+D    Exit"#
+  Ctrl+D    Exit"
         .to_string()
 }
