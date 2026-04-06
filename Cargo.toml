@@ -61,5 +61,8 @@ tiktoken-rs = "0.9"
 similar = "2.6"
 pulldown-cmark = "0.13.3"
 
+# SQLite database
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+
 [dev-dependencies]
 tempfile = "3.0"

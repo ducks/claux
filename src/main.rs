@@ -5,6 +5,7 @@ mod compact;
 mod config;
 mod context;
 mod cost;
+mod db;
 mod permissions;
 mod plugin;
 mod query;
