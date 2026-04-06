@@ -10,6 +10,7 @@ mod plugin;
 mod query;
 mod repl;
 mod session;
+mod theme;
 mod tools;
 mod tui;
 mod utils;
