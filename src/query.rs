@@ -17,6 +17,7 @@ pub struct Engine {
     system_prompt: String,
     model: String,
     max_tokens: u32,
+    auto_compact_threshold: f64,
     pub cost: CostTracker,
 }
 
@@ -57,8 +58,14 @@ impl Engine {
             system_prompt: String::new(),
             model: model.to_string(),
             max_tokens: 16384,
+            auto_compact_threshold: 0.8,
             cost: CostTracker::new(model),
         }
+    }
+
+    /// Set the auto-compact threshold (0.0-1.0).
+    pub fn set_auto_compact_threshold(&mut self, threshold: f64) {
+        self.auto_compact_threshold = threshold.clamp(0.0, 1.0);
     }
 
     pub fn set_system_prompt(&mut self, prompt: String) {
@@ -151,6 +158,35 @@ impl Engine {
         self.permissions.always_allow_command(cmd);
     }
 
+    /// Check if auto-compact is needed and perform it if so.
+    /// Returns true if compaction was performed.
+    pub async fn maybe_auto_compact(&mut self) -> Result<bool> {
+        // Disabled if threshold is 0.0
+        if self.auto_compact_threshold <= 0.0 {
+            return Ok(false);
+        }
+
+        let ctx_window = compact::context_window_for_model(&self.model);
+        let current_tokens = compact::estimate_tokens(&self.messages);
+        let threshold_tokens = (ctx_window as f64 * self.auto_compact_threshold) as usize;
+
+        if current_tokens > threshold_tokens {
+            tracing::info!(
+                "Auto-compact triggered: {} tokens > {} (threshold: {:.0}% of {})",
+                current_tokens,
+                threshold_tokens,
+                self.auto_compact_threshold * 100.0,
+                ctx_window
+            );
+            
+            let result = self.compact().await?;
+            tracing::info!("Auto-compact completed: {}", result);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Compact the conversation using the multi-strategy pipeline.
     /// Strategies (in order of aggressiveness):
     /// 1. Snip — collapse old messages, keep recent ones
@@ -228,24 +264,6 @@ impl Engine {
         ))
     }
 
-    /// Auto-compact based on estimated token usage vs context window.
-    async fn maybe_auto_compact(&mut self) {
-        let ctx_window = compact::context_window_for_model(&self.model);
-        match compact::should_compact(&self.messages, ctx_window) {
-            CompactStrategy::None => {}
-            CompactStrategy::Snip => {
-                tracing::info!("Auto-snip: token estimate approaching context limit");
-                if let Some(snipped) = compact::snip_old_messages(&self.messages, 10) {
-                    self.messages = snipped;
-                }
-            }
-            CompactStrategy::Summarize => {
-                tracing::info!("Auto-summarize: token estimate near context limit");
-                let _ = self.compact().await;
-            }
-        }
-    }
-
     /// Check if an API error is a prompt-too-long error (413 or specific error message).
     fn is_prompt_too_long(err: &str) -> bool {
         err.contains("413")
@@ -264,7 +282,7 @@ impl Engine {
     /// Includes error recovery for prompt-too-long and max-output-tokens.
     /// Returns the final assistant text response.
     pub async fn submit(&mut self, user_input: &str) -> Result<String> {
-        self.maybe_auto_compact().await;
+        let _ = self.maybe_auto_compact().await; // Ignore result for non-streaming
         self.messages.push(Message::user(user_input));
 
         let mut full_response = String::new();
@@ -476,7 +494,12 @@ impl Engine {
         user_input: &str,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
-        self.maybe_auto_compact().await;
+        let compacted = self.maybe_auto_compact().await?;
+        if compacted {
+            let _ = tx.send(StreamEvent::Text(
+                "\n[conversation auto-compacted to free context]\n".to_string(),
+            )).await;
+        }
         self.messages.push(Message::user(user_input));
 
         let mut recovery_attempts = 0;
@@ -718,6 +741,7 @@ mod tests {
             system_prompt: String::new(),
             model: "test".to_string(),
             max_tokens: 1000,
+            auto_compact_threshold: 0.8,
             cost: CostTracker::new("test"),
         };
 
@@ -775,6 +799,7 @@ mod tests {
             system_prompt: String::new(),
             model: "test".to_string(),
             max_tokens: 1000,
+            auto_compact_threshold: 0.8,
             cost: CostTracker::new("test"),
         };
 

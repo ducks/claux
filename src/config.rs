@@ -33,6 +33,12 @@ pub struct Config {
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
 
+    /// Auto-compact threshold (0.0-1.0). If conversation exceeds this
+    /// fraction of the context window, auto-compact before next request.
+    /// Set to 0.0 to disable auto-compact.
+    #[serde(default = "default_auto_compact_threshold")]
+    pub auto_compact_threshold: f64,
+
     /// OpenAI-compatible endpoint (e.g. "http://localhost:11434/v1")
     #[serde(default)]
     pub openai_base_url: Option<String>,
@@ -90,6 +96,10 @@ fn default_max_tokens() -> u32 {
     16384
 }
 
+fn default_auto_compact_threshold() -> f64 {
+    0.8 // 80% of context window
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -99,6 +109,7 @@ impl Default for Config {
             api_key_cmd: None,
             permission_mode: PermissionMode::Default,
             max_tokens: default_max_tokens(),
+            auto_compact_threshold: default_auto_compact_threshold(),
             openai_base_url: None,
             openai_api_key: None,
             openai_api_key_cmd: None,
