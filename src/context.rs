@@ -33,6 +33,11 @@ pub async fn build_system_prompt_for_model(model: &str, plugins: Option<&PluginR
         parts.push(format!("\n# Git Status\n{}", git_info));
     }
 
+    // Project map (smart context)
+    if let Some(project_map) = build_project_map().await {
+        parts.push(format!("\n# Project Structure\n{}", project_map));
+    }
+
     // CLAUDE.md / project context
     if let Some(claude_md) = read_claude_md().await {
         parts.push(format!("\n# Project Context (CLAUDE.md)\n{}", claude_md));
@@ -155,4 +160,69 @@ async fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
     }
 
     Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Build a lightweight project map: file structure + top-level symbols.
+/// Runs `rg --files` and `rg --symbols` once at session start.
+/// This gives the LLM "memory" of the codebase without heavy indexing.
+async fn build_project_map() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    
+    // Check if we're in a git repo (skip if not)
+    if !cwd.join(".git").exists() {
+        return None;
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // 1. Project type detection
+    let project_type = detect_project_type(&cwd);
+    parts.push(format!("**Project Type:** {}", project_type));
+
+    // 2. File structure (top 100 files, sorted by relevance)
+    let files = run_cmd("rg", &["--files", "--max-depth", "5", "--hidden", "-g", "!.git"]).await?;
+    let file_count = files.lines().count();
+    let files = if file_count > 100 {
+        format!("{}... ({} total files, showing top 100)", 
+            files.lines().take(100).collect::<Vec<_>>().join("\n"),
+            file_count
+        )
+    } else {
+        files
+    };
+    parts.push(format!("\n**File Structure** ({} files):\n{}", file_count, files));
+
+    // 3. Top-level symbols (if ripgrep supports it)
+    // Note: --symbols is experimental, fallback to just files if it fails
+    if let Some(symbols) = run_cmd("rg", &["--symbols", "--max-depth", "3"]).await {
+        if !symbols.trim().is_empty() {
+            let symbols = if symbols.lines().count() > 50 {
+                format!("{}... (truncated)", symbols.lines().take(50).collect::<Vec<_>>().join("\n"))
+            } else {
+                symbols
+            };
+            parts.push(format!("\n**Top-Level Symbols**:\n{}", symbols));
+        }
+    }
+
+    Some(parts.join("\n"))
+}
+
+/// Detect project type from manifest files
+fn detect_project_type(cwd: &std::path::Path) -> &'static str {
+    if cwd.join("Cargo.toml").exists() {
+        "Rust"
+    } else if cwd.join("Gemfile").exists() {
+        "Ruby"
+    } else if cwd.join("package.json").exists() {
+        "Node.js/TypeScript"
+    } else if cwd.join("pyproject.toml").exists() || cwd.join("setup.py").exists() {
+        "Python"
+    } else if cwd.join("go.mod").exists() {
+        "Go"
+    } else if cwd.join("Cargo.lock").exists() {
+        "Rust (locked)"
+    } else {
+        "Unknown"
+    }
 }
