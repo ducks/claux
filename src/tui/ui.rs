@@ -18,6 +18,7 @@ const YELLOW: Color = Color::Rgb(250, 189, 47); // gruvbox yellow
 const RED: Color = Color::Rgb(251, 73, 52); // gruvbox red
 const PURPLE: Color = Color::Rgb(211, 134, 155); // gruvbox purple
 const GRAY: Color = Color::Rgb(146, 131, 116); // gruvbox gray
+const CYAN: Color = Color::Rgb(131, 201, 160); // gruvbox cyan
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     // Expand input area when showing permission details
@@ -188,11 +189,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             perm_lines.push(Line::from(Span::styled(detail.clone(), style)));
         }
         perm_lines.push(Line::from(""));
-        perm_lines.push(Line::from(vec![
-            Span::styled("  (y)es  ", Style::default().fg(GREEN)),
-            Span::styled("(n)o  ", Style::default().fg(RED)),
-            Span::styled("(a)lways allow", Style::default().fg(YELLOW)),
-        ]));
+        // Show different options based on whether it's a bash command
+        let help_text = if prompt.starts_with("bash:") {
+            vec![
+                Span::styled("  (y)es  ", Style::default().fg(GREEN)),
+                Span::styled("(n)o  ", Style::default().fg(RED)),
+                Span::styled("(a)lways this cmd  ", Style::default().fg(YELLOW)),
+                Span::styled("(A)lways all bash", Style::default().fg(CYAN)),
+            ]
+        } else {
+            vec![
+                Span::styled("  (y)es  ", Style::default().fg(GREEN)),
+                Span::styled("(n)o  ", Style::default().fg(RED)),
+                Span::styled("(a)lways allow", Style::default().fg(YELLOW)),
+            ]
+        };
+        perm_lines.push(Line::from(help_text));
 
         let perm_widget = Paragraph::new(perm_lines)
             .block(
