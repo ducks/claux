@@ -63,16 +63,30 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
 
         // Stream the response
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
+        
+        // Capture model name for display
+        let model_name = engine.model().to_string();
+
+        // Show thinking indicator while waiting for first response
+        print!("\n  \x1b[2mthinking...\x1b[0m");
+        let _ = stdout().flush();
 
         // Spawn the display consumer
         let display_handle = tokio::spawn(async move {
             let mut in_tool = false;
+            let mut first_text = true;
             while let Some(event) = rx.recv().await {
                 match event {
                     StreamEvent::Text(t) => {
                         if in_tool {
                             println!();
                             in_tool = false;
+                        }
+                        // Clear thinking indicator on first text and show model
+                        if first_text {
+                            print!("\r\x1b[2m● {} \x1b[0m", model_name);
+                            let _ = stdout().flush();
+                            first_text = false;
                         }
                         print!("{}", t);
                         let _ = stdout().flush();

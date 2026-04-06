@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use chrono;
 
 use super::{App, Mode};
 use super::markdown;
@@ -73,7 +74,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 }
             }
             "assistant" => {
-                lines.push(Line::from(Span::styled("● ", Style::default().fg(PURPLE))));
+                lines.push(Line::from(vec![
+                    Span::styled("● ", Style::default().fg(PURPLE)),
+                    Span::styled(format!("{} ", app.model), Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
+                ]));
                 let rendered = markdown::render(&msg.content, Style::default().fg(FG));
                 // Indent assistant content to align with the dot
                 for line in rendered {
@@ -117,7 +121,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        lines.push(Line::from(Span::styled("● ", Style::default().fg(GREEN))));
+        lines.push(Line::from(vec![
+            Span::styled("● ", Style::default().fg(GREEN)),
+            Span::styled(format!("{} ", app.model), Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
+        ]));
         let rendered = markdown::render(&app.stream_buffer, Style::default().fg(GREEN));
         for line in rendered {
             let mut indented = vec![Span::raw("  ")];
@@ -226,7 +233,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     // Status bar
+    let thinking_indicator = if app.thinking {
+        // Pulsing spinner effect
+        let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let idx = (chrono::Local::now().timestamp_millis() / 100) as usize % spinner.len();
+        format!(" {} ", spinner[idx])
+    } else {
+        " ".to_string()
+    };
+
     let status = Paragraph::new(Line::from(vec![
+        Span::styled(thinking_indicator, Style::default().fg(GREEN)),
         Span::styled(format!(" {} ", app.status), Style::default().fg(GRAY)),
     ]));
     f.render_widget(status, chunks[3]);

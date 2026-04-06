@@ -69,6 +69,8 @@ pub struct App {
     model: String,
     /// Total lines needed for messages (for scroll calculation)
     total_lines: u16,
+    /// Whether we're waiting for the first token (thinking state)
+    thinking: bool,
 }
 
 impl App {
@@ -88,6 +90,7 @@ impl App {
             should_exit: false,
             model: model.to_string(),
             total_lines: 0,
+            thinking: false,
         }
     }
 
@@ -251,13 +254,14 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
             app.add_message("user", &trimmed);
             app.mode = Mode::Streaming;
             app.stream_buffer.clear();
+            app.thinking = true; // Show thinking indicator
             app.scroll = 0;
             app.manual_scroll = false;
 
             let user_msg = crate::api::Message::user(&trimmed);
             let _ = session::append_message(&session_path, &user_msg);
 
-            app.status = format!("{} | streaming...", app.model);
+            app.status = format!("{} | thinking...", app.model);
 
             let submit_result = drive_streaming(
                 &mut engine,
@@ -338,6 +342,10 @@ async fn drive_streaming(
                         crate::api::ApiEvent::Text(t) => {
                             app.stream_buffer.push_str(&t);
                             text_buf.push_str(&t);
+                            // Clear thinking indicator on first text
+                            if app.thinking {
+                                app.thinking = false;
+                            }
                             terminal.draw(|f| ui::draw(f, app))?;
                         }
                         crate::api::ApiEvent::ToolUse { id, name, input } => {
