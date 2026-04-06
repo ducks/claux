@@ -276,9 +276,12 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
                                             "dark" => ThemeName::Dark,
                                             "light" => ThemeName::Light,
                                             "ansi" => ThemeName::Ansi,
+                                            "dracula" => ThemeName::Dracula,
+                                            "nord" => ThemeName::Nord,
+                                            "catppuccin" => ThemeName::Catppuccin,
                                             _ => {
                                                 app.add_message("error", &format!(
-                                                    "Unknown theme: {}. Available: dark, light, ansi",
+                                                    "Unknown theme: {}. Available: dark, light, ansi, dracula, nord, catppuccin",
                                                     name
                                                 ));
                                                 continue;
@@ -293,7 +296,10 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
                                              Available themes:\n\
                                              - dark: gruvbox-inspired (default)\n\
                                              - light: high-contrast for bright terminals\n\
-                                             - ansi: 16-color fallback\n\n\
+                                             - ansi: 16-color fallback\n\
+                                             - dracula: dark purple/violet theme\n\
+                                             - nord: arctic blue-gray theme\n\
+                                             - catppuccin: pastel mocha theme\n\n\
                                              Use /theme <name> to switch.");
                                     }
                                 }
