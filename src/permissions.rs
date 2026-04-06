@@ -36,12 +36,16 @@ pub enum PermissionResponse {
     Deny,
     /// Always allow this tool for the rest of the session
     AlwaysAllow,
+    /// Always allow this specific command (for Bash tool only)
+    AlwaysAllowCommand(String),
 }
 
 pub struct PermissionChecker {
     mode: PermissionMode,
     /// Tools the user has "always allowed" this session
     session_allows: std::collections::HashSet<String>,
+    /// Specific bash commands the user has "always allowed" this session
+    bash_command_allows: std::collections::HashSet<String>,
 }
 
 impl PermissionChecker {
@@ -49,6 +53,7 @@ impl PermissionChecker {
         Self {
             mode,
             session_allows: std::collections::HashSet::new(),
+            bash_command_allows: std::collections::HashSet::new(),
         }
     }
 
@@ -57,11 +62,30 @@ impl PermissionChecker {
         self.session_allows.insert(tool_name.to_string());
     }
 
+    /// Record that the user chose "always allow" for a specific bash command.
+    pub fn always_allow_command(&mut self, cmd: &str) {
+        self.bash_command_allows.insert(cmd.to_string());
+    }
+
+    /// Check if a specific bash command is always allowed.
+    pub fn is_command_allowed(&self, cmd: &str) -> bool {
+        self.bash_command_allows.contains(cmd)
+    }
+
     /// Check whether a tool invocation should be allowed.
     pub fn check(&self, tool_name: &str, input: &serde_json::Value, is_read_only: bool) -> PermissionResult {
         // Session-level always-allow overrides
         if self.session_allows.contains(tool_name) {
             return PermissionResult::Allow;
+        }
+
+        // Command-specific allows for Bash
+        if tool_name == "Bash" {
+            if let Some(cmd) = input["command"].as_str() {
+                if self.bash_command_allows.contains(cmd) {
+                    return PermissionResult::Allow;
+                }
+            }
         }
 
         match self.mode {

@@ -140,6 +140,11 @@ impl Engine {
         self.permissions.always_allow(name);
     }
 
+    /// Record a bash command as always-allowed for the session.
+    pub fn always_allow_command(&mut self, cmd: &str) {
+        self.permissions.always_allow_command(cmd);
+    }
+
     /// Compact the conversation using the multi-strategy pipeline.
     /// Strategies (in order of aggressiveness):
     /// 1. Snip — collapse old messages, keep recent ones
@@ -607,6 +612,10 @@ impl Engine {
                             }
                             Ok(PermissionResponse::AlwaysAllow) => {
                                 self.permissions.always_allow(name);
+                                self.tools.execute(name, input.clone()).await?
+                            }
+                            Ok(PermissionResponse::AlwaysAllowCommand(ref cmd)) => {
+                                self.permissions.always_allow_command(cmd);
                                 self.tools.execute(name, input.clone()).await?
                             }
                             Ok(PermissionResponse::Deny) | Err(_) => crate::tools::ToolOutput {

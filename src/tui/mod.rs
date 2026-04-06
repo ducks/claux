@@ -172,7 +172,27 @@ impl App {
     fn handle_permission_key(&mut self, key: KeyEvent) {
         let response = match key.code {
             KeyCode::Char('y') | KeyCode::Enter => Some(PermissionResponse::Allow),
-            KeyCode::Char('a') => Some(PermissionResponse::AlwaysAllow),
+            KeyCode::Char('a') => {
+                // Lowercase 'a' for command-specific allow (bash only)
+                if let Some(ref prompt) = self.permission_prompt {
+                    if prompt.starts_with("bash:") {
+                        // Extract command for command-specific allow
+                        if let Some(cmd) = prompt.strip_prefix("bash: ") {
+                            Some(PermissionResponse::AlwaysAllowCommand(cmd.trim().to_string()))
+                        } else {
+                            Some(PermissionResponse::AlwaysAllowCommand(prompt.clone()))
+                        }
+                    } else {
+                        Some(PermissionResponse::AlwaysAllow)
+                    }
+                } else {
+                    Some(PermissionResponse::AlwaysAllow)
+                }
+            }
+            KeyCode::Char('A') => {
+                // Uppercase 'A' for always allow all bash commands
+                Some(PermissionResponse::AlwaysAllow)
+            }
             KeyCode::Char('n') | KeyCode::Esc => Some(PermissionResponse::Deny),
             _ => None,
         };
@@ -472,6 +492,10 @@ async fn drive_streaming(
                         }
                         PermissionResponse::AlwaysAllow => {
                             engine.always_allow_tool(name);
+                            engine.execute_tool(name, input.clone()).await?
+                        }
+                        PermissionResponse::AlwaysAllowCommand(ref cmd) => {
+                            engine.always_allow_command(cmd);
                             engine.execute_tool(name, input.clone()).await?
                         }
                         PermissionResponse::Deny => crate::tools::ToolOutput {

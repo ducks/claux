@@ -160,11 +160,19 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
 }
 
 /// Prompt the user for permission to execute a tool.
-fn prompt_permission(_tool_name: &str, summary: &str) -> PermissionResponse {
-    print!(
-        "\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m ",
-        summary
-    );
+fn prompt_permission(tool_name: &str, summary: &str) -> PermissionResponse {
+    // For Bash commands, offer command-specific "always allow"
+    if tool_name == "Bash" {
+        print!(
+            "\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways this command / (A)lways all bash\x1b[0m ",
+            summary
+        );
+    } else {
+        print!(
+            "\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m ",
+            summary
+        );
+    }
     let _ = stdout().flush();
 
     let mut input = String::new();
@@ -172,7 +180,18 @@ fn prompt_permission(_tool_name: &str, summary: &str) -> PermissionResponse {
         return PermissionResponse::Deny;
     }
 
-    match input.trim().to_lowercase().as_str() {
+    let trimmed = input.trim().to_lowercase();
+    
+    // For Bash, extract the command from the summary for command-specific allow
+    if tool_name == "Bash" && (trimmed == "a" || trimmed == "always") {
+        // Extract command from summary (format: "bash: <command>")
+        if let Some(cmd) = summary.strip_prefix("bash: ") {
+            return PermissionResponse::AlwaysAllowCommand(cmd.trim().to_string());
+        }
+        return PermissionResponse::AlwaysAllowCommand(summary.to_string());
+    }
+
+    match trimmed.as_str() {
         "y" | "yes" | "" => PermissionResponse::Allow,
         "a" | "always" => PermissionResponse::AlwaysAllow,
         _ => PermissionResponse::Deny,
@@ -180,8 +199,13 @@ fn prompt_permission(_tool_name: &str, summary: &str) -> PermissionResponse {
 }
 
 /// Prompt the user for permission with a diff preview.
-fn prompt_permission_with_diff(_tool_name: &str, summary: &str, diff: &str) -> PermissionResponse {
-    println!("\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m", summary);
+fn prompt_permission_with_diff(tool_name: &str, summary: &str, diff: &str) -> PermissionResponse {
+    // For Bash commands, offer command-specific "always allow"
+    if tool_name == "Bash" {
+        println!("\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways this command / (A)lways all bash\x1b[0m", summary);
+    } else {
+        println!("\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m", summary);
+    }
     println!("\n  \x1b[2m--- Diff Preview ---\x1b[0m");
     
     // Print the colorized diff
@@ -200,7 +224,18 @@ fn prompt_permission_with_diff(_tool_name: &str, summary: &str, diff: &str) -> P
         return PermissionResponse::Deny;
     }
 
-    match input.trim().to_lowercase().as_str() {
+    let trimmed = input.trim().to_lowercase();
+    
+    // For Bash, extract the command from the summary for command-specific allow
+    if tool_name == "Bash" && (trimmed == "a" || trimmed == "always") {
+        // Extract command from summary (format: "bash: <command>")
+        if let Some(cmd) = summary.strip_prefix("bash: ") {
+            return PermissionResponse::AlwaysAllowCommand(cmd.trim().to_string());
+        }
+        return PermissionResponse::AlwaysAllowCommand(summary.to_string());
+    }
+
+    match trimmed.as_str() {
         "y" | "yes" | "" => PermissionResponse::Allow,
         "a" | "always" => PermissionResponse::AlwaysAllow,
         _ => PermissionResponse::Deny,
