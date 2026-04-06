@@ -1,6 +1,6 @@
 [package]
 name = "claux"
-version = "20260406.0.0"
+version = "20260406.0.1"
 edition = "2021"
 description = "Terminal AI coding assistant with tool execution"
 license = "MIT"
