@@ -158,13 +158,19 @@ async fn execute_theme(theme_name: Option<String>, engine: &mut Engine) -> Resul
                 "dark" => ThemeName::Dark,
                 "light" => ThemeName::Light,
                 "ansi" => ThemeName::Ansi,
+                "dracula" => ThemeName::Dracula,
+                "nord" => ThemeName::Nord,
+                "catppuccin" => ThemeName::Catppuccin,
                 _ => {
                     return Ok(format!(
                         "Unknown theme: {}\n\n\
                          Available themes:\n\
                          - dark: gruvbox-inspired (default)\n\
                          - light: high-contrast for bright terminals\n\
-                         - ansi: 16-color fallback",
+                         - ansi: 16-color fallback\n\
+                         - dracula: dark purple/violet theme\n\
+                         - nord: arctic blue-gray theme\n\
+                         - catppuccin: pastel mocha theme",
                         name
                     ));
                 }
@@ -178,7 +184,10 @@ async fn execute_theme(theme_name: Option<String>, engine: &mut Engine) -> Resul
                  Available themes:\n\
                  - dark: gruvbox-inspired (default)\n\
                  - light: high-contrast for bright terminals\n\
-                 - ansi: 16-color fallback\n\n\
+                 - ansi: 16-color fallback\n\
+                 - dracula: dark purple/violet theme\n\
+                 - nord: arctic blue-gray theme\n\
+                 - catppuccin: pastel mocha theme\n\n\
                  Use /theme <name> to switch."
             ))
         }
