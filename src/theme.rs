@@ -43,6 +43,8 @@ pub struct Theme {
     pub assistant_bold: Color,
     pub user: Color,
     pub user_bold: Color,
+    pub user_message_bg: Color, // Background for user messages (inverted)
+    pub user_message_fg: Color, // Foreground for user messages (inverted)
 
     // Tool colors
     pub tool_name: Color,
@@ -85,6 +87,8 @@ impl Theme {
             assistant_bold: Color::Rgb(211, 134, 155), // gruvbox purple
             user: Color::Rgb(184, 187, 38),    // gruvbox green
             user_bold: Color::Rgb(250, 233, 213), // gruvbox fg1
+            user_message_bg: Color::Rgb(60, 60, 60), // Darker than bg for bubble effect
+            user_message_fg: Color::Rgb(213, 196, 161), // Same as fg for readability
 
             tool_name: Color::Rgb(250, 189, 47), // gruvbox yellow
             tool_summary: Color::Rgb(146, 131, 116), // gruvbox gray
@@ -123,6 +127,8 @@ impl Theme {
             assistant_bold: Color::Rgb(140, 80, 160), // purple
             user: Color::Rgb(84, 128, 0),     // green
             user_bold: Color::Rgb(30, 30, 30), // near black
+            user_message_bg: Color::Rgb(220, 220, 220), // Lighter than bg for bubble effect
+            user_message_fg: Color::Rgb(60, 60, 60), // Dark fg for readability
 
             tool_name: Color::Rgb(200, 150, 0), // amber
             tool_summary: Color::Rgb(140, 140, 140), // gray
@@ -161,6 +167,8 @@ impl Theme {
             assistant_bold: Color::Magenta,
             user: Color::Green,
             user_bold: Color::White,
+            user_message_bg: Color::DarkGray, // Inverted bg for ANSI
+            user_message_fg: Color::White,    // Inverted fg for ANSI
 
             tool_name: Color::Yellow,
             tool_summary: Color::DarkGray,
@@ -200,6 +208,8 @@ impl Theme {
             assistant_bold: Color::Rgb(255, 121, 198), // p:pink
             user: Color::Rgb(80, 250, 123),     // p:green
             user_bold: Color::Rgb(248, 248, 242),
+            user_message_bg: Color::Rgb(68, 71, 90), // Dracula overlay
+            user_message_fg: Color::Rgb(248, 248, 242),
 
             tool_name: Color::Rgb(255, 184, 108), // p:yellow
             tool_summary: Color::Rgb(98, 114, 164), // p:comment
@@ -239,6 +249,8 @@ impl Theme {
             assistant_bold: Color::Rgb(180, 142, 173), // n:magenta
             user: Color::Rgb(163, 190, 140),    // n:green
             user_bold: Color::Rgb(236, 239, 244),
+            user_message_bg: Color::Rgb(59, 66, 82), // Nord overlay
+            user_message_fg: Color::Rgb(236, 239, 244),
 
             tool_name: Color::Rgb(235, 203, 139), // n:yellow
             tool_summary: Color::Rgb(94, 120, 156), // n:comment
@@ -278,6 +290,8 @@ impl Theme {
             assistant_bold: Color::Rgb(231, 130, 198), // pink
             user: Color::Rgb(166, 227, 161),    // green
             user_bold: Color::Rgb(205, 214, 244),
+            user_message_bg: Color::Rgb(41, 45, 60), // Catppuccin overlay
+            user_message_fg: Color::Rgb(205, 214, 244),
 
             tool_name: Color::Rgb(250, 179, 135), // peach
             tool_summary: Color::Rgb(148, 157, 180), // subtext0
