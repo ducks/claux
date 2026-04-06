@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
@@ -9,16 +9,6 @@ use chrono;
 
 use super::{App, Mode};
 use super::markdown;
-
-const FG: Color = Color::Rgb(213, 196, 161); // gruvbox fg2
-const BG_DARK: Color = Color::Rgb(40, 40, 40); // gruvbox bg
-const BLUE: Color = Color::Rgb(131, 165, 152); // gruvbox blue
-const GREEN: Color = Color::Rgb(184, 187, 38); // gruvbox green
-const YELLOW: Color = Color::Rgb(250, 189, 47); // gruvbox yellow
-const RED: Color = Color::Rgb(251, 73, 52); // gruvbox red
-const PURPLE: Color = Color::Rgb(211, 134, 155); // gruvbox purple
-const GRAY: Color = Color::Rgb(146, 131, 116); // gruvbox gray
-const CYAN: Color = Color::Rgb(131, 201, 160); // gruvbox cyan
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     // Expand input area when showing permission details
@@ -41,10 +31,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Header
     let header = Paragraph::new(Line::from(vec![
-        Span::styled(" claux ", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
+        Span::styled(" claux ", Style::default().fg(app.theme.assistant_bold).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!("v{}", env!("CARGO_PKG_VERSION")),
-            Style::default().fg(GRAY),
+            Style::default().fg(app.theme.dim),
         ),
     ]));
     f.render_widget(header, chunks[0]);
@@ -64,22 +54,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         match msg.role.as_str() {
             "user" => {
                 lines.push(Line::from(vec![
-                    Span::styled("● ", Style::default().fg(BLUE)),
-                    Span::styled("You", Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
+                    Span::styled("● ", Style::default().fg(app.theme.user)),
+                    Span::styled("You", Style::default().fg(app.theme.user).add_modifier(Modifier::BOLD)),
                 ]));
                 for line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", line),
-                        Style::default().fg(BLUE),
+                        Style::default().fg(app.theme.user),
                     )));
                 }
             }
             "assistant" => {
                 lines.push(Line::from(vec![
-                    Span::styled("● ", Style::default().fg(PURPLE)),
-                    Span::styled(format!("{} ", app.model), Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
+                    Span::styled("● ", Style::default().fg(app.theme.assistant)),
+                    Span::styled(format!("{} ", app.model), Style::default().fg(app.theme.assistant_bold).add_modifier(Modifier::BOLD)),
                 ]));
-                let rendered = markdown::render(&msg.content, Style::default().fg(FG));
+                let rendered = markdown::render(&msg.content, Style::default().fg(app.theme.fg));
                 // Indent assistant content to align with the dot
                 for line in rendered {
                     let mut indented = vec![Span::raw("  ")];
@@ -88,29 +78,29 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 }
             }
             "system" => {
-                lines.push(Line::from(Span::styled("● ", Style::default().fg(YELLOW))));
+                lines.push(Line::from(Span::styled("● ", Style::default().fg(app.theme.warning))));
                 for line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", line),
-                        Style::default().fg(YELLOW),
+                        Style::default().fg(app.theme.warning),
                     )));
                 }
             }
             "error" => {
-                lines.push(Line::from(Span::styled("● ", Style::default().fg(RED))));
+                lines.push(Line::from(Span::styled("● ", Style::default().fg(app.theme.error))));
                 for line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", line),
-                        Style::default().fg(RED),
+                        Style::default().fg(app.theme.error),
                     )));
                 }
             }
             _ => {
-                lines.push(Line::from(Span::styled("● ", Style::default().fg(GRAY))));
+                lines.push(Line::from(Span::styled("● ", Style::default().fg(app.theme.dim))));
                 for line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", line),
-                        Style::default().fg(FG),
+                        Style::default().fg(app.theme.fg),
                     )));
                 }
             }
@@ -123,17 +113,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             lines.push(Line::from(""));
         }
         lines.push(Line::from(vec![
-            Span::styled("● ", Style::default().fg(GREEN)),
-            Span::styled(format!("{} ", app.model), Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled("● ", Style::default().fg(app.theme.success)),
+            Span::styled(format!("{} ", app.model), Style::default().fg(app.theme.success).add_modifier(Modifier::BOLD)),
         ]));
-        let rendered = markdown::render(&app.stream_buffer, Style::default().fg(GREEN));
+        let rendered = markdown::render(&app.stream_buffer, Style::default().fg(app.theme.success));
         for line in rendered {
             let mut indented = vec![Span::raw("  ")];
             indented.extend(line.spans);
             lines.push(Line::from(indented));
         }
         // Cursor indicator
-        lines.push(Line::from(Span::styled("  ▊", Style::default().fg(GREEN))));
+        lines.push(Line::from(Span::styled("  ▊", Style::default().fg(app.theme.success))));
     }
 
     app.total_lines = lines.len() as u16;
@@ -156,35 +146,35 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .block(
             Block::default()
                 .borders(Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(GRAY)),
+                .border_style(Style::default().fg(app.theme.dim)),
         )
         .scroll((scroll_offset, 0));
     f.render_widget(messages_widget, msg_area);
 
     // Input area
     let input_style = match app.mode {
-        Mode::Input => Style::default().fg(FG),
-        Mode::Permission => Style::default().fg(YELLOW),
-        Mode::Streaming => Style::default().fg(GRAY),
+        Mode::Input => Style::default().fg(app.theme.fg),
+        Mode::Permission => Style::default().fg(app.theme.warning),
+        Mode::Streaming => Style::default().fg(app.theme.dim),
     };
 
     if let (Some(ref prompt), Some(ref details)) = (&app.permission_prompt, &app.permission_details) {
         // Expanded permission panel
         let mut perm_lines: Vec<Line> = Vec::new();
         perm_lines.push(Line::from(vec![
-            Span::styled("⚡ ", Style::default().fg(YELLOW)),
-            Span::styled(prompt.as_str(), Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("⚡ ", Style::default().fg(app.theme.warning)),
+            Span::styled(prompt.as_str(), Style::default().fg(app.theme.warning).add_modifier(Modifier::BOLD)),
         ]));
         perm_lines.push(Line::from(""));
         for detail in details {
             let style = if detail.starts_with("  +") {
-                Style::default().fg(GREEN)
+                Style::default().fg(app.theme.success)
             } else if detail.starts_with("  -") {
-                Style::default().fg(RED)
+                Style::default().fg(app.theme.error)
             } else if detail.ends_with(':') {
-                Style::default().fg(FG).add_modifier(Modifier::BOLD)
+                Style::default().fg(app.theme.fg).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(GRAY)
+                Style::default().fg(app.theme.dim)
             };
             perm_lines.push(Line::from(Span::styled(detail.clone(), style)));
         }
@@ -192,16 +182,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         // Show different options based on whether it's a bash command
         let help_text = if prompt.starts_with("bash:") {
             vec![
-                Span::styled("  (y)es  ", Style::default().fg(GREEN)),
-                Span::styled("(n)o  ", Style::default().fg(RED)),
-                Span::styled("(a)lways this cmd  ", Style::default().fg(YELLOW)),
-                Span::styled("(A)lways all bash", Style::default().fg(CYAN)),
+                Span::styled("  (y)es  ", Style::default().fg(app.theme.success)),
+                Span::styled("(n)o  ", Style::default().fg(app.theme.error)),
+                Span::styled("(a)lways this cmd  ", Style::default().fg(app.theme.warning)),
+                Span::styled("(A)lways all bash", Style::default().fg(app.theme.info)),
             ]
         } else {
             vec![
-                Span::styled("  (y)es  ", Style::default().fg(GREEN)),
-                Span::styled("(n)o  ", Style::default().fg(RED)),
-                Span::styled("(a)lways allow", Style::default().fg(YELLOW)),
+                Span::styled("  (y)es  ", Style::default().fg(app.theme.success)),
+                Span::styled("(n)o  ", Style::default().fg(app.theme.error)),
+                Span::styled("(a)lways allow", Style::default().fg(app.theme.warning)),
             ]
         };
         perm_lines.push(Line::from(help_text));
@@ -210,7 +200,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(YELLOW))
+                    .border_style(Style::default().fg(app.theme.warning))
                     .title(" Permission Required "),
             );
         f.render_widget(perm_widget, chunks[2]);
@@ -227,9 +217,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(if app.mode == Mode::Input {
-                        BLUE
+                        app.theme.user
                     } else {
-                        GRAY
+                        app.theme.dim
                     }))
                     .title(" > "),
             );
@@ -255,8 +245,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     };
 
     let status = Paragraph::new(Line::from(vec![
-        Span::styled(thinking_indicator, Style::default().fg(GREEN)),
-        Span::styled(format!(" {} ", app.status), Style::default().fg(GRAY)),
+        Span::styled(thinking_indicator, Style::default().fg(app.theme.success)),
+        Span::styled(format!(" {} ", app.status), Style::default().fg(app.theme.dim)),
     ]));
     f.render_widget(status, chunks[3]);
 }

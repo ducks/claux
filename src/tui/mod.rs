@@ -20,6 +20,7 @@ use crate::permissions::PermissionResponse;
 use crate::plugin::PluginRegistry;
 use crate::query::Engine;
 use crate::session;
+use crate::theme::{Theme, ThemeName};
 
 /// A displayed message in the chat.
 #[derive(Debug, Clone)]
@@ -71,6 +72,8 @@ pub struct App {
     total_lines: u16,
     /// Whether we're waiting for the first token (thinking state)
     thinking: bool,
+    /// Current theme
+    theme: Theme,
 }
 
 impl App {
@@ -91,6 +94,7 @@ impl App {
             model: model.to_string(),
             total_lines: 0,
             thinking: false,
+            theme: Theme::dark(),
         }
     }
 
@@ -99,6 +103,11 @@ impl App {
             role: role.to_string(),
             content: content.to_string(),
         });
+    }
+
+    /// Switch to a different theme.
+    fn set_theme(&mut self, theme_name: ThemeName) {
+        self.theme = Theme::from_name(theme_name);
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
