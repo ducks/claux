@@ -86,6 +86,7 @@ impl Tool for AgentTool {
         let permissions = PermissionChecker::new(PermissionMode::Bypass);
 
         let mut engine = Engine::new(provider, tools, permissions, &self.model);
+        engine.set_auto_compact_threshold(0.8); // Default for sub-agents
 
         let base_prompt = context::build_system_prompt().await?;
         let agent_prompt = format!(

@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
         let tool_registry = tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
         let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
+        engine.set_auto_compact_threshold(config.auto_compact_threshold);
 
         let system_prompt = context::build_system_prompt_for_model(&model, Some(&plugin_registry), &config::HookTrigger::OnContextBuild).await?;
         engine.set_system_prompt(system_prompt);
@@ -98,6 +99,7 @@ async fn main() -> Result<()> {
     let tool_registry = tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
     let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
     let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
+    engine.set_auto_compact_threshold(config.auto_compact_threshold);
 
     // Build system prompt with plugins for REPL mode
     let system_prompt = context::build_system_prompt_for_model(&model, Some(&plugin_registry), &config::HookTrigger::OnContextBuild).await?;
