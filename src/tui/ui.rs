@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use super::chat::{ChatApp, Mode};
+use super::chat::{ChatApp, ChatMessage, Mode, ToolStatus};
 use super::markdown;
 
 /// Draw the chat screen.
@@ -58,86 +58,112 @@ pub fn draw_chat(f: &mut Frame, app: &mut ChatApp) {
             lines.push(Line::from(""));
         }
 
-        match msg.role.as_str() {
-            "user" => {
-                let bubble_lines: Vec<Line> = msg
-                    .content
-                    .lines()
-                    .map(|line| {
-                        Line::from(Span::styled(
-                            format!("  {line}"),
-                            Style::default()
-                                .fg(app.theme.user_message_fg)
-                                .bg(app.theme.user_message_bg),
-                        ))
-                    })
-                    .collect();
+        match msg {
+            ChatMessage::Text { role, content } => match role.as_str() {
+                "user" => {
+                    let bubble_lines: Vec<Line> = content
+                        .lines()
+                        .map(|line| {
+                            Line::from(Span::styled(
+                                format!("  {line}"),
+                                Style::default()
+                                    .fg(app.theme.user_message_fg)
+                                    .bg(app.theme.user_message_bg),
+                            ))
+                        })
+                        .collect();
 
-                lines.push(Line::from(vec![
-                    Span::styled("● ", Style::default().fg(app.theme.user)),
-                    Span::styled(
-                        "You",
-                        Style::default()
-                            .fg(app.theme.user)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-                for line in bubble_lines {
-                    lines.push(line);
+                    lines.push(Line::from(vec![
+                        Span::styled("● ", Style::default().fg(app.theme.user)),
+                        Span::styled(
+                            "You",
+                            Style::default()
+                                .fg(app.theme.user)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    for line in bubble_lines {
+                        lines.push(line);
+                    }
                 }
-            }
-            "assistant" => {
-                lines.push(Line::from(vec![
-                    Span::styled("● ", Style::default().fg(app.theme.assistant)),
-                    Span::styled(
-                        format!("{} ", app.model),
-                        Style::default()
-                            .fg(app.theme.assistant_bold)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-                let rendered = markdown::render(&msg.content, Style::default().fg(app.theme.fg));
-                for line in rendered {
-                    let mut indented = vec![Span::raw("  ")];
-                    indented.extend(line.spans);
-                    lines.push(Line::from(indented));
+                "assistant" => {
+                    lines.push(Line::from(vec![
+                        Span::styled("● ", Style::default().fg(app.theme.assistant)),
+                        Span::styled(
+                            format!("{} ", app.model),
+                            Style::default()
+                                .fg(app.theme.assistant_bold)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    let rendered =
+                        markdown::render(content, Style::default().fg(app.theme.fg));
+                    for line in rendered {
+                        let mut indented = vec![Span::raw("  ")];
+                        indented.extend(line.spans);
+                        lines.push(Line::from(indented));
+                    }
                 }
-            }
-            "system" => {
-                lines.push(Line::from(Span::styled(
-                    "● ",
-                    Style::default().fg(app.theme.warning),
-                )));
-                for line in msg.content.lines() {
+                "system" => {
                     lines.push(Line::from(Span::styled(
-                        format!("  {line}"),
+                        "● ",
                         Style::default().fg(app.theme.warning),
                     )));
+                    for line in content.lines() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {line}"),
+                            Style::default().fg(app.theme.warning),
+                        )));
+                    }
                 }
-            }
-            "error" => {
-                lines.push(Line::from(Span::styled(
-                    "● ",
-                    Style::default().fg(app.theme.error),
-                )));
-                for line in msg.content.lines() {
+                "error" => {
                     lines.push(Line::from(Span::styled(
-                        format!("  {line}"),
+                        "● ",
                         Style::default().fg(app.theme.error),
                     )));
+                    for line in content.lines() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {line}"),
+                            Style::default().fg(app.theme.error),
+                        )));
+                    }
                 }
-            }
-            _ => {
-                lines.push(Line::from(Span::styled(
-                    "● ",
-                    Style::default().fg(app.theme.dim),
-                )));
-                for line in msg.content.lines() {
+                _ => {
                     lines.push(Line::from(Span::styled(
-                        format!("  {line}"),
-                        Style::default().fg(app.theme.fg),
+                        "● ",
+                        Style::default().fg(app.theme.dim),
                     )));
+                    for line in content.lines() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {line}"),
+                            Style::default().fg(app.theme.fg),
+                        )));
+                    }
                 }
+            },
+            ChatMessage::Tool {
+                name,
+                summary,
+                status,
+            } => {
+                let (indicator, indicator_color) = match status {
+                    ToolStatus::Running => ("⟳", app.theme.warning),
+                    ToolStatus::Success => ("●", app.theme.tool_success),
+                    ToolStatus::Error => ("✗", app.theme.tool_error),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{indicator} "),
+                        Style::default().fg(indicator_color),
+                    ),
+                    Span::styled(
+                        format!("{name} "),
+                        Style::default()
+                            .fg(app.theme.tool_name)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(summary.clone(), Style::default().fg(app.theme.tool_summary)),
+                ]));
             }
         }
     }
