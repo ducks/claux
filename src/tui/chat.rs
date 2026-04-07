@@ -170,7 +170,8 @@ pub async fn run(
     theme: Theme,
     plugins: &PluginRegistry,
 ) -> Result<Action> {
-    // Load existing messages for this session
+    // Clear engine state and load this session's messages
+    engine.messages_mut().clear();
     let existing_messages = db.get_messages(session_id)?;
     for msg in &existing_messages {
         engine.messages_mut().push(msg.clone());
