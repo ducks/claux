@@ -19,9 +19,26 @@ use super::ui;
 
 /// A displayed message in the chat.
 #[derive(Debug, Clone)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
+pub enum ChatMessage {
+    /// User, assistant, system, or error text message.
+    Text {
+        role: String,
+        content: String,
+    },
+    /// A tool invocation with its result status.
+    Tool {
+        name: String,
+        summary: String,
+        status: ToolStatus,
+    },
+}
+
+/// Status of a tool invocation in the UI.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolStatus {
+    Running,
+    Success,
+    Error,
 }
 
 /// What the chat screen is doing.
@@ -75,10 +92,25 @@ impl ChatApp {
     }
 
     pub fn add_message(&mut self, role: &str, content: &str) {
-        self.messages.push(ChatMessage {
+        self.messages.push(ChatMessage::Text {
             role: role.to_string(),
             content: content.to_string(),
         });
+    }
+
+    pub fn add_tool(&mut self, name: &str, summary: &str, status: ToolStatus) {
+        self.messages.push(ChatMessage::Tool {
+            name: name.to_string(),
+            summary: summary.to_string(),
+            status,
+        });
+    }
+
+    /// Update the last tool message's status (e.g., from Running to Success/Error).
+    pub fn update_last_tool_status(&mut self, new_status: ToolStatus) {
+        if let Some(ChatMessage::Tool { status, .. }) = self.messages.last_mut() {
+            *status = new_status;
+        }
     }
 
     pub fn set_theme(&mut self, theme_name: ThemeName) {
@@ -370,6 +402,10 @@ async fn drive_streaming(
                             }
                         }
                     }
+                    // Redraw periodically so the spinner animates
+                    if app.thinking {
+                        terminal.draw(|f| ui::draw_chat(f, app))?;
+                    }
                 }
             }
         }
@@ -407,8 +443,13 @@ async fn drive_streaming(
         let mut result_blocks = Vec::new();
         for (id, name, input) in &tool_uses {
             let summary = engine.summarize_tool(name, input);
-            app.stream_buffer
-                .push_str(&format!("\n  [{name}] {summary} "));
+            // Flush any pending streamed text before showing tool
+            if !app.stream_buffer.is_empty() {
+                let content = app.stream_buffer.clone();
+                app.stream_buffer.clear();
+                app.add_message("assistant", &content);
+            }
+            app.add_tool(&name, &summary, ToolStatus::Running);
             terminal.draw(|f| ui::draw_chat(f, app))?;
 
             let is_read_only = engine.is_tool_read_only(name);
@@ -478,9 +519,9 @@ async fn drive_streaming(
                 crate::compact::truncate_tool_output(&tool_output.content);
 
             if tool_output.is_error {
-                app.stream_buffer.push_str(" ✗\n");
+                app.update_last_tool_status(ToolStatus::Error);
             } else {
-                app.stream_buffer.push_str(" ✓\n");
+                app.update_last_tool_status(ToolStatus::Success);
             }
             terminal.draw(|f| ui::draw_chat(f, app))?;
 
@@ -571,4 +612,113 @@ fn format_permission_details(tool_name: &str, input: &serde_json::Value) -> Vec<
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Theme;
+
+    fn test_app() -> ChatApp {
+        ChatApp::new("test-model", Theme::dark())
+    }
+
+    #[test]
+    fn add_message_creates_text_variant() {
+        let mut app = test_app();
+        app.add_message("user", "hello");
+        assert_eq!(app.messages.len(), 1);
+        match &app.messages[0] {
+            ChatMessage::Text { role, content } => {
+                assert_eq!(role, "user");
+                assert_eq!(content, "hello");
+            }
+            _ => panic!("expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn add_tool_creates_tool_variant() {
+        let mut app = test_app();
+        app.add_tool("Bash", "cargo build", ToolStatus::Running);
+        assert_eq!(app.messages.len(), 1);
+        match &app.messages[0] {
+            ChatMessage::Tool {
+                name,
+                summary,
+                status,
+            } => {
+                assert_eq!(name, "Bash");
+                assert_eq!(summary, "cargo build");
+                assert_eq!(*status, ToolStatus::Running);
+            }
+            _ => panic!("expected Tool variant"),
+        }
+    }
+
+    #[test]
+    fn update_last_tool_status_changes_running_to_success() {
+        let mut app = test_app();
+        app.add_tool("Read", "/some/file", ToolStatus::Running);
+        app.update_last_tool_status(ToolStatus::Success);
+        match &app.messages[0] {
+            ChatMessage::Tool { status, .. } => assert_eq!(*status, ToolStatus::Success),
+            _ => panic!("expected Tool variant"),
+        }
+    }
+
+    #[test]
+    fn update_last_tool_status_changes_running_to_error() {
+        let mut app = test_app();
+        app.add_tool("Bash", "failing command", ToolStatus::Running);
+        app.update_last_tool_status(ToolStatus::Error);
+        match &app.messages[0] {
+            ChatMessage::Tool { status, .. } => assert_eq!(*status, ToolStatus::Error),
+            _ => panic!("expected Tool variant"),
+        }
+    }
+
+    #[test]
+    fn update_last_tool_status_ignores_text_messages() {
+        let mut app = test_app();
+        app.add_message("assistant", "some text");
+        // Should not panic — just a no-op
+        app.update_last_tool_status(ToolStatus::Success);
+        match &app.messages[0] {
+            ChatMessage::Text { content, .. } => assert_eq!(content, "some text"),
+            _ => panic!("expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn update_last_tool_status_targets_last_message_only() {
+        let mut app = test_app();
+        app.add_tool("Read", "first tool", ToolStatus::Success);
+        app.add_tool("Bash", "second tool", ToolStatus::Running);
+        app.update_last_tool_status(ToolStatus::Error);
+        // First tool unchanged
+        match &app.messages[0] {
+            ChatMessage::Tool { status, .. } => assert_eq!(*status, ToolStatus::Success),
+            _ => panic!("expected Tool variant"),
+        }
+        // Second tool updated
+        match &app.messages[1] {
+            ChatMessage::Tool { status, .. } => assert_eq!(*status, ToolStatus::Error),
+            _ => panic!("expected Tool variant"),
+        }
+    }
+
+    #[test]
+    fn mixed_messages_preserve_order() {
+        let mut app = test_app();
+        app.add_message("user", "do something");
+        app.add_tool("Bash", "ls", ToolStatus::Running);
+        app.update_last_tool_status(ToolStatus::Success);
+        app.add_message("assistant", "done");
+
+        assert_eq!(app.messages.len(), 3);
+        assert!(matches!(&app.messages[0], ChatMessage::Text { role, .. } if role == "user"));
+        assert!(matches!(&app.messages[1], ChatMessage::Tool { status: ToolStatus::Success, .. }));
+        assert!(matches!(&app.messages[2], ChatMessage::Text { role, .. } if role == "assistant"));
+    }
 }
