@@ -64,7 +64,11 @@ impl Plugin for CommandPlugin {
         let output = cmd.output()?;
 
         if !output.status.success() {
-            warn!("Plugin '{}' failed: {}", self.name, String::from_utf8_lossy(&output.stderr));
+            warn!(
+                "Plugin '{}' failed: {}",
+                self.name,
+                String::from_utf8_lossy(&output.stderr)
+            );
             return Ok(None);
         }
 
@@ -94,7 +98,11 @@ impl PluginRegistry {
     }
 
     /// Executes all plugins for a specific trigger and returns combined context.
-    pub fn execute_all(&self, trigger: &HookTrigger, env_vars: Option<&HashMap<String, String>>) -> Result<String> {
+    pub fn execute_all(
+        &self,
+        trigger: &HookTrigger,
+        env_vars: Option<&HashMap<String, String>>,
+    ) -> Result<String> {
         let mut parts = Vec::new();
 
         for plugin in &self.plugins {
@@ -117,7 +125,11 @@ impl PluginRegistry {
     }
 
     /// Execute plugins that don't return context (side-effect only, like logging).
-    pub fn execute_side_effects(&self, trigger: &HookTrigger, env_vars: Option<&HashMap<String, String>>) -> Result<()> {
+    pub fn execute_side_effects(
+        &self,
+        trigger: &HookTrigger,
+        env_vars: Option<&HashMap<String, String>>,
+    ) -> Result<()> {
         for plugin in &self.plugins {
             if plugin.trigger() != trigger {
                 continue;
@@ -140,7 +152,10 @@ impl PluginRegistry {
 
     /// Get plugins for a specific trigger
     pub fn get_by_trigger(&self, trigger: &HookTrigger) -> usize {
-        self.plugins.iter().filter(|p| p.trigger() == trigger).count()
+        self.plugins
+            .iter()
+            .filter(|p| p.trigger() == trigger)
+            .count()
     }
 }
 
@@ -157,7 +172,12 @@ mod tests {
 
     #[test]
     fn test_command_plugin_success() {
-        let plugin = CommandPlugin::new("echo-test", "echo", &vec!["hello world".to_string()], HookTrigger::OnContextBuild);
+        let plugin = CommandPlugin::new(
+            "echo-test",
+            "echo",
+            &vec!["hello world".to_string()],
+            HookTrigger::OnContextBuild,
+        );
         let result = plugin.execute(None).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), "hello world");
@@ -182,7 +202,9 @@ mod tests {
         let registry = PluginRegistry::new();
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
-        let output = registry.execute_all(&HookTrigger::OnContextBuild, None).unwrap();
+        let output = registry
+            .execute_all(&HookTrigger::OnContextBuild, None)
+            .unwrap();
         assert!(output.is_empty());
     }
 
@@ -191,13 +213,25 @@ mod tests {
         let mut registry = PluginRegistry::new();
         let args1: Vec<String> = vec!["first".to_string()];
         let args2: Vec<String> = vec!["second".to_string()];
-        registry.add(Box::new(CommandPlugin::new("echo1", "echo", &args1, HookTrigger::OnContextBuild)));
-        registry.add(Box::new(CommandPlugin::new("echo2", "echo", &args2, HookTrigger::OnContextBuild)));
+        registry.add(Box::new(CommandPlugin::new(
+            "echo1",
+            "echo",
+            &args1,
+            HookTrigger::OnContextBuild,
+        )));
+        registry.add(Box::new(CommandPlugin::new(
+            "echo2",
+            "echo",
+            &args2,
+            HookTrigger::OnContextBuild,
+        )));
 
         assert!(!registry.is_empty());
         assert_eq!(registry.len(), 2);
 
-        let output = registry.execute_all(&HookTrigger::OnContextBuild, None).unwrap();
+        let output = registry
+            .execute_all(&HookTrigger::OnContextBuild, None)
+            .unwrap();
         assert!(output.contains("Plugin: echo1"));
         assert!(output.contains("first"));
         assert!(output.contains("Plugin: echo2"));
@@ -209,11 +243,25 @@ mod tests {
         let mut registry = PluginRegistry::new();
         let args1: Vec<String> = vec!["context".to_string()];
         let args2: Vec<String> = vec!["tool".to_string()];
-        registry.add(Box::new(CommandPlugin::new("ctx", "echo", &args1, HookTrigger::OnContextBuild)));
-        registry.add(Box::new(CommandPlugin::new("tool", "echo", &args2, HookTrigger::OnToolStart)));
+        registry.add(Box::new(CommandPlugin::new(
+            "ctx",
+            "echo",
+            &args1,
+            HookTrigger::OnContextBuild,
+        )));
+        registry.add(Box::new(CommandPlugin::new(
+            "tool",
+            "echo",
+            &args2,
+            HookTrigger::OnToolStart,
+        )));
 
-        let ctx_output = registry.execute_all(&HookTrigger::OnContextBuild, None).unwrap();
-        let tool_output = registry.execute_all(&HookTrigger::OnToolStart, None).unwrap();
+        let ctx_output = registry
+            .execute_all(&HookTrigger::OnContextBuild, None)
+            .unwrap();
+        let tool_output = registry
+            .execute_all(&HookTrigger::OnToolStart, None)
+            .unwrap();
 
         assert!(ctx_output.contains("ctx"));
         assert!(!ctx_output.contains("tool"));
@@ -237,8 +285,13 @@ mod tests {
     fn test_plugin_with_env_vars() {
         let mut env = HashMap::new();
         env.insert("TEST_VAR".to_string(), "test_value".to_string());
-        
-        let plugin = CommandPlugin::new("env-test", "sh", &vec!["-c".to_string(), "echo $TEST_VAR".to_string()], HookTrigger::OnContextBuild);
+
+        let plugin = CommandPlugin::new(
+            "env-test",
+            "sh",
+            &vec!["-c".to_string(), "echo $TEST_VAR".to_string()],
+            HookTrigger::OnContextBuild,
+        );
         let result = plugin.execute(Some(&env)).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), "test_value");

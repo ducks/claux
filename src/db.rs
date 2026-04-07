@@ -48,6 +48,8 @@ impl Db {
             "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 model TEXT NOT NULL,
+                name TEXT DEFAULT '',
+                project TEXT DEFAULT 'uncategorized',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 last_active DATETIME DEFAULT CURRENT_TIMESTAMP,
                 message_count INTEGER DEFAULT 0,
@@ -55,6 +57,21 @@ impl Db {
             )",
             [],
         )?;
+
+        // Migrations for existing databases (duplicate column errors are expected and ignored)
+        match conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT DEFAULT ''", []) {
+            Ok(_) => tracing::info!("Migration: added 'name' column to sessions"),
+            Err(e) if e.to_string().contains("duplicate column") => {}
+            Err(e) => tracing::warn!("Migration failed (name column): {e}"),
+        }
+        match conn.execute(
+            "ALTER TABLE sessions ADD COLUMN project TEXT DEFAULT 'uncategorized'",
+            [],
+        ) {
+            Ok(_) => tracing::info!("Migration: added 'project' column to sessions"),
+            Err(e) if e.to_string().contains("duplicate column") => {}
+            Err(e) => tracing::warn!("Migration failed (project column): {e}"),
+        }
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -86,11 +103,17 @@ impl Db {
     }
 
     /// Create a new session.
-    pub fn create_session(&self, id: &str, model: &str) -> Result<()> {
+    pub fn create_session(
+        &self,
+        id: &str,
+        model: &str,
+        name: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, model, created_at, last_active) VALUES (?1, ?2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-            [id, model],
+            "INSERT INTO sessions (id, model, name, project, created_at, last_active) VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [id, model, name.unwrap_or(""), project.unwrap_or("uncategorized")],
         )?;
         Ok(())
     }
@@ -99,18 +122,22 @@ impl Db {
     pub fn get_session(&self, id: &str) -> Result<Option<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, model, created_at, last_active, message_count, token_count 
-             FROM sessions WHERE id = ?1"
+            "SELECT id, model, name, project, created_at, last_active, message_count, token_count
+             FROM sessions WHERE id = ?1",
         )?;
-        
+
         let session = stmt.query_row([id], |row| {
             Ok(SessionInfo {
                 id: row.get(0)?,
                 model: row.get(1)?,
-                created_at: row.get(2)?,
-                last_active: row.get(3)?,
-                message_count: row.get(4)?,
-                token_count: row.get(5)?,
+                name: row.get(2)?,
+                project: row
+                    .get::<_, Option<String>>(3)?
+                    .unwrap_or_else(|| "uncategorized".to_string()),
+                created_at: row.get(4)?,
+                last_active: row.get(5)?,
+                message_count: row.get(6)?,
+                token_count: row.get(7)?,
             })
         });
 
@@ -125,18 +152,22 @@ impl Db {
     pub fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, model, created_at, last_active, message_count, token_count 
-             FROM sessions ORDER BY last_active DESC"
+            "SELECT id, model, name, project, created_at, last_active, message_count, token_count
+             FROM sessions ORDER BY last_active DESC",
         )?;
 
         let sessions = stmt.query_map([], |row| {
             Ok(SessionInfo {
                 id: row.get(0)?,
                 model: row.get(1)?,
-                created_at: row.get(2)?,
-                last_active: row.get(3)?,
-                message_count: row.get(4)?,
-                token_count: row.get(5)?,
+                name: row.get(2)?,
+                project: row
+                    .get::<_, Option<String>>(3)?
+                    .unwrap_or_else(|| "uncategorized".to_string()),
+                created_at: row.get(4)?,
+                last_active: row.get(5)?,
+                message_count: row.get(6)?,
+                token_count: row.get(7)?,
             })
         })?;
 
@@ -146,10 +177,10 @@ impl Db {
     /// Append a message to a session.
     pub fn append_message(&self, session_id: &str, message: &Message) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        
+
         // Serialize content to JSON
         let content_json = serde_json::to_string(&message.content)?;
-        
+
         // Insert the message
         conn.execute(
             "INSERT INTO messages (session_id, role, content, created_at) 
@@ -172,14 +203,14 @@ impl Db {
     pub fn get_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY created_at ASC"
+            "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
         )?;
 
         let messages = stmt.query_map([session_id], |row| {
             let role: String = row.get(0)?;
             let content_json: String = row.get(1)?;
-            let content: crate::api::types::MessageContent = serde_json::from_str(&content_json)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let content: crate::api::types::MessageContent =
+                serde_json::from_str(&content_json).map_err(|_| rusqlite::Error::InvalidQuery)?;
             Ok(Message { role, content })
         })?;
 
@@ -192,19 +223,16 @@ impl Db {
         let limit_str = limit.to_string();
         let mut stmt = conn.prepare(
             "SELECT role, content FROM messages WHERE session_id = ?1 
-             ORDER BY created_at DESC LIMIT ?2"
+             ORDER BY created_at DESC LIMIT ?2",
         )?;
 
-        let messages = stmt.query_map(
-            (session_id, limit_str.as_str()),
-            |row| {
-                let role: String = row.get(0)?;
-                let content_json: String = row.get(1)?;
-                let content: crate::api::types::MessageContent = serde_json::from_str(&content_json)
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
-                Ok(Message { role, content })
-            }
-        )?;
+        let messages = stmt.query_map((session_id, limit_str.as_str()), |row| {
+            let role: String = row.get(0)?;
+            let content_json: String = row.get(1)?;
+            let content: crate::api::types::MessageContent =
+                serde_json::from_str(&content_json).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok(Message { role, content })
+        })?;
 
         let mut msgs: Vec<Message> = messages.collect::<Result<Vec<_>, _>>()?;
         msgs.reverse(); // Reverse to get chronological order
@@ -212,7 +240,12 @@ impl Db {
     }
 
     /// Update message count and token count for a session.
-    pub fn update_session_stats(&self, session_id: &str, message_count: usize, token_count: usize) -> Result<()> {
+    pub fn update_session_stats(
+        &self,
+        session_id: &str,
+        message_count: usize,
+        token_count: usize,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE sessions SET message_count = ?1, token_count = ?2, last_active = CURRENT_TIMESTAMP 
@@ -233,7 +266,7 @@ impl Db {
     pub fn search_sessions(&self, query: &str) -> Result<Vec<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT s.id, s.model, s.created_at, s.last_active, s.message_count, s.token_count
+            "SELECT DISTINCT s.id, s.model, s.name, s.project, s.created_at, s.last_active, s.message_count, s.token_count
              FROM sessions s
              JOIN messages m ON s.id = m.session_id
              WHERE m.content LIKE ?1
@@ -244,10 +277,14 @@ impl Db {
             Ok(SessionInfo {
                 id: row.get(0)?,
                 model: row.get(1)?,
-                created_at: row.get(2)?,
-                last_active: row.get(3)?,
-                message_count: row.get(4)?,
-                token_count: row.get(5)?,
+                name: row.get(2)?,
+                project: row
+                    .get::<_, Option<String>>(3)?
+                    .unwrap_or_else(|| "uncategorized".to_string()),
+                created_at: row.get(4)?,
+                last_active: row.get(5)?,
+                message_count: row.get(6)?,
+                token_count: row.get(7)?,
             })
         })?;
 
@@ -260,6 +297,8 @@ impl Db {
 pub struct SessionInfo {
     pub id: String,
     pub model: String,
+    pub name: Option<String>,
+    pub project: String,
     pub created_at: String,
     pub last_active: String,
     pub message_count: i64,
@@ -277,7 +316,8 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let db = Db::open(&db_path).unwrap();
 
-        db.create_session("test-123", "claude-sonnet").unwrap();
+        db.create_session("test-123", "claude-sonnet", None, None)
+            .unwrap();
 
         let session = db.get_session("test-123").unwrap();
         assert!(session.is_some());
@@ -292,7 +332,8 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let db = Db::open(&db_path).unwrap();
 
-        db.create_session("test-456", "claude-sonnet").unwrap();
+        db.create_session("test-456", "claude-sonnet", None, None)
+            .unwrap();
 
         let msg1 = Message {
             role: "user".to_string(),
@@ -318,8 +359,10 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let db = Db::open(&db_path).unwrap();
 
-        db.create_session("session-1", "model-a").unwrap();
-        db.create_session("session-2", "model-b").unwrap();
+        db.create_session("session-1", "model-a", None, None)
+            .unwrap();
+        db.create_session("session-2", "model-b", None, None)
+            .unwrap();
 
         let sessions = db.list_sessions().unwrap();
         assert_eq!(sessions.len(), 2);

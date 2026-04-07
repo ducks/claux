@@ -163,7 +163,11 @@ impl Provider for OpenAICompatProvider {
         }
 
         tracing::debug!("OpenAI request: {} model={}", url, self.model);
-        tracing::debug!("API key present: {}, len: {}", !self.api_key.is_empty(), self.api_key.len());
+        tracing::debug!(
+            "API key present: {}, len: {}",
+            !self.api_key.is_empty(),
+            self.api_key.len()
+        );
 
         let mut request = self
             .http
@@ -193,10 +197,7 @@ impl Provider for OpenAICompatProvider {
 }
 
 /// Parse OpenAI-format SSE stream into ApiEvents.
-async fn read_openai_sse(
-    response: reqwest::Response,
-    tx: mpsc::Sender<ApiEvent>,
-) -> Result<()> {
+async fn read_openai_sse(response: reqwest::Response, tx: mpsc::Sender<ApiEvent>) -> Result<()> {
     use futures_util::StreamExt as _;
 
     let mut stream = response.bytes_stream();
@@ -245,9 +246,12 @@ async fn read_openai_sse(
 
             // Check for usage in the chunk
             if let Some(usage) = event.get("usage") {
-                input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(input_tokens as u64) as u32;
-                output_tokens =
-                    usage["completion_tokens"].as_u64().unwrap_or(output_tokens as u64) as u32;
+                input_tokens = usage["prompt_tokens"]
+                    .as_u64()
+                    .unwrap_or(input_tokens as u64) as u32;
+                output_tokens = usage["completion_tokens"]
+                    .as_u64()
+                    .unwrap_or(output_tokens as u64) as u32;
             }
 
             let Some(choices) = event.get("choices").and_then(|c| c.as_array()) else {
@@ -271,9 +275,9 @@ async fn read_openai_sse(
                     for tc in tcs {
                         let index = tc["index"].as_u64().unwrap_or(0) as u32;
 
-                        let entry = tool_calls.entry(index).or_insert_with(|| {
-                            (String::new(), String::new(), String::new())
-                        });
+                        let entry = tool_calls
+                            .entry(index)
+                            .or_insert_with(|| (String::new(), String::new(), String::new()));
 
                         if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                             entry.0 = id.to_string();
@@ -299,13 +303,7 @@ async fn read_openai_sse(
 
                         for (_, (id, name, args)) in calls {
                             if let Ok(input) = serde_json::from_str(&args) {
-                                let _ = tx
-                                    .send(ApiEvent::ToolUse {
-                                        id,
-                                        name,
-                                        input,
-                                    })
-                                    .await;
+                                let _ = tx.send(ApiEvent::ToolUse { id, name, input }).await;
                             }
                         }
                     }
@@ -321,13 +319,7 @@ async fn read_openai_sse(
         calls.sort_by_key(|(idx, _)| *idx);
         for (_, (id, name, args)) in calls {
             if let Ok(input) = serde_json::from_str(&args) {
-                let _ = tx
-                    .send(ApiEvent::ToolUse {
-                        id,
-                        name,
-                        input,
-                    })
-                    .await;
+                let _ = tx.send(ApiEvent::ToolUse { id, name, input }).await;
             }
         }
     }

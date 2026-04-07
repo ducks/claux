@@ -24,8 +24,16 @@ pub struct Engine {
 /// Events sent from the engine to the UI during streaming.
 pub enum StreamEvent {
     Text(String),
-    ToolStart { name: String, id: String, summary: String },
-    ToolResult { name: String, content: String, is_error: bool },
+    ToolStart {
+        name: String,
+        id: String,
+        summary: String,
+    },
+    ToolResult {
+        name: String,
+        content: String,
+        is_error: bool,
+    },
     /// Permission prompt — UI must respond via the oneshot sender.
     PermissionRequest {
         tool_name: String,
@@ -115,7 +123,12 @@ impl Engine {
         tool_defs: &[crate::api::ToolDefinition],
     ) -> Result<mpsc::Receiver<ApiEvent>> {
         self.provider
-            .stream(&self.messages, &self.system_prompt, tool_defs, self.max_tokens)
+            .stream(
+                &self.messages,
+                &self.system_prompt,
+                tool_defs,
+                self.max_tokens,
+            )
             .await
     }
 
@@ -178,7 +191,7 @@ impl Engine {
                 self.auto_compact_threshold * 100.0,
                 ctx_window
             );
-            
+
             let result = self.compact().await?;
             tracing::info!("Auto-compact completed: {}", result);
             Ok(true)
@@ -293,7 +306,12 @@ impl Engine {
             let tool_defs = self.tools.definitions();
             let stream_result = self
                 .provider
-                .stream(&self.messages, &self.system_prompt, &tool_defs, self.max_tokens)
+                .stream(
+                    &self.messages,
+                    &self.system_prompt,
+                    &tool_defs,
+                    self.max_tokens,
+                )
                 .await;
 
             // Handle connection-level errors (413, etc.)
@@ -467,8 +485,7 @@ impl Engine {
             let tool_output = result?;
 
             // Truncate large tool outputs to avoid context overflow
-            let (content, was_truncated) =
-                compact::truncate_tool_output(&tool_output.content);
+            let (content, was_truncated) = compact::truncate_tool_output(&tool_output.content);
             if was_truncated {
                 tracing::debug!("Truncated tool output for {}", id);
             }
@@ -495,9 +512,11 @@ impl Engine {
     ) -> Result<()> {
         let compacted = self.maybe_auto_compact().await?;
         if compacted {
-            let _ = tx.send(StreamEvent::Text(
-                "\n[conversation auto-compacted to free context]\n".to_string(),
-            )).await;
+            let _ = tx
+                .send(StreamEvent::Text(
+                    "\n[conversation auto-compacted to free context]\n".to_string(),
+                ))
+                .await;
         }
         self.messages.push(Message::user(user_input));
 
@@ -508,7 +527,12 @@ impl Engine {
             let tool_defs = self.tools.definitions();
             let stream_result = self
                 .provider
-                .stream(&self.messages, &self.system_prompt, &tool_defs, self.max_tokens)
+                .stream(
+                    &self.messages,
+                    &self.system_prompt,
+                    &tool_defs,
+                    self.max_tokens,
+                )
                 .await;
 
             let mut rx = match stream_result {
@@ -517,9 +541,11 @@ impl Engine {
                     let err_str = e.to_string();
                     if Self::is_prompt_too_long(&err_str) && recovery_attempts < MAX_RECOVERY {
                         recovery_attempts += 1;
-                        let _ = tx.send(StreamEvent::Text(
-                            "\n[compacting conversation...]\n".to_string(),
-                        )).await;
+                        let _ = tx
+                            .send(StreamEvent::Text(
+                                "\n[compacting conversation...]\n".to_string(),
+                            ))
+                            .await;
                         self.compact().await?;
                         continue;
                     }
@@ -556,9 +582,11 @@ impl Engine {
                     ApiEvent::Error(e) => {
                         if Self::is_prompt_too_long(&e) && recovery_attempts < MAX_RECOVERY {
                             recovery_attempts += 1;
-                            let _ = tx.send(StreamEvent::Text(
-                                "\n[compacting conversation...]\n".to_string(),
-                            )).await;
+                            let _ = tx
+                                .send(StreamEvent::Text(
+                                    "\n[compacting conversation...]\n".to_string(),
+                                ))
+                                .await;
                             self.compact().await?;
                             had_error = true;
                             break;
@@ -616,7 +644,7 @@ impl Engine {
                     PermissionResult::Ask { message, diff } => {
                         // Send permission request to UI, wait for response
                         let (resp_tx, resp_rx) = oneshot::channel();
-                        
+
                         let event = if let Some(d) = diff {
                             StreamEvent::PermissionRequestWithDiff {
                                 tool_name: name.clone(),
@@ -631,7 +659,7 @@ impl Engine {
                                 respond: resp_tx,
                             }
                         };
-                        
+
                         let _ = tx.send(event).await;
 
                         match resp_rx.await {
@@ -655,8 +683,7 @@ impl Engine {
                 };
 
                 // Truncate large tool outputs
-                let (content, was_truncated) =
-                    compact::truncate_tool_output(&tool_output.content);
+                let (content, was_truncated) = compact::truncate_tool_output(&tool_output.content);
                 if was_truncated {
                     tracing::debug!("Truncated tool output for {}", name);
                 }
@@ -775,7 +802,10 @@ mod tests {
         for (i, block) in blocks.iter().enumerate() {
             if let ContentBlock::ToolResult { tool_use_id, .. } = block {
                 let expected_id = format!("test{}", i + 1);
-                assert_eq!(tool_use_id, &expected_id, "Results should be in original order");
+                assert_eq!(
+                    tool_use_id, &expected_id,
+                    "Results should be in original order"
+                );
             } else {
                 panic!("Expected ToolResult block");
             }

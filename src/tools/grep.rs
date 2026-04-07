@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use grep_searcher::{SearcherBuilder, Sink, SinkMatch};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use walkdir::WalkDir;
 
 use super::{Tool, ToolOutput};
@@ -76,8 +76,7 @@ impl Tool for GrepTool {
         let base = params.path.as_deref().unwrap_or(".");
         let base = crate::tools::read::expand_tilde(base);
 
-        let matcher = grep_regex::RegexMatcherBuilder::new()
-            .build(&params.pattern)?;
+        let matcher = grep_regex::RegexMatcherBuilder::new().build(&params.pattern)?;
 
         let mut searcher = SearcherBuilder::new().build();
         let mut results = Vec::new();

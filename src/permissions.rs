@@ -73,7 +73,12 @@ impl PermissionChecker {
     }
 
     /// Check whether a tool invocation should be allowed.
-    pub fn check(&self, tool_name: &str, input: &serde_json::Value, is_read_only: bool) -> PermissionResult {
+    pub fn check(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        is_read_only: bool,
+    ) -> PermissionResult {
         // Session-level always-allow overrides
         if self.session_allows.contains(tool_name) {
             return PermissionResult::Allow;
@@ -136,13 +141,13 @@ impl PermissionChecker {
                             let path = input["file_path"].as_str().unwrap_or("?");
                             let old_text = input["old_text"].as_str().unwrap_or("");
                             let new_text = input["new_text"].as_str().unwrap_or("");
-                            
+
                             let diff = if !old_text.is_empty() && !new_text.is_empty() {
                                 Some(generate_diff(old_text, new_text, path))
                             } else {
                                 None
                             };
-                            
+
                             PermissionResult::Ask {
                                 message: format!("edit: {path}"),
                                 diff,
@@ -176,57 +181,84 @@ mod tests {
     fn bypass_allows_everything() {
         let checker = PermissionChecker::new(PermissionMode::Bypass);
         let input = json!({"command": "rm -rf /"});
-        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Allow));
+        assert!(matches!(
+            checker.check("Bash", &input, false),
+            PermissionResult::Allow
+        ));
     }
 
     #[test]
     fn plan_denies_writes() {
         let checker = PermissionChecker::new(PermissionMode::Plan);
         let input = json!({"file_path": "/tmp/test"});
-        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Deny(_)));
+        assert!(matches!(
+            checker.check("Write", &input, false),
+            PermissionResult::Deny(_)
+        ));
     }
 
     #[test]
     fn plan_allows_reads() {
         let checker = PermissionChecker::new(PermissionMode::Plan);
         let input = json!({"file_path": "/tmp/test"});
-        assert!(matches!(checker.check("Read", &input, true), PermissionResult::Allow));
+        assert!(matches!(
+            checker.check("Read", &input, true),
+            PermissionResult::Allow
+        ));
     }
 
     #[test]
     fn default_allows_read_only() {
         let checker = PermissionChecker::new(PermissionMode::Default);
         let input = json!({"pattern": "*.rs"});
-        assert!(matches!(checker.check("Glob", &input, true), PermissionResult::Allow));
+        assert!(matches!(
+            checker.check("Glob", &input, true),
+            PermissionResult::Allow
+        ));
     }
 
     #[test]
     fn default_asks_for_bash() {
         let checker = PermissionChecker::new(PermissionMode::Default);
         let input = json!({"command": "cargo test"});
-        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask { .. }));
+        assert!(matches!(
+            checker.check("Bash", &input, false),
+            PermissionResult::Ask { .. }
+        ));
     }
 
     #[test]
     fn default_asks_for_write() {
         let checker = PermissionChecker::new(PermissionMode::Default);
         let input = json!({"file_path": "/tmp/test", "content": "hello"});
-        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Ask { .. }));
+        assert!(matches!(
+            checker.check("Write", &input, false),
+            PermissionResult::Ask { .. }
+        ));
     }
 
     #[test]
     fn accept_edits_allows_write_and_edit() {
         let checker = PermissionChecker::new(PermissionMode::AcceptEdits);
         let input = json!({"file_path": "/tmp/test"});
-        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Allow));
-        assert!(matches!(checker.check("Edit", &input, false), PermissionResult::Allow));
+        assert!(matches!(
+            checker.check("Write", &input, false),
+            PermissionResult::Allow
+        ));
+        assert!(matches!(
+            checker.check("Edit", &input, false),
+            PermissionResult::Allow
+        ));
     }
 
     #[test]
     fn accept_edits_asks_for_bash() {
         let checker = PermissionChecker::new(PermissionMode::AcceptEdits);
         let input = json!({"command": "rm -rf /"});
-        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask { .. }));
+        assert!(matches!(
+            checker.check("Bash", &input, false),
+            PermissionResult::Ask { .. }
+        ));
     }
 
     #[test]
@@ -235,11 +267,17 @@ mod tests {
         let input = json!({"command": "cargo test"});
 
         // First call should ask
-        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Ask { .. }));
+        assert!(matches!(
+            checker.check("Bash", &input, false),
+            PermissionResult::Ask { .. }
+        ));
 
         // After always_allow, should allow
         checker.always_allow("Bash");
-        assert!(matches!(checker.check("Bash", &input, false), PermissionResult::Allow));
+        assert!(matches!(
+            checker.check("Bash", &input, false),
+            PermissionResult::Allow
+        ));
     }
 
     #[test]
@@ -249,7 +287,10 @@ mod tests {
 
         let input = json!({"file_path": "/tmp/test"});
         // Write should still ask
-        assert!(matches!(checker.check("Write", &input, false), PermissionResult::Ask { .. }));
+        assert!(matches!(
+            checker.check("Write", &input, false),
+            PermissionResult::Ask { .. }
+        ));
     }
 
     #[test]

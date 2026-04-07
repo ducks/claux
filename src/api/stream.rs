@@ -96,8 +96,10 @@ pub async fn read_sse_stream(
 
                 "message_delta" => {
                     if let Some(usage) = event.get("usage") {
-                        output_tokens =
-                            usage["output_tokens"].as_u64().unwrap_or(output_tokens as u64) as u32;
+                        output_tokens = usage["output_tokens"]
+                            .as_u64()
+                            .unwrap_or(output_tokens as u64)
+                            as u32;
                     }
                 }
 

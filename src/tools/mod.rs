@@ -44,10 +44,7 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     /// Create a registry with Agent tool using a provider factory.
-    pub fn new_with_agent_factory(
-        factory: agent::ProviderFactory,
-        model: String,
-    ) -> Self {
+    pub fn new_with_agent_factory(factory: agent::ProviderFactory, model: String) -> Self {
         Self {
             tools: vec![
                 Box::new(read::ReadTool),
