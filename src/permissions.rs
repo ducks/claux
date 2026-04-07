@@ -120,7 +120,38 @@ impl PermissionChecker {
 
             PermissionMode::Default => {
                 if is_read_only {
-                    PermissionResult::Allow
+                    // Follow Claude Code's lead: prompt for Read and Grep, auto-allow Glob
+                    match tool_name {
+                        "Read" => {
+                            let path = input["file_path"].as_str().unwrap_or("?");
+                            PermissionResult::Ask {
+                                message: format!("read: {path}"),
+                                diff: None,
+                            }
+                        }
+                        "Grep" => {
+                            let pattern = input["pattern"].as_str().unwrap_or("?");
+                            let path = input["path"].as_str().unwrap_or("");
+                            let msg = if path.is_empty() {
+                                format!("grep: \"{pattern}\"")
+                            } else {
+                                format!("grep: \"{pattern}\" in {path}")
+                            };
+                            PermissionResult::Ask {
+                                message: msg,
+                                diff: None,
+                            }
+                        }
+                        "Glob" => PermissionResult::Allow,
+                        "WebFetch" => {
+                            let url = input["url"].as_str().unwrap_or("?");
+                            PermissionResult::Ask {
+                                message: format!("fetch: {url}"),
+                                diff: None,
+                            }
+                        }
+                        _ => PermissionResult::Allow,
+                    }
                 } else {
                     match tool_name {
                         "Bash" => {
@@ -346,6 +377,56 @@ mod tests {
             assert!(diff.is_none(), "Diff should be None when old_string/new_string are missing");
         } else {
             panic!("expected Ask");
+        }
+    }
+
+    #[test]
+    fn default_prompts_for_read_tool() {
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({"file_path": "src/secret.rs"});
+
+        if let PermissionResult::Ask { message, diff } = checker.check("Read", &input, true) {
+            assert!(message.contains("src/secret.rs"));
+            assert!(diff.is_none());
+        } else {
+            panic!("expected Ask for Read tool");
+        }
+    }
+
+    #[test]
+    fn default_prompts_for_grep_tool() {
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({"pattern": "SECRET_KEY", "path": "src/"});
+
+        if let PermissionResult::Ask { message, diff } = checker.check("Grep", &input, true) {
+            assert!(message.contains("src/"));
+            assert!(diff.is_none());
+        } else {
+            panic!("expected Ask for Grep tool");
+        }
+    }
+
+    #[test]
+    fn default_auto_allows_glob_tool() {
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({"pattern": "*.rs"});
+
+        assert!(matches!(
+            checker.check("Glob", &input, true),
+            PermissionResult::Allow
+        ));
+    }
+
+    #[test]
+    fn default_prompts_for_webfetch_tool() {
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({"url": "https://example.com/api"});
+
+        if let PermissionResult::Ask { message, diff } = checker.check("WebFetch", &input, true) {
+            assert!(message.contains("https://example.com/api"));
+            assert!(diff.is_none());
+        } else {
+            panic!("expected Ask for WebFetch tool");
         }
     }
 }
