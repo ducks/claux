@@ -16,9 +16,8 @@ use std::sync::LazyLock;
 use tiktoken_rs::{cl100k_base, CoreBPE};
 
 /// Global tokenizer (initialized once, thread-safe).
-static TOKENIZER: LazyLock<CoreBPE> = LazyLock::new(|| {
-    cl100k_base().expect("failed to initialize cl100k tokenizer")
-});
+static TOKENIZER: LazyLock<CoreBPE> =
+    LazyLock::new(|| cl100k_base().expect("failed to initialize cl100k tokenizer"));
 
 /// Empty set for encode's allowed_special parameter.
 static NO_SPECIAL: LazyLock<HashSet<&'static str>> = LazyLock::new(HashSet::new);
@@ -74,9 +73,7 @@ pub fn truncate_tool_output(output: &str) -> (String, bool) {
     let end = &output[output.len() - keep_end..];
     let truncated_chars = output.len() - keep_start - keep_end;
 
-    let result = format!(
-        "{start}\n\n... ({truncated_chars} characters truncated) ...\n\n{end}"
-    );
+    let result = format!("{start}\n\n... ({truncated_chars} characters truncated) ...\n\n{end}");
 
     (result, true)
 }
@@ -219,7 +216,10 @@ mod tests {
 
     #[test]
     fn context_window_known_models() {
-        assert_eq!(context_window_for_model("claude-sonnet-4-20250514"), 200_000);
+        assert_eq!(
+            context_window_for_model("claude-sonnet-4-20250514"),
+            200_000
+        );
         assert_eq!(context_window_for_model("gpt-4o"), 128_000);
     }
 }

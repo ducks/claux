@@ -11,8 +11,8 @@ use crate::db::{Db, SessionInfo};
 
 /// Get the database path.
 fn db_path() -> Result<PathBuf> {
-    let base = dirs::data_local_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?;
+    let base =
+        dirs::data_local_dir().ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?;
     let dir = base.join("claux");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("sessions.db"))
@@ -28,8 +28,8 @@ fn get_db() -> Result<Db> {
 pub fn create_session(model: &str) -> Result<(String, PathBuf)> {
     let id = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let db = get_db()?;
-    db.create_session(&id, model)?;
-    
+    db.create_session(&id, model, None, None)?;
+
     // Return a dummy path for API compatibility
     let dummy_path = PathBuf::from(format!("sqlite://{id}"));
     Ok((id, dummy_path))
@@ -48,21 +48,28 @@ pub fn append_message(path: &std::path::Path, message: &Message) -> Result<()> {
 pub fn load_session(path: &std::path::Path) -> Result<(SessionMeta, Vec<Message>)> {
     let session_id = extract_session_id(path);
     let db = get_db()?;
-    
-    let session_info = db.get_session(&session_id)?
+
+    let session_info = db
+        .get_session(&session_id)?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
-    
+
     let messages = db.get_messages(&session_id)?;
-    
+
     // Convert SessionInfo to SessionMeta for compatibility
     let meta = SessionMeta {
         id: session_info.id,
         cwd: String::new(), // Not tracked in SQLite version
         model: session_info.model,
-        created_at: session_info.created_at.parse().unwrap_or_else(|_| chrono::Utc::now()),
-        updated_at: session_info.last_active.parse().unwrap_or_else(|_| chrono::Utc::now()),
+        created_at: session_info
+            .created_at
+            .parse()
+            .unwrap_or_else(|_| chrono::Utc::now()),
+        updated_at: session_info
+            .last_active
+            .parse()
+            .unwrap_or_else(|_| chrono::Utc::now()),
     };
-    
+
     Ok((meta, messages))
 }
 
@@ -70,7 +77,7 @@ pub fn load_session(path: &std::path::Path) -> Result<(SessionMeta, Vec<Message>
 pub fn list_sessions() -> Result<Vec<(String, PathBuf)>> {
     let db = get_db()?;
     let sessions = db.list_sessions()?;
-    
+
     let result: Vec<(String, PathBuf)> = sessions
         .into_iter()
         .map(|s| {
@@ -78,7 +85,7 @@ pub fn list_sessions() -> Result<Vec<(String, PathBuf)>> {
             (s.id, dummy_path)
         })
         .collect();
-    
+
     Ok(result)
 }
 
@@ -91,7 +98,11 @@ fn extract_session_id(path: &std::path::Path) -> String {
 }
 
 /// Update session statistics (message count, token count).
-pub fn update_session_stats(session_id: &str, message_count: usize, token_count: usize) -> Result<()> {
+pub fn update_session_stats(
+    session_id: &str,
+    message_count: usize,
+    token_count: usize,
+) -> Result<()> {
     let db = get_db()?;
     db.update_session_stats(session_id, message_count, token_count)?;
     Ok(())

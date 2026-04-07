@@ -117,7 +117,10 @@ fn execute_resume(id: Option<String>, engine: &mut Engine) -> Result<String> {
                 let meta_line = match session::load_session(path) {
                     Ok((meta, msgs)) => format!(
                         "  \x1b[33m{}\x1b[0m  {}  {} msgs  {}",
-                        meta.id, meta.model, msgs.len(), meta.cwd
+                        meta.id,
+                        meta.model,
+                        msgs.len(),
+                        meta.cwd
                     ),
                     Err(_) => format!("  \x1b[33m{id}\x1b[0m  (error reading)"),
                 };
@@ -176,8 +179,7 @@ async fn execute_theme(theme_name: Option<String>, engine: &mut Engine) -> Resul
             engine.set_theme(_theme);
             Ok(format!("Theme set to: {name}"))
         }
-        None => {
-            Ok("Current theme: dark\n\n\
+        None => Ok("Current theme: dark\n\n\
                  Available themes:\n\
                  - dark: gruvbox-inspired (default)\n\
                  - light: high-contrast for bright terminals\n\
@@ -185,8 +187,8 @@ async fn execute_theme(theme_name: Option<String>, engine: &mut Engine) -> Resul
                  - dracula: dark purple/violet theme\n\
                  - nord: arctic blue-gray theme\n\
                  - catppuccin: pastel mocha theme\n\n\
-                 Use /theme <name> to switch.".to_string())
-        }
+                 Use /theme <name> to switch."
+            .to_string()),
     }
 }
 

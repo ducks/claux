@@ -1,6 +1,6 @@
-use anyhow::Result;
-use crate::plugin::PluginRegistry;
 use crate::config::HookTrigger;
+use crate::plugin::PluginRegistry;
+use anyhow::Result;
 
 /// Build the system prompt from environment context.
 /// Mirrors Claude Code's context.ts: git status, CLAUDE.md, date, env info.
@@ -8,7 +8,11 @@ pub async fn build_system_prompt() -> Result<String> {
     build_system_prompt_for_model("an AI assistant", None, &HookTrigger::OnContextBuild).await
 }
 
-pub async fn build_system_prompt_for_model(model: &str, plugins: Option<&PluginRegistry>, trigger: &HookTrigger) -> Result<String> {
+pub async fn build_system_prompt_for_model(
+    model: &str,
+    plugins: Option<&PluginRegistry>,
+    trigger: &HookTrigger,
+) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
 
     parts.push(base_system_prompt(model));
@@ -16,7 +20,10 @@ pub async fn build_system_prompt_for_model(model: &str, plugins: Option<&PluginR
     // Environment
     parts.push("# Environment".to_string());
     parts.push(format!("- Platform: {}", std::env::consts::OS));
-    parts.push(format!("- Shell: {}", std::env::var("SHELL").unwrap_or_else(|_| "sh".into())));
+    parts.push(format!(
+        "- Shell: {}",
+        std::env::var("SHELL").unwrap_or_else(|_| "sh".into())
+    ));
 
     if let Ok(cwd) = std::env::current_dir() {
         parts.push(format!("- Working directory: {}", cwd.display()));
@@ -56,7 +63,8 @@ pub async fn build_system_prompt_for_model(model: &str, plugins: Option<&PluginR
 }
 
 fn base_system_prompt(model: &str) -> String {
-    format!(r#"You are {model}, running inside claux, a terminal AI coding assistant.
+    format!(
+        r#"You are {model}, running inside claux, a terminal AI coding assistant.
 
 You are an interactive agent that helps users with software engineering tasks. Use the tools available to you to assist the user.
 
@@ -72,13 +80,18 @@ You are an interactive agent that helps users with software engineering tasks. U
 - Be concise and direct
 - Lead with the answer, not the reasoning
 - When referencing code, include file_path:line_number
-"#)
+"#
+    )
 }
 
 async fn git_status() -> Option<String> {
     let branch = run_cmd("git", &["branch", "--show-current"]).await?;
-    let status = run_cmd("git", &["status", "--short"]).await.unwrap_or_default();
-    let log = run_cmd("git", &["log", "--oneline", "-n", "5"]).await.unwrap_or_default();
+    let status = run_cmd("git", &["status", "--short"])
+        .await
+        .unwrap_or_default();
+    let log = run_cmd("git", &["log", "--oneline", "-n", "5"])
+        .await
+        .unwrap_or_default();
 
     let mut info = format!("Branch: {}", branch.trim());
     if !status.is_empty() {
@@ -167,7 +180,7 @@ async fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
 /// This gives the LLM "memory" of the codebase without heavy indexing.
 async fn build_project_map() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
-    
+
     // Check if we're in a git repo (skip if not)
     if !cwd.join(".git").exists() {
         return None;
@@ -180,24 +193,34 @@ async fn build_project_map() -> Option<String> {
     parts.push(format!("**Project Type:** {project_type}"));
 
     // 2. File structure (top 100 files, sorted by relevance)
-    let files = run_cmd("rg", &["--files", "--max-depth", "5", "--hidden", "-g", "!.git"]).await?;
+    let files = run_cmd(
+        "rg",
+        &["--files", "--max-depth", "5", "--hidden", "-g", "!.git"],
+    )
+    .await?;
     let file_count = files.lines().count();
     let files = if file_count > 100 {
-        format!("{}... ({} total files, showing top 100)", 
+        format!(
+            "{}... ({} total files, showing top 100)",
             files.lines().take(100).collect::<Vec<_>>().join("\n"),
             file_count
         )
     } else {
         files
     };
-    parts.push(format!("\n**File Structure** ({file_count} files):\n{files}"));
+    parts.push(format!(
+        "\n**File Structure** ({file_count} files):\n{files}"
+    ));
 
     // 3. Top-level symbols (if ripgrep supports it)
     // Note: --symbols is experimental, fallback to just files if it fails
     if let Some(symbols) = run_cmd("rg", &["--symbols", "--max-depth", "3"]).await {
         if !symbols.trim().is_empty() {
             let symbols = if symbols.lines().count() > 50 {
-                format!("{}... (truncated)", symbols.lines().take(50).collect::<Vec<_>>().join("\n"))
+                format!(
+                    "{}... (truncated)",
+                    symbols.lines().take(50).collect::<Vec<_>>().join("\n")
+                )
             } else {
                 symbols
             };

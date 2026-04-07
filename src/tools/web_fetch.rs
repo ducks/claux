@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::{Tool, ToolOutput};
 
@@ -93,7 +93,11 @@ impl Tool for WebFetchTool {
         let status = response.status();
         if !status.is_success() {
             return Ok(ToolOutput {
-                content: format!("HTTP {}: {}", status.as_u16(), status.canonical_reason().unwrap_or("error")),
+                content: format!(
+                    "HTTP {}: {}",
+                    status.as_u16(),
+                    status.canonical_reason().unwrap_or("error")
+                ),
                 is_error: true,
             });
         }
@@ -306,10 +310,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_url() {
         let tool = WebFetchTool::new();
-        let result = tool
-            .execute(json!({"url": "not-a-url"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"url": "not-a-url"})).await.unwrap();
         assert!(result.is_error);
     }
 }

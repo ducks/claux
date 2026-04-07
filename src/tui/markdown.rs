@@ -93,7 +93,7 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                     let current_style = *style_stack.last().unwrap_or(&base_style);
                     style_stack.push(current_style.add_modifier(Modifier::BOLD));
                 }
-                Tag::Link {  .. } => {
+                Tag::Link { .. } => {
                     style_stack.push(Style::default().fg(BLUE).add_modifier(Modifier::UNDERLINED));
                     // We'll append the URL in parentheses after the link text
                     current_line.push(Span::raw("["));
@@ -259,7 +259,9 @@ mod tests {
         assert!(!lines.is_empty());
         // Check that there's a span with code styling
         let has_code = lines.iter().any(|line| {
-            line.spans.iter().any(|span| span.content.as_ref().contains("cargo build"))
+            line.spans
+                .iter()
+                .any(|span| span.content.as_ref().contains("cargo build"))
         });
         assert!(has_code);
     }
@@ -284,7 +286,9 @@ mod tests {
         assert!(lines.len() >= 3);
         // Each item should have a bullet
         let has_bullets = lines.iter().any(|line| {
-            line.spans.iter().any(|span| span.content.as_ref().contains("•"))
+            line.spans
+                .iter()
+                .any(|span| span.content.as_ref().contains("•"))
         });
         assert!(has_bullets);
     }
@@ -307,7 +311,9 @@ mod tests {
         assert!(!lines.is_empty());
         // Check that nested items have more indentation
         let has_nested_indent = lines.iter().any(|line| {
-            line.spans.iter().any(|span| span.content.as_ref().contains("  •"))
+            line.spans
+                .iter()
+                .any(|span| span.content.as_ref().contains("  •"))
         });
         assert!(has_nested_indent);
     }

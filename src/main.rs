@@ -52,7 +52,8 @@ async fn main() -> Result<()> {
         )));
     }
     if !plugin_registry.is_empty() {
-        tracing::info!("Loaded {} plugin(s): {} context, {} tool-start, {} tool-complete, {} session-start",
+        tracing::info!(
+            "Loaded {} plugin(s): {} context, {} tool-start, {} tool-complete, {} session-start",
             plugin_registry.len(),
             plugin_registry.get_by_trigger(&config::HookTrigger::OnContextBuild),
             plugin_registry.get_by_trigger(&config::HookTrigger::OnToolStart),
@@ -61,14 +62,14 @@ async fn main() -> Result<()> {
         );
     }
 
-    let model = args
-        .model
-        .as_deref()
-        .unwrap_or(&config.model)
-        .to_string();
+    let model = args.model.as_deref().unwrap_or(&config.model).to_string();
 
-    tracing::debug!("Config loaded: openai_base_url={:?} openai_api_key_cmd={:?} model={}",
-        config.openai_base_url, config.openai_api_key_cmd, config.model);
+    tracing::debug!(
+        "Config loaded: openai_base_url={:?} openai_api_key_cmd={:?} model={}",
+        config.openai_base_url,
+        config.openai_api_key_cmd,
+        config.model
+    );
 
     // Build the provider
     let provider = build_provider(&config, &model)?;
@@ -85,12 +86,18 @@ async fn main() -> Result<()> {
 
     // One-shot mode: --print / -p
     if let Some(ref prompt) = args.prompt {
-        let tool_registry = tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
+        let tool_registry =
+            tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
         let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
         engine.set_auto_compact_threshold(config.auto_compact_threshold);
 
-        let system_prompt = context::build_system_prompt_for_model(&model, Some(&plugin_registry), &config::HookTrigger::OnContextBuild).await?;
+        let system_prompt = context::build_system_prompt_for_model(
+            &model,
+            Some(&plugin_registry),
+            &config::HookTrigger::OnContextBuild,
+        )
+        .await?;
         engine.set_system_prompt(system_prompt);
 
         let response = engine.submit(prompt).await?;
@@ -105,11 +112,20 @@ async fn main() -> Result<()> {
     engine.set_auto_compact_threshold(config.auto_compact_threshold);
 
     // Build system prompt with plugins for REPL mode
-    let system_prompt = context::build_system_prompt_for_model(&model, Some(&plugin_registry), &config::HookTrigger::OnContextBuild).await?;
+    let system_prompt = context::build_system_prompt_for_model(
+        &model,
+        Some(&plugin_registry),
+        &config::HookTrigger::OnContextBuild,
+    )
+    .await?;
     engine.set_system_prompt(system_prompt);
 
     // Run session-start hooks
-    plugin::PluginRegistry::execute_side_effects(&plugin_registry, &config::HookTrigger::OnSessionStart, None)?;
+    plugin::PluginRegistry::execute_side_effects(
+        &plugin_registry,
+        &config::HookTrigger::OnSessionStart,
+        None,
+    )?;
 
     // Resume a previous session if requested
     if let Some(ref session_id) = args.resume {
@@ -143,10 +159,7 @@ async fn main() -> Result<()> {
 }
 
 /// Build a provider from config.
-fn build_provider(
-    config: &config::Config,
-    model: &str,
-) -> Result<Box<dyn api::Provider>> {
+fn build_provider(config: &config::Config, model: &str) -> Result<Box<dyn api::Provider>> {
     // Check for OpenAI-compatible provider in config
     if let Some(ref base_url) = config.openai_base_url {
         let api_key = config.resolve_openai_key().unwrap_or_default();

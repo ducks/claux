@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::io::{BufRead, Write, stdout};
+use std::io::{stdout, BufRead, Write};
 use tokio::sync::mpsc;
 
 use crate::commands::{self, CommandResult};
@@ -14,7 +14,12 @@ use crate::utils::diff::colorize_diff;
 /// Run the interactive REPL.
 pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry) -> Result<()> {
     // Build system prompt
-    let system_prompt = context::build_system_prompt_for_model(engine.model(), Some(plugins), &HookTrigger::OnContextBuild).await?;
+    let system_prompt = context::build_system_prompt_for_model(
+        engine.model(),
+        Some(plugins),
+        &HookTrigger::OnContextBuild,
+    )
+    .await?;
     engine.set_system_prompt(system_prompt);
 
     // Create session
@@ -63,7 +68,7 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
 
         // Stream the response
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
-        
+
         // Capture model name for display
         let model_name = engine.model().to_string();
 
@@ -167,9 +172,7 @@ fn prompt_permission(tool_name: &str, summary: &str) -> PermissionResponse {
             "\n  \x1b[33m⚡ {summary}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways this command / (A)lways all bash\x1b[0m "
         );
     } else {
-        print!(
-            "\n  \x1b[33m⚡ {summary}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m "
-        );
+        print!("\n  \x1b[33m⚡ {summary}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m ");
     }
     let _ = stdout().flush();
 
@@ -179,7 +182,7 @@ fn prompt_permission(tool_name: &str, summary: &str) -> PermissionResponse {
     }
 
     let trimmed = input.trim().to_lowercase();
-    
+
     // For Bash, extract the command from the summary for command-specific allow
     if tool_name == "Bash" && (trimmed == "a" || trimmed == "always") {
         // Extract command from summary (format: "bash: <command>")
@@ -205,15 +208,15 @@ fn prompt_permission_with_diff(tool_name: &str, summary: &str, diff: &str) -> Pe
         println!("\n  \x1b[33m⚡ {summary}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m");
     }
     println!("\n  \x1b[2m--- Diff Preview ---\x1b[0m");
-    
+
     // Print the colorized diff
     let colored_diff = colorize_diff(diff);
     for line in colored_diff.lines() {
         println!("  {line}");
     }
-    
+
     println!("  \x1b[2m--- End Diff ---\x1b[0m\n");
-    
+
     print!("  Allow? ");
     let _ = stdout().flush();
 
@@ -223,7 +226,7 @@ fn prompt_permission_with_diff(tool_name: &str, summary: &str, diff: &str) -> Pe
     }
 
     let trimmed = input.trim().to_lowercase();
-    
+
     // For Bash, extract the command from the summary for command-specific allow
     if tool_name == "Bash" && (trimmed == "a" || trimmed == "always") {
         // Extract command from summary (format: "bash: <command>")

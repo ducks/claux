@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -139,10 +139,7 @@ mod tests {
     #[tokio::test]
     async fn bash_exit_code() {
         let tool = BashTool;
-        let result = tool
-            .execute(json!({"command": "exit 1"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"command": "exit 1"})).await.unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("Exit code"));
     }

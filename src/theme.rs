@@ -74,9 +74,9 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             fg: Color::Rgb(213, 196, 161),   // gruvbox fg2
-            bg: Color::Rgb(40, 40, 40),       // gruvbox bg
-            dim: Color::Rgb(146, 131, 116),   // gruvbox gray
-            bold: Color::Rgb(250, 233, 213),  // gruvbox fg1
+            bg: Color::Rgb(40, 40, 40),      // gruvbox bg
+            dim: Color::Rgb(146, 131, 116),  // gruvbox gray
+            bold: Color::Rgb(250, 233, 213), // gruvbox fg1
 
             success: Color::Rgb(184, 187, 38), // gruvbox green
             error: Color::Rgb(251, 73, 52),    // gruvbox red
@@ -85,7 +85,7 @@ impl Theme {
 
             assistant: Color::Rgb(131, 165, 152), // gruvbox blue (purple alternative)
             assistant_bold: Color::Rgb(211, 134, 155), // gruvbox purple
-            user: Color::Rgb(184, 187, 38),    // gruvbox green
+            user: Color::Rgb(184, 187, 38),       // gruvbox green
             user_bold: Color::Rgb(250, 233, 213), // gruvbox fg1
             user_message_bg: Color::Rgb(60, 60, 60), // Darker than bg for bubble effect
             user_message_fg: Color::Rgb(213, 196, 161), // Same as fg for readability
@@ -93,7 +93,7 @@ impl Theme {
             tool_name: Color::Rgb(250, 189, 47), // gruvbox yellow
             tool_summary: Color::Rgb(146, 131, 116), // gruvbox gray
             tool_success: Color::Rgb(184, 187, 38), // gruvbox green
-            tool_error: Color::Rgb(251, 73, 52),    // gruvbox red
+            tool_error: Color::Rgb(251, 73, 52), // gruvbox red
 
             diff_added: Color::Rgb(152, 195, 121), // lighter green
             diff_removed: Color::Rgb(224, 108, 117), // lighter red
@@ -113,27 +113,27 @@ impl Theme {
     /// Get the light theme.
     pub fn light() -> Self {
         Self {
-            fg: Color::Rgb(60, 60, 60),       // dark gray
-            bg: Color::Rgb(250, 250, 250),    // off-white
-            dim: Color::Rgb(140, 140, 140),   // medium gray
-            bold: Color::Rgb(30, 30, 30),     // near black
+            fg: Color::Rgb(60, 60, 60),     // dark gray
+            bg: Color::Rgb(250, 250, 250),  // off-white
+            dim: Color::Rgb(140, 140, 140), // medium gray
+            bold: Color::Rgb(30, 30, 30),   // near black
 
             success: Color::Rgb(84, 128, 0),  // dark green
             error: Color::Rgb(200, 60, 60),   // red
             warning: Color::Rgb(200, 150, 0), // amber
             info: Color::Rgb(40, 80, 180),    // blue
 
-            assistant: Color::Rgb(80, 120, 180), // blue
-            assistant_bold: Color::Rgb(140, 80, 160), // purple
-            user: Color::Rgb(84, 128, 0),     // green
-            user_bold: Color::Rgb(30, 30, 30), // near black
+            assistant: Color::Rgb(80, 120, 180),        // blue
+            assistant_bold: Color::Rgb(140, 80, 160),   // purple
+            user: Color::Rgb(84, 128, 0),               // green
+            user_bold: Color::Rgb(30, 30, 30),          // near black
             user_message_bg: Color::Rgb(220, 220, 220), // Lighter than bg for bubble effect
-            user_message_fg: Color::Rgb(60, 60, 60), // Dark fg for readability
+            user_message_fg: Color::Rgb(60, 60, 60),    // Dark fg for readability
 
-            tool_name: Color::Rgb(200, 150, 0), // amber
+            tool_name: Color::Rgb(200, 150, 0),      // amber
             tool_summary: Color::Rgb(140, 140, 140), // gray
-            tool_success: Color::Rgb(84, 128, 0), // green
-            tool_error: Color::Rgb(200, 60, 60), // red
+            tool_success: Color::Rgb(84, 128, 0),    // green
+            tool_error: Color::Rgb(200, 60, 60),     // red
 
             diff_added: Color::Rgb(120, 180, 60),
             diff_removed: Color::Rgb(200, 100, 100),
@@ -206,12 +206,12 @@ impl Theme {
 
             assistant: Color::Rgb(189, 147, 249), // p:purple
             assistant_bold: Color::Rgb(255, 121, 198), // p:pink
-            user: Color::Rgb(80, 250, 123),     // p:green
+            user: Color::Rgb(80, 250, 123),       // p:green
             user_bold: Color::Rgb(248, 248, 242),
             user_message_bg: Color::Rgb(68, 71, 90), // Dracula overlay
             user_message_fg: Color::Rgb(248, 248, 242),
 
-            tool_name: Color::Rgb(255, 184, 108), // p:yellow
+            tool_name: Color::Rgb(255, 184, 108),   // p:yellow
             tool_summary: Color::Rgb(98, 114, 164), // p:comment
             tool_success: Color::Rgb(80, 250, 123), // p:green
             tool_error: Color::Rgb(255, 85, 85),    // p:red
@@ -245,15 +245,15 @@ impl Theme {
             warning: Color::Rgb(235, 203, 139), // n:yellow
             info: Color::Rgb(88, 166, 224),     // n:blue
 
-            assistant: Color::Rgb(143, 188, 187), // n:cyan
+            assistant: Color::Rgb(143, 188, 187),      // n:cyan
             assistant_bold: Color::Rgb(180, 142, 173), // n:magenta
-            user: Color::Rgb(163, 190, 140),    // n:green
+            user: Color::Rgb(163, 190, 140),           // n:green
             user_bold: Color::Rgb(236, 239, 244),
             user_message_bg: Color::Rgb(59, 66, 82), // Nord overlay
             user_message_fg: Color::Rgb(236, 239, 244),
 
-            tool_name: Color::Rgb(235, 203, 139), // n:yellow
-            tool_summary: Color::Rgb(94, 120, 156), // n:comment
+            tool_name: Color::Rgb(235, 203, 139),    // n:yellow
+            tool_summary: Color::Rgb(94, 120, 156),  // n:comment
             tool_success: Color::Rgb(163, 190, 140), // n:green
             tool_error: Color::Rgb(191, 97, 106),    // n:red
 
@@ -276,8 +276,8 @@ impl Theme {
     /// Based on https://catppuccin.com/
     pub fn catppuccin() -> Self {
         Self {
-            fg: Color::Rgb(205, 214, 244), // base: text
-            bg: Color::Rgb(30, 34, 44),    // base: base
+            fg: Color::Rgb(205, 214, 244),  // base: text
+            bg: Color::Rgb(30, 34, 44),     // base: base
             dim: Color::Rgb(148, 157, 180), // mantle: subtext0
             bold: Color::Rgb(249, 250, 255),
 
@@ -288,12 +288,12 @@ impl Theme {
 
             assistant: Color::Rgb(180, 194, 255), // lavender
             assistant_bold: Color::Rgb(231, 130, 198), // pink
-            user: Color::Rgb(166, 227, 161),    // green
+            user: Color::Rgb(166, 227, 161),      // green
             user_bold: Color::Rgb(205, 214, 244),
             user_message_bg: Color::Rgb(41, 45, 60), // Catppuccin overlay
             user_message_fg: Color::Rgb(205, 214, 244),
 
-            tool_name: Color::Rgb(250, 179, 135), // peach
+            tool_name: Color::Rgb(250, 179, 135),    // peach
             tool_summary: Color::Rgb(148, 157, 180), // subtext0
             tool_success: Color::Rgb(166, 227, 161), // green
             tool_error: Color::Rgb(243, 139, 168),   // red

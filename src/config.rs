@@ -142,7 +142,9 @@ impl Config {
                     config.model = model.to_string();
                 }
                 if let Some(mode) = project.get("permission_mode").and_then(|v| v.as_str()) {
-                    if let Ok(m) = serde_json::from_value(serde_json::Value::String(mode.to_string())) {
+                    if let Ok(m) =
+                        serde_json::from_value(serde_json::Value::String(mode.to_string()))
+                    {
                         config.permission_mode = m;
                     }
                 }
@@ -212,7 +214,11 @@ impl Config {
                         tracing::warn!("openai_api_key_cmd returned empty output");
                     } else {
                         let stderr = String::from_utf8_lossy(&output.stderr);
-                        tracing::warn!("openai_api_key_cmd failed ({}): {}", output.status, stderr.trim());
+                        tracing::warn!(
+                            "openai_api_key_cmd failed ({}): {}",
+                            output.status,
+                            stderr.trim()
+                        );
                     }
                 }
                 Err(e) => {
@@ -227,7 +233,9 @@ impl Config {
     /// Read OAuth access token from ~/.claude/.credentials.json
     fn read_claude_oauth_token() -> Option<String> {
         let home = std::env::var("HOME").ok()?;
-        let path = PathBuf::from(home).join(".claude").join(".credentials.json");
+        let path = PathBuf::from(home)
+            .join(".claude")
+            .join(".credentials.json");
 
         let content = std::fs::read_to_string(&path).ok()?;
         let creds: serde_json::Value = serde_json::from_str(&content).ok()?;
