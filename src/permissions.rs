@@ -139,11 +139,11 @@ impl PermissionChecker {
                         }
                         "Edit" => {
                             let path = input["file_path"].as_str().unwrap_or("?");
-                            let old_text = input["old_text"].as_str().unwrap_or("");
-                            let new_text = input["new_text"].as_str().unwrap_or("");
+                            let old_string = input["old_string"].as_str().unwrap_or("");
+                            let new_string = input["new_string"].as_str().unwrap_or("");
 
-                            let diff = if !old_text.is_empty() && !new_text.is_empty() {
-                                Some(generate_diff(old_text, new_text, path))
+                            let diff = if !old_string.is_empty() && !new_string.is_empty() {
+                                Some(generate_diff(old_string, new_string, path))
                             } else {
                                 None
                             };
@@ -310,6 +310,40 @@ mod tests {
         let input = json!({"file_path": "/home/ducks/important.rs"});
         if let PermissionResult::Ask { message, diff: _ } = checker.check("Edit", &input, false) {
             assert!(message.contains("important.rs"));
+        } else {
+            panic!("expected Ask");
+        }
+    }
+
+    #[test]
+    fn edit_permission_includes_diff_when_fields_present() {
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({
+            "file_path": "src/main.rs",
+            "old_string": "let x = 1",
+            "new_string": "let x = 2"
+        });
+
+        if let PermissionResult::Ask { message, diff } = checker.check("Edit", &input, false) {
+            assert!(message.contains("src/main.rs"));
+            assert!(diff.is_some(), "Diff should be generated when old_string and new_string are provided");
+            let diff_content = diff.unwrap();
+            assert!(diff_content.contains("src/main.rs"));
+            assert!(diff_content.contains("-let x = 1"));
+            assert!(diff_content.contains("+let x = 2"));
+        } else {
+            panic!("expected Ask");
+        }
+    }
+
+    #[test]
+    fn edit_permission_no_diff_when_fields_missing() {
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        let input = json!({"file_path": "src/main.rs"});
+
+        if let PermissionResult::Ask { message, diff } = checker.check("Edit", &input, false) {
+            assert!(message.contains("src/main.rs"));
+            assert!(diff.is_none(), "Diff should be None when old_string/new_string are missing");
         } else {
             panic!("expected Ask");
         }
