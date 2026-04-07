@@ -1,3 +1,5 @@
+#![allow(dead_code, clippy::if_same_then_else)]
+
 mod api;
 mod cli;
 mod commands;
@@ -92,7 +94,7 @@ async fn main() -> Result<()> {
         engine.set_system_prompt(system_prompt);
 
         let response = engine.submit(prompt).await?;
-        print!("{}", response);
+        print!("{response}");
         return Ok(());
     }
 
@@ -128,7 +130,7 @@ async fn main() -> Result<()> {
                 );
             }
             None => {
-                eprintln!("Session not found: {}. Starting new session.", session_id);
+                eprintln!("Session not found: {session_id}. Starting new session.");
             }
         }
     }

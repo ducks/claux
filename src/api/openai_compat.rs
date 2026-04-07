@@ -179,7 +179,7 @@ impl Provider for OpenAICompatProvider {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("API error ({}): {}", status, error_text);
+            anyhow::bail!("API error ({status}): {error_text}");
         }
 
         tokio::spawn(async move {

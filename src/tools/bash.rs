@@ -110,11 +110,11 @@ impl Tool for BashTool {
                 })
             }
             Ok(Err(e)) => Ok(ToolOutput {
-                content: format!("Failed to execute command: {}", e),
+                content: format!("Failed to execute command: {e}"),
                 is_error: true,
             }),
             Err(_) => Ok(ToolOutput {
-                content: format!("Command timed out after {}ms", timeout_ms),
+                content: format!("Command timed out after {timeout_ms}ms"),
                 is_error: true,
             }),
         }

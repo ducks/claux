@@ -31,13 +31,13 @@ pub fn create_session(model: &str) -> Result<(String, PathBuf)> {
     db.create_session(&id, model)?;
     
     // Return a dummy path for API compatibility
-    let dummy_path = PathBuf::from(format!("sqlite://{}", id));
+    let dummy_path = PathBuf::from(format!("sqlite://{id}"));
     Ok((id, dummy_path))
 }
 
 /// Append a message to a session.
 /// The session_id is extracted from the path's file stem for compatibility.
-pub fn append_message(path: &PathBuf, message: &Message) -> Result<()> {
+pub fn append_message(path: &std::path::Path, message: &Message) -> Result<()> {
     let session_id = extract_session_id(path);
     let db = get_db()?;
     db.append_message(&session_id, message)?;
@@ -45,12 +45,12 @@ pub fn append_message(path: &PathBuf, message: &Message) -> Result<()> {
 }
 
 /// Load all messages from a session.
-pub fn load_session(path: &PathBuf) -> Result<(SessionMeta, Vec<Message>)> {
+pub fn load_session(path: &std::path::Path) -> Result<(SessionMeta, Vec<Message>)> {
     let session_id = extract_session_id(path);
     let db = get_db()?;
     
     let session_info = db.get_session(&session_id)?
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
     
     let messages = db.get_messages(&session_id)?;
     
@@ -83,7 +83,7 @@ pub fn list_sessions() -> Result<Vec<(String, PathBuf)>> {
 }
 
 /// Extract session ID from path (file stem for file paths, or after "sqlite://" for SQLite paths).
-fn extract_session_id(path: &PathBuf) -> String {
+fn extract_session_id(path: &std::path::Path) -> String {
     path.file_stem()
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())

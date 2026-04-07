@@ -63,8 +63,7 @@ pub fn parse_command(input: &str) -> Option<CommandResult> {
         }
         "/cost" => Some(CommandResult::Text("__cost__".to_string())),
         _ => Some(CommandResult::Text(format!(
-            "Unknown command: {}. Type /help for available commands.",
-            cmd
+            "Unknown command: {cmd}. Type /help for available commands."
         ))),
     }
 }
@@ -103,7 +102,7 @@ fn execute_resume(id: Option<String>, engine: &mut Engine) -> Result<String> {
                         engine.message_count()
                     ))
                 }
-                None => Ok(format!("Session not found: {}", session_id)),
+                None => Ok(format!("Session not found: {session_id}")),
             }
         }
         None => {
@@ -120,7 +119,7 @@ fn execute_resume(id: Option<String>, engine: &mut Engine) -> Result<String> {
                         "  \x1b[33m{}\x1b[0m  {}  {} msgs  {}",
                         meta.id, meta.model, msgs.len(), meta.cwd
                     ),
-                    Err(_) => format!("  \x1b[33m{}\x1b[0m  (error reading)", id),
+                    Err(_) => format!("  \x1b[33m{id}\x1b[0m  (error reading)"),
                 };
                 output.push_str(&meta_line);
                 if i < sessions.len().min(10) - 1 {
@@ -137,7 +136,7 @@ fn execute_model(new_model: Option<String>, engine: &mut Engine) -> Result<Strin
     match new_model {
         Some(model) => {
             engine.set_model(&model);
-            Ok(format!("Model set to \x1b[33m{}\x1b[0m", model))
+            Ok(format!("Model set to \x1b[33m{model}\x1b[0m"))
         }
         None => Ok(format!(
             "Current model: \x1b[33m{}\x1b[0m\n\n\
@@ -163,24 +162,22 @@ async fn execute_theme(theme_name: Option<String>, engine: &mut Engine) -> Resul
                 "catppuccin" => ThemeName::Catppuccin,
                 _ => {
                     return Ok(format!(
-                        "Unknown theme: {}\n\n\
+                        "Unknown theme: {name}\n\n\
                          Available themes:\n\
                          - dark: gruvbox-inspired (default)\n\
                          - light: high-contrast for bright terminals\n\
                          - ansi: 16-color fallback\n\
                          - dracula: dark purple/violet theme\n\
                          - nord: arctic blue-gray theme\n\
-                         - catppuccin: pastel mocha theme",
-                        name
+                         - catppuccin: pastel mocha theme"
                     ));
                 }
             };
             engine.set_theme(_theme);
-            Ok(format!("Theme set to: {}", name))
+            Ok(format!("Theme set to: {name}"))
         }
         None => {
-            Ok(format!(
-                "Current theme: dark\n\n\
+            Ok("Current theme: dark\n\n\
                  Available themes:\n\
                  - dark: gruvbox-inspired (default)\n\
                  - light: high-contrast for bright terminals\n\
@@ -188,8 +185,7 @@ async fn execute_theme(theme_name: Option<String>, engine: &mut Engine) -> Resul
                  - dracula: dark purple/violet theme\n\
                  - nord: arctic blue-gray theme\n\
                  - catppuccin: pastel mocha theme\n\n\
-                 Use /theme <name> to switch."
-            ))
+                 Use /theme <name> to switch.".to_string())
         }
     }
 }

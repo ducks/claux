@@ -179,7 +179,7 @@ impl Db {
             let role: String = row.get(0)?;
             let content_json: String = row.get(1)?;
             let content: crate::api::types::MessageContent = serde_json::from_str(&content_json)
-                .map_err(|e| rusqlite::Error::InvalidQuery)?;
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
             Ok(Message { role, content })
         })?;
 
@@ -201,7 +201,7 @@ impl Db {
                 let role: String = row.get(0)?;
                 let content_json: String = row.get(1)?;
                 let content: crate::api::types::MessageContent = serde_json::from_str(&content_json)
-                    .map_err(|e| rusqlite::Error::InvalidQuery)?;
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
                 Ok(Message { role, content })
             }
         )?;
@@ -240,7 +240,7 @@ impl Db {
              ORDER BY s.last_active DESC"
         )?;
 
-        let sessions = stmt.query_map([format!("%{}%", query)], |row| {
+        let sessions = stmt.query_map([format!("%{query}%")], |row| {
             Ok(SessionInfo {
                 id: row.get(0)?,
                 model: row.get(1)?,

@@ -71,7 +71,7 @@ impl Provider for AnthropicProvider {
         request = match &self.auth {
             AuthMethod::ApiKey(key) => request.header("x-api-key", key),
             AuthMethod::OAuthToken(token) => request
-                .header("Authorization", format!("Bearer {}", token))
+                .header("Authorization", format!("Bearer {token}"))
                 .header("anthropic-beta", "oauth-2025-04-20"),
         };
 
@@ -80,7 +80,7 @@ impl Provider for AnthropicProvider {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("API error ({}): {}", status, error_text);
+            anyhow::bail!("API error ({status}): {error_text}");
         }
 
         tokio::spawn(async move {

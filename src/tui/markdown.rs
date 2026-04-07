@@ -24,8 +24,8 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
     let mut in_code_block = false;
     let mut code_block_lang = String::new();
     let mut list_depth: usize = 0;
-    let mut in_heading = false;
-    let mut heading_level = HeadingLevel::H1;
+    let mut _in_heading = false;
+    let mut _heading_level = HeadingLevel::H1;
 
     let options = Options::all();
     let parser = Parser::new_ext(text, options);
@@ -41,8 +41,8 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                     }
                 }
                 Tag::Heading { level, .. } => {
-                    in_heading = true;
-                    heading_level = level;
+                    _in_heading = true;
+                    _heading_level = level;
                     let heading_style = match level {
                         HeadingLevel::H1 => Style::default()
                             .fg(YELLOW)
@@ -68,10 +68,10 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                     let label = if code_block_lang.is_empty() {
                         "┌─ code ".to_string()
                     } else {
-                        format!("┌─ {} ", code_block_lang)
+                        format!("┌─ {code_block_lang} ")
                     };
                     lines.push(Line::from(Span::styled(
-                        format!("{}─────────────────────────", label),
+                        format!("{label}─────────────────────────"),
                         Style::default().fg(GRAY),
                     )));
                 }
@@ -81,7 +81,7 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                 Tag::Item => {
                     let indent = "  ".repeat(list_depth.saturating_sub(1));
                     current_line.push(Span::styled(
-                        format!("{}• ", indent),
+                        format!("{indent}• "),
                         Style::default().fg(GRAY),
                     ));
                 }
@@ -93,14 +93,14 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                     let current_style = *style_stack.last().unwrap_or(&base_style);
                     style_stack.push(current_style.add_modifier(Modifier::BOLD));
                 }
-                Tag::Link { dest_url, .. } => {
+                Tag::Link {  .. } => {
                     style_stack.push(Style::default().fg(BLUE).add_modifier(Modifier::UNDERLINED));
                     // We'll append the URL in parentheses after the link text
                     current_line.push(Span::raw("["));
                 }
                 Tag::Image { dest_url, .. } => {
                     current_line.push(Span::styled(
-                        format!("![image: {}]", dest_url),
+                        format!("![image: {dest_url}]"),
                         Style::default().fg(BLUE),
                     ));
                 }
@@ -117,7 +117,7 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                     lines.push(Line::from(""));
                 }
                 TagEnd::Heading(_) => {
-                    in_heading = false;
+                    _in_heading = false;
                     if !current_line.is_empty() {
                         lines.push(Line::from(current_line.clone()));
                         current_line.clear();
@@ -168,7 +168,7 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                     // Code block content
                     for line in text.lines() {
                         lines.push(Line::from(Span::styled(
-                            format!("│ {}", line),
+                            format!("│ {line}"),
                             Style::default().fg(AQUA).bg(BG_CODE),
                         )));
                     }

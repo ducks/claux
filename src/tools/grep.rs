@@ -66,8 +66,8 @@ impl Tool for GrepTool {
     fn summarize(&self, input: &Value) -> String {
         let pattern = input["pattern"].as_str().unwrap_or("?");
         match input["path"].as_str() {
-            Some(path) => format!("\"{}\" in {}", pattern, path),
-            None => format!("\"{}\"", pattern),
+            Some(path) => format!("\"{pattern}\" in {path}"),
+            None => format!("\"{pattern}\""),
         }
     }
 

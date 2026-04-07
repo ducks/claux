@@ -55,7 +55,7 @@ impl Tool for ReadTool {
     fn summarize(&self, input: &Value) -> String {
         let path = input["file_path"].as_str().unwrap_or("?");
         match input["offset"].as_u64() {
-            Some(offset) => format!("{} (from line {})", path, offset),
+            Some(offset) => format!("{path} (from line {offset})"),
             None => path.to_string(),
         }
     }
@@ -91,7 +91,7 @@ impl Tool for ReadTool {
         let mut result = String::new();
         for (i, line) in lines[start..end].iter().enumerate() {
             let line_num = start + i + 1;
-            let _ = writeln!(result, "{}\t{}", line_num, line);
+            let _ = writeln!(result, "{line_num}\t{line}");
         }
 
         Ok(ToolOutput {

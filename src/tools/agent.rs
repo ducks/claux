@@ -90,12 +90,11 @@ impl Tool for AgentTool {
 
         let base_prompt = context::build_system_prompt().await?;
         let agent_prompt = format!(
-            "{}\n\n# Agent Mode\n\
+            "{base_prompt}\n\n# Agent Mode\n\
              You are a sub-agent spawned to handle a specific task. \
              Complete the task and provide a clear, concise result. \
              You do NOT have access to the Agent tool (no nested agents). \
-             Focus on the task and return your findings.",
-            base_prompt
+             Focus on the task and return your findings."
         );
         engine.set_system_prompt(agent_prompt);
 
@@ -104,7 +103,7 @@ impl Tool for AgentTool {
                 let cost_summary = engine.cost.format_summary();
                 let mut content = response;
                 if !cost_summary.is_empty() {
-                    content.push_str(&format!("\n\n[Agent {}]", cost_summary));
+                    content.push_str(&format!("\n\n[Agent {cost_summary}]"));
                 }
                 Ok(ToolOutput {
                     content,
@@ -112,7 +111,7 @@ impl Tool for AgentTool {
                 })
             }
             Err(e) => Ok(ToolOutput {
-                content: format!("Agent error: {}", e),
+                content: format!("Agent error: {e}"),
                 is_error: true,
             }),
         }

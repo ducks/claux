@@ -42,12 +42,12 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
                 CommandResult::Text(ref text) if text == "__cost__" => {
                     println!("{}", commands::format_cost(&engine));
                 }
-                CommandResult::Text(text) => println!("{}", text),
+                CommandResult::Text(text) => println!("{text}"),
                 CommandResult::Exit => break,
                 CommandResult::Async(async_cmd) => {
                     match commands::execute_async(async_cmd, &mut engine).await {
-                        Ok(output) => println!("{}", output),
-                        Err(e) => eprintln!("\x1b[31mError: {}\x1b[0m", e),
+                        Ok(output) => println!("{output}"),
+                        Err(e) => eprintln!("\x1b[31mError: {e}\x1b[0m"),
                     }
                 }
             }
@@ -84,15 +84,15 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
                         }
                         // Clear thinking indicator on first text and show model
                         if first_text {
-                            print!("\r\x1b[2m● {} \x1b[0m", model_name);
+                            print!("\r\x1b[2m● {model_name} \x1b[0m");
                             let _ = stdout().flush();
                             first_text = false;
                         }
-                        print!("{}", t);
+                        print!("{t}");
                         let _ = stdout().flush();
                     }
                     StreamEvent::ToolStart { name, summary, .. } => {
-                        print!("\n  \x1b[2m[{}]\x1b[0m {} ", name, summary);
+                        print!("\n  \x1b[2m[{name}]\x1b[0m {summary} ");
                         let _ = stdout().flush();
                         in_tool = true;
                     }
@@ -131,7 +131,7 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
                         let _ = respond.send(response);
                     }
                     StreamEvent::Error(e) => {
-                        eprintln!("\n\x1b[31mError: {}\x1b[0m", e);
+                        eprintln!("\n\x1b[31mError: {e}\x1b[0m");
                     }
                     StreamEvent::Done => {
                         println!("\n");
@@ -143,7 +143,7 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
 
         // Run the query
         if let Err(e) = engine.submit_streaming(trimmed, tx).await {
-            eprintln!("\n\x1b[31mError: {}\x1b[0m\n", e);
+            eprintln!("\n\x1b[31mError: {e}\x1b[0m\n");
         }
 
         display_handle.await?;
@@ -164,13 +164,11 @@ fn prompt_permission(tool_name: &str, summary: &str) -> PermissionResponse {
     // For Bash commands, offer command-specific "always allow"
     if tool_name == "Bash" {
         print!(
-            "\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways this command / (A)lways all bash\x1b[0m ",
-            summary
+            "\n  \x1b[33m⚡ {summary}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways this command / (A)lways all bash\x1b[0m "
         );
     } else {
         print!(
-            "\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m ",
-            summary
+            "\n  \x1b[33m⚡ {summary}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m "
         );
     }
     let _ = stdout().flush();
@@ -202,16 +200,16 @@ fn prompt_permission(tool_name: &str, summary: &str) -> PermissionResponse {
 fn prompt_permission_with_diff(tool_name: &str, summary: &str, diff: &str) -> PermissionResponse {
     // For Bash commands, offer command-specific "always allow"
     if tool_name == "Bash" {
-        println!("\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways this command / (A)lways all bash\x1b[0m", summary);
+        println!("\n  \x1b[33m⚡ {summary}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways this command / (A)lways all bash\x1b[0m");
     } else {
-        println!("\n  \x1b[33m⚡ {}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m", summary);
+        println!("\n  \x1b[33m⚡ {summary}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways\x1b[0m");
     }
     println!("\n  \x1b[2m--- Diff Preview ---\x1b[0m");
     
     // Print the colorized diff
     let colored_diff = colorize_diff(diff);
     for line in colored_diff.lines() {
-        println!("  {}", line);
+        println!("  {line}");
     }
     
     println!("  \x1b[2m--- End Diff ---\x1b[0m\n");

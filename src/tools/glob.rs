@@ -48,7 +48,7 @@ impl Tool for GlobTool {
     fn summarize(&self, input: &Value) -> String {
         let pattern = input["pattern"].as_str().unwrap_or("?");
         match input["path"].as_str() {
-            Some(path) => format!("{} in {}", pattern, path),
+            Some(path) => format!("{pattern} in {path}"),
             None => pattern.to_string(),
         }
     }

@@ -84,7 +84,7 @@ impl Tool for WebFetchTool {
             Ok(r) => r,
             Err(e) => {
                 return Ok(ToolOutput {
-                    content: format!("Failed to fetch URL: {}", e),
+                    content: format!("Failed to fetch URL: {e}"),
                     is_error: true,
                 });
             }
@@ -110,7 +110,7 @@ impl Tool for WebFetchTool {
             Ok(text) => text,
             Err(e) => {
                 return Ok(ToolOutput {
-                    content: format!("Failed to read response body: {}", e),
+                    content: format!("Failed to read response body: {e}"),
                     is_error: true,
                 });
             }

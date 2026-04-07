@@ -85,8 +85,7 @@ impl Tool for EditTool {
         if count > 1 && !params.replace_all {
             return Ok(ToolOutput {
                 content: format!(
-                    "old_string appears {} times. Use replace_all or provide more context.",
-                    count
+                    "old_string appears {count} times. Use replace_all or provide more context."
                 ),
                 is_error: true,
             });
