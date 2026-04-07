@@ -11,7 +11,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::api::{Provider, ToolDefinition};
+use crate::api::ToolDefinition;
 
 /// Output from a tool execution.
 #[derive(Debug, Clone)]
@@ -100,7 +100,7 @@ impl ToolRegistry {
             .tools
             .iter()
             .find(|t| t.name() == name)
-            .ok_or_else(|| anyhow::anyhow!("unknown tool: {}", name))?;
+            .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?;
 
         tool.execute(input).await
     }

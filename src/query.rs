@@ -2,7 +2,7 @@ use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::api::{ApiEvent, ContentBlock, Message, Provider};
-use crate::compact::{self, CompactStrategy};
+use crate::compact::{self};
 use crate::cost::CostTracker;
 use crate::permissions::{PermissionChecker, PermissionResponse, PermissionResult};
 use crate::tools::ToolRegistry;
@@ -246,7 +246,7 @@ impl Engine {
                 ApiEvent::Text(t) => summary.push_str(&t),
                 ApiEvent::Usage(usage) => self.cost.add_usage(&usage),
                 ApiEvent::Done => break,
-                ApiEvent::Error(e) => return Err(anyhow::anyhow!("Compact error: {}", e)),
+                ApiEvent::Error(e) => return Err(anyhow::anyhow!("Compact error: {e}")),
                 _ => {}
             }
         }
@@ -259,8 +259,7 @@ impl Engine {
         ];
 
         Ok(format!(
-            "Compacted {} messages into summary.\n\n\x1b[2m{}\x1b[0m",
-            old_count, summary
+            "Compacted {old_count} messages into summary.\n\n\x1b[2m{summary}\x1b[0m"
         ))
     }
 
@@ -352,7 +351,7 @@ impl Engine {
                             had_error = true;
                             break;
                         }
-                        return Err(anyhow::anyhow!("API error: {}", e));
+                        return Err(anyhow::anyhow!("API error: {e}"));
                     }
                 }
             }
@@ -444,12 +443,12 @@ impl Engine {
             let tool_output = match perm {
                 PermissionResult::Allow => self.tools.execute(&name, input.clone()).await?,
                 PermissionResult::Deny(reason) => crate::tools::ToolOutput {
-                    content: format!("Permission denied: {}", reason),
+                    content: format!("Permission denied: {reason}"),
                     is_error: true,
                 },
                 PermissionResult::Ask { message, diff: _ } => {
                     // For non-streaming mode, just auto-allow (this path shouldn't normally be reached)
-                    eprintln!("  [tool] {} — auto-allowing", message);
+                    eprintln!("  [tool] {message} — auto-allowing");
                     self.tools.execute(&name, input.clone()).await?
                 }
             };
@@ -570,7 +569,7 @@ impl Engine {
                             break;
                         }
                         let _ = tx.send(StreamEvent::Error(e.clone())).await;
-                        return Err(anyhow::anyhow!("API error: {}", e));
+                        return Err(anyhow::anyhow!("API error: {e}"));
                     }
                 }
             }
@@ -611,7 +610,7 @@ impl Engine {
                 let tool_output = match perm {
                     PermissionResult::Allow => self.tools.execute(name, input.clone()).await?,
                     PermissionResult::Deny(reason) => crate::tools::ToolOutput {
-                        content: format!("Permission denied: {}", reason),
+                        content: format!("Permission denied: {reason}"),
                         is_error: true,
                     },
                     PermissionResult::Ask { message, diff } => {

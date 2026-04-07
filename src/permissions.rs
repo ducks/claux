@@ -128,7 +128,7 @@ impl PermissionChecker {
                         "Write" => {
                             let path = input["file_path"].as_str().unwrap_or("?");
                             PermissionResult::Ask {
-                                message: format!("write: {}", path),
+                                message: format!("write: {path}"),
                                 diff: None,
                             }
                         }
@@ -144,12 +144,12 @@ impl PermissionChecker {
                             };
                             
                             PermissionResult::Ask {
-                                message: format!("edit: {}", path),
+                                message: format!("edit: {path}"),
                                 diff,
                             }
                         }
                         _ => PermissionResult::Ask {
-                            message: format!("{}", tool_name),
+                            message: tool_name.to_string(),
                             diff: None,
                         },
                     }

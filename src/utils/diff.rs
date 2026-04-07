@@ -14,10 +14,10 @@ use similar::TextDiff;
 pub fn generate_diff(old: &str, new: &str, path: &str) -> String {
     let diff = TextDiff::from_lines(old, new);
     
-    let mut output = format!("--- a/{}\n+++ b/{}\n", path, path);
+    let mut output = format!("--- a/{path}\n+++ b/{path}\n");
     
     for change in diff.unified_diff().context_radius(3).iter_hunks() {
-        output.push_str(&format!("{}", change));
+        output.push_str(&format!("{change}"));
     }
     
     output
@@ -34,9 +34,9 @@ pub fn colorize_diff(diff: &str) -> String {
     
     for line in diff.lines() {
         let colored_line = if line.starts_with('+') && !line.starts_with("+++") {
-            format!("\x1b[32m{}\x1b[0m", line) // Green for additions
+            format!("\x1b[32m{line}\x1b[0m") // Green for additions
         } else if line.starts_with('-') && !line.starts_with("---") {
-            format!("\x1b[31m{}\x1b[0m", line) // Red for deletions
+            format!("\x1b[31m{line}\x1b[0m") // Red for deletions
         } else {
             line.to_string() // No color for context
         };

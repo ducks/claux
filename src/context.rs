@@ -14,7 +14,7 @@ pub async fn build_system_prompt_for_model(model: &str, plugins: Option<&PluginR
     parts.push(base_system_prompt(model));
 
     // Environment
-    parts.push(format!("# Environment"));
+    parts.push("# Environment".to_string());
     parts.push(format!("- Platform: {}", std::env::consts::OS));
     parts.push(format!("- Shell: {}", std::env::var("SHELL").unwrap_or_else(|_| "sh".into())));
 
@@ -30,24 +30,24 @@ pub async fn build_system_prompt_for_model(model: &str, plugins: Option<&PluginR
 
     // Git status
     if let Some(git_info) = git_status().await {
-        parts.push(format!("\n# Git Status\n{}", git_info));
+        parts.push(format!("\n# Git Status\n{git_info}"));
     }
 
     // Project map (smart context)
     if let Some(project_map) = build_project_map().await {
-        parts.push(format!("\n# Project Structure\n{}", project_map));
+        parts.push(format!("\n# Project Structure\n{project_map}"));
     }
 
     // CLAUDE.md / project context
     if let Some(claude_md) = read_claude_md().await {
-        parts.push(format!("\n# Project Context (CLAUDE.md)\n{}", claude_md));
+        parts.push(format!("\n# Project Context (CLAUDE.md)\n{claude_md}"));
     }
 
     // Plugin context
     if let Some(registry) = plugins {
         if let Ok(plugin_context) = registry.execute_all(trigger, None) {
             if !plugin_context.is_empty() {
-                parts.push(format!("\n# Plugin Context\n{}", plugin_context));
+                parts.push(format!("\n# Plugin Context\n{plugin_context}"));
             }
         }
     }
@@ -56,7 +56,7 @@ pub async fn build_system_prompt_for_model(model: &str, plugins: Option<&PluginR
 }
 
 fn base_system_prompt(model: &str) -> String {
-    format!(r#"You are {}, running inside claux, a terminal AI coding assistant.
+    format!(r#"You are {model}, running inside claux, a terminal AI coding assistant.
 
 You are an interactive agent that helps users with software engineering tasks. Use the tools available to you to assist the user.
 
@@ -72,7 +72,7 @@ You are an interactive agent that helps users with software engineering tasks. U
 - Be concise and direct
 - Lead with the answer, not the reasoning
 - When referencing code, include file_path:line_number
-"#, model)
+"#)
 }
 
 async fn git_status() -> Option<String> {
@@ -87,10 +87,10 @@ async fn git_status() -> Option<String> {
         } else {
             status
         };
-        info.push_str(&format!("\nStatus:\n{}", status));
+        info.push_str(&format!("\nStatus:\n{status}"));
     }
     if !log.is_empty() {
-        info.push_str(&format!("\nRecent commits:\n{}", log));
+        info.push_str(&format!("\nRecent commits:\n{log}"));
     }
 
     Some(info)
@@ -136,7 +136,7 @@ async fn read_claude_md() -> Option<String> {
             .join("CLAUDE.md");
         if path.exists() {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                parts.push(format!("# ~/.claude/CLAUDE.md\n{}", content));
+                parts.push(format!("# ~/.claude/CLAUDE.md\n{content}"));
             }
         }
     }
@@ -177,7 +177,7 @@ async fn build_project_map() -> Option<String> {
 
     // 1. Project type detection
     let project_type = detect_project_type(&cwd);
-    parts.push(format!("**Project Type:** {}", project_type));
+    parts.push(format!("**Project Type:** {project_type}"));
 
     // 2. File structure (top 100 files, sorted by relevance)
     let files = run_cmd("rg", &["--files", "--max-depth", "5", "--hidden", "-g", "!.git"]).await?;
@@ -190,7 +190,7 @@ async fn build_project_map() -> Option<String> {
     } else {
         files
     };
-    parts.push(format!("\n**File Structure** ({} files):\n{}", file_count, files));
+    parts.push(format!("\n**File Structure** ({file_count} files):\n{files}"));
 
     // 3. Top-level symbols (if ripgrep supports it)
     // Note: --symbols is experimental, fallback to just files if it fails
@@ -201,7 +201,7 @@ async fn build_project_map() -> Option<String> {
             } else {
                 symbols
             };
-            parts.push(format!("\n**Top-Level Symbols**:\n{}", symbols));
+            parts.push(format!("\n**Top-Level Symbols**:\n{symbols}"));
         }
     }
 

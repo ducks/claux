@@ -75,8 +75,7 @@ pub fn truncate_tool_output(output: &str) -> (String, bool) {
     let truncated_chars = output.len() - keep_start - keep_end;
 
     let result = format!(
-        "{}\n\n... ({} characters truncated) ...\n\n{}",
-        start, truncated_chars, end
+        "{start}\n\n... ({truncated_chars} characters truncated) ...\n\n{end}"
     );
 
     (result, true)
@@ -99,8 +98,7 @@ pub fn snip_old_messages(messages: &[Message], keep_recent: usize) -> Option<Vec
     let snip_tokens = estimate_tokens(snipped);
 
     let marker = Message::user(&format!(
-        "[{} earlier messages snipped (~{} tokens). The conversation continues below.]",
-        snip_count, snip_tokens
+        "[{snip_count} earlier messages snipped (~{snip_tokens} tokens). The conversation continues below.]"
     ));
 
     let mut result = vec![marker];

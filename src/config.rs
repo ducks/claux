@@ -70,6 +70,7 @@ pub struct PluginConfig {
     pub trigger: HookTrigger,
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HookTrigger {

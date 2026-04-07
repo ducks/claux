@@ -281,14 +281,13 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
                                             "catppuccin" => ThemeName::Catppuccin,
                                             _ => {
                                                 app.add_message("error", &format!(
-                                                    "Unknown theme: {}. Available: dark, light, ansi, dracula, nord, catppuccin",
-                                                    name
+                                                    "Unknown theme: {name}. Available: dark, light, ansi, dracula, nord, catppuccin"
                                                 ));
                                                 continue;
                                             }
                                         };
                                         app.set_theme(theme);
-                                        app.add_message("system", &format!("Theme set to: {}", name));
+                                        app.add_message("system", &format!("Theme set to: {name}"));
                                     }
                                     None => {
                                         app.add_message("system", 
@@ -307,7 +306,7 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
                             _ => {
                                 match commands::execute_async(async_cmd, &mut engine).await {
                                     Ok(output) => app.add_message("system", &output),
-                                    Err(e) => app.add_message("error", &format!("Error: {}", e)),
+                                    Err(e) => app.add_message("error", &format!("Error: {e}")),
                                 }
                             }
                         }
@@ -348,7 +347,7 @@ pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry)
                     }
                 }
                 Err(e) => {
-                    app.add_message("error", &format!("Error: {}", e));
+                    app.add_message("error", &format!("Error: {e}"));
                 }
             }
 
@@ -427,7 +426,7 @@ async fn drive_streaming(
                         }
                         crate::api::ApiEvent::Done => break,
                         crate::api::ApiEvent::Error(e) => {
-                            return Err(anyhow::anyhow!("API error: {}", e));
+                            return Err(anyhow::anyhow!("API error: {e}"));
                         }
                     }
                 }
@@ -477,7 +476,7 @@ async fn drive_streaming(
         for (id, name, input) in &tool_uses {
             // Show tool summary before execution
             let summary = engine.summarize_tool(name, input);
-            app.stream_buffer.push_str(&format!("\n  [{}] {} ", name, summary));
+            app.stream_buffer.push_str(&format!("\n  [{name}] {summary} "));
             terminal.draw(|f| ui::draw(f, app))?;
 
             let is_read_only = engine.is_tool_read_only(name);
@@ -489,7 +488,7 @@ async fn drive_streaming(
                 }
                 crate::permissions::PermissionResult::Deny(reason) => {
                     crate::tools::ToolOutput {
-                        content: format!("Permission denied: {}", reason),
+                        content: format!("Permission denied: {reason}"),
                         is_error: true,
                     }
                 }
@@ -501,7 +500,7 @@ async fn drive_streaming(
                     if let Some(d) = diff {
                         details.push("\n  \x1b[2m--- Diff Preview ---\x1b[0m".to_string());
                         for line in crate::utils::diff::colorize_diff(&d).lines() {
-                            details.push(format!("  {}", line));
+                            details.push(format!("  {line}"));
                         }
                         details.push("  \x1b[2m--- End Diff ---\x1b[0m".to_string());
                     }
@@ -593,22 +592,22 @@ fn format_permission_details(tool_name: &str, input: &serde_json::Value) -> Vec<
             if let Some(cmd) = input["command"].as_str() {
                 lines.push("Command:".to_string());
                 for line in cmd.lines() {
-                    lines.push(format!("  {}", line));
+                    lines.push(format!("  {line}"));
                 }
             }
             if let Some(desc) = input["description"].as_str() {
-                lines.push(format!("Description: {}", desc));
+                lines.push(format!("Description: {desc}"));
             }
         }
         "Write" => {
             if let Some(path) = input["file_path"].as_str() {
-                lines.push(format!("File: {}", path));
+                lines.push(format!("File: {path}"));
             }
             if let Some(content) = input["content"].as_str() {
                 let preview: Vec<&str> = content.lines().take(10).collect();
                 lines.push("Content:".to_string());
                 for line in &preview {
-                    lines.push(format!("  {}", line));
+                    lines.push(format!("  {line}"));
                 }
                 let total = content.lines().count();
                 if total > 10 {
@@ -618,18 +617,18 @@ fn format_permission_details(tool_name: &str, input: &serde_json::Value) -> Vec<
         }
         "Edit" => {
             if let Some(path) = input["file_path"].as_str() {
-                lines.push(format!("File: {}", path));
+                lines.push(format!("File: {path}"));
             }
             if let Some(old) = input["old_string"].as_str() {
                 lines.push("Replace:".to_string());
                 for line in old.lines().take(5) {
-                    lines.push(format!("  - {}", line));
+                    lines.push(format!("  - {line}"));
                 }
             }
             if let Some(new) = input["new_string"].as_str() {
                 lines.push("With:".to_string());
                 for line in new.lines().take(5) {
-                    lines.push(format!("  + {}", line));
+                    lines.push(format!("  + {line}"));
                 }
             }
         }
@@ -637,7 +636,7 @@ fn format_permission_details(tool_name: &str, input: &serde_json::Value) -> Vec<
             if let Some(prompt) = input["prompt"].as_str() {
                 lines.push("Task:".to_string());
                 for line in prompt.lines().take(5) {
-                    lines.push(format!("  {}", line));
+                    lines.push(format!("  {line}"));
                 }
             }
         }
@@ -645,7 +644,7 @@ fn format_permission_details(tool_name: &str, input: &serde_json::Value) -> Vec<
             // Generic: show the JSON input compactly
             let json_str = serde_json::to_string_pretty(input).unwrap_or_default();
             for line in json_str.lines().take(8) {
-                lines.push(format!("  {}", line));
+                lines.push(format!("  {line}"));
             }
         }
     }

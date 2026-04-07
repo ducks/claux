@@ -5,7 +5,6 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use chrono;
 
 use super::{App, Mode};
 use super::markdown;
@@ -56,7 +55,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 // Create a "bubble" effect with background color
                 let bubble_lines: Vec<Line> = msg.content.lines().map(|line| {
                     Line::from(Span::styled(
-                        format!("  {}", line),
+                        format!("  {line}"),
                         Style::default()
                             .fg(app.theme.user_message_fg)
                             .bg(app.theme.user_message_bg),
@@ -91,7 +90,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 lines.push(Line::from(Span::styled("● ", Style::default().fg(app.theme.warning))));
                 for line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
-                        format!("  {}", line),
+                        format!("  {line}"),
                         Style::default().fg(app.theme.warning),
                     )));
                 }
@@ -100,7 +99,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 lines.push(Line::from(Span::styled("● ", Style::default().fg(app.theme.error))));
                 for line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
-                        format!("  {}", line),
+                        format!("  {line}"),
                         Style::default().fg(app.theme.error),
                     )));
                 }
@@ -109,7 +108,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 lines.push(Line::from(Span::styled("● ", Style::default().fg(app.theme.dim))));
                 for line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
-                        format!("  {}", line),
+                        format!("  {line}"),
                         Style::default().fg(app.theme.fg),
                     )));
                 }
