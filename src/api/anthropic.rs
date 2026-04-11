@@ -7,6 +7,7 @@ use super::provider::Provider;
 use super::stream::{self, ApiEvent};
 use super::types::{Message, ToolDefinition};
 use crate::config::AuthMethod;
+use crate::context::SYSTEM_PROMPT_BLOCK_SEPARATOR;
 
 /// Anthropic Messages API provider.
 pub struct AnthropicProvider {
@@ -50,10 +51,24 @@ impl Provider for AnthropicProvider {
     ) -> Result<mpsc::Receiver<ApiEvent>> {
         let (tx, rx) = mpsc::channel(256);
 
+        // Split system prompt into blocks matching Claude Code's 3-block array format.
+        // Block 0: billing/version header
+        // Block 1: identity + runtime context
+        // Block 2: static instructions
+        let system_blocks: Vec<serde_json::Value> = system
+            .split(SYSTEM_PROMPT_BLOCK_SEPARATOR)
+            .map(|block| {
+                json!({
+                    "type": "text",
+                    "text": block,
+                })
+            })
+            .collect();
+
         let mut body = json!({
             "model": self.model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": system_blocks,
             "messages": messages,
             "stream": true,
         });

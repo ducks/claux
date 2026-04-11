@@ -121,6 +121,11 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Returns true when using the native Anthropic API (not an OpenAI-compatible endpoint).
+    pub fn is_anthropic(&self) -> bool {
+        self.openai_base_url.is_none()
+    }
+
     pub fn load() -> Result<Self> {
         let global_path = Self::global_path();
         let project_path = Self::project_path();

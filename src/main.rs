@@ -96,6 +96,7 @@ async fn main() -> Result<()> {
             &model,
             Some(&plugin_registry),
             &config::HookTrigger::OnContextBuild,
+            config.is_anthropic(),
         )
         .await?;
         engine.set_system_prompt(system_prompt);
@@ -116,6 +117,7 @@ async fn main() -> Result<()> {
         &model,
         Some(&plugin_registry),
         &config::HookTrigger::OnContextBuild,
+        config.is_anthropic(),
     )
     .await?;
     engine.set_system_prompt(system_prompt);

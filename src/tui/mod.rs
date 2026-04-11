@@ -28,12 +28,13 @@ use crate::theme::Theme;
 use screen::Action;
 
 /// Run the TUI application.
-pub async fn run(mut engine: Engine, _config: &Config, plugins: &PluginRegistry) -> Result<()> {
+pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) -> Result<()> {
     // Build system prompt
     let system_prompt = context::build_system_prompt_for_model(
         engine.model(),
         Some(plugins),
         &HookTrigger::OnContextBuild,
+        config.is_anthropic(),
     )
     .await?;
     engine.set_system_prompt(system_prompt);
