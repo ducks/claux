@@ -722,3 +722,85 @@ mod tests {
         assert!(matches!(&app.messages[2], ChatMessage::Text { role, .. } if role == "assistant"));
     }
 }
+
+#[cfg(test)]
+mod tuishot_shots {
+    use super::*;
+    use tuishot::Tuishot;
+
+    fn sample_conversation() -> ChatApp {
+        let theme = crate::theme::Theme::dark();
+        let mut app = ChatApp::new("claude-sonnet-4-20250514", theme);
+
+        app.add_message("user", "Can you read src/main.rs and explain what it does?");
+        app.add_tool("Read", "src/main.rs (42 lines)", ToolStatus::Success);
+        app.add_message(
+            "assistant",
+            "This is the entry point for **claux**. It parses CLI arguments via `clap`, \
+             loads configuration from `~/.config/claux/config.toml`, and dispatches to \
+             either the REPL or one-shot mode depending on the flags.\n\n\
+             Key things:\n\
+             - `--tui` launches the full-screen Ratatui interface\n\
+             - `--resume <id>` reloads a previous session\n\
+             - `-p <prompt>` runs a single query and exits",
+        );
+
+        app.status = "1.2k tokens".to_string();
+        app
+    }
+
+    #[derive(Tuishot)]
+    enum ChatShot {
+        #[tuishot(name = "chat-conversation", description = "Mid-conversation with tool use and markdown")]
+        Conversation,
+
+        #[tuishot(name = "chat-streaming", description = "Assistant mid-response with streaming cursor")]
+        Streaming,
+
+        #[tuishot(name = "chat-permission", description = "Prompting for Bash permission")]
+        Permission,
+
+        #[tuishot(name = "chat-empty", description = "Fresh chat, no messages")]
+        Empty,
+    }
+
+    impl ChatShotRender for ChatShot {
+        fn render(&self, buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect) {
+            let theme = crate::theme::Theme::dark();
+            let mut app = match self {
+                ChatShot::Conversation => sample_conversation(),
+                ChatShot::Streaming => {
+                    let mut app = sample_conversation();
+                    app.mode = Mode::Streaming;
+                    app.stream_buffer = "Sure, let me look at the configuration handling next. \
+                        The config module uses `toml` for parsing and supports both global \
+                        and per-project overrides".to_string();
+                    app.thinking = false;
+                    app
+                }
+                ChatShot::Permission => {
+                    let mut app = sample_conversation();
+                    app.mode = Mode::Permission;
+                    app.permission_prompt = Some("Allow Bash command?".to_string());
+                    app.permission_details = Some(vec![
+                        "Command:".to_string(),
+                        "  cargo test --lib".to_string(),
+                        "".to_string(),
+                        "Working directory: /home/user/dev/claux".to_string(),
+                    ]);
+                    app
+                }
+                ChatShot::Empty => ChatApp::new("claude-sonnet-4-20250514", theme),
+            };
+            let rendered = tuishot::render_to_buffer(area.width, area.height, |f| {
+                ui::draw_chat(f, &mut app);
+            });
+            buf.clone_from(&rendered);
+        }
+    }
+
+    #[test]
+    fn capture_chat_screens() {
+        ChatShot::check_all().expect("chat screen capture");
+    }
+}

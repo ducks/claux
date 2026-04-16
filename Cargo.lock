@@ -281,6 +281,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "tuishot",
  "uuid",
  "walkdir",
 ]
@@ -2203,6 +2204,29 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "tuishot"
+version = "20260416.0.0"
+source = "git+https://github.com/ducks/tuishot#8d65d499d35d21906278d6293781db8131b490aa"
+dependencies = [
+ "anyhow",
+ "ratatui",
+ "serde",
+ "thiserror 2.0.18",
+ "toml",
+ "tuishot-derive",
+]
+
+[[package]]
+name = "tuishot-derive"
+version = "20260416.0.0"
+source = "git+https://github.com/ducks/tuishot#8d65d499d35d21906278d6293781db8131b490aa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "unicase"

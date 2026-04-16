@@ -480,3 +480,83 @@ impl HomeScreen {
         f.render_widget(status, chunks[3]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// tuishot integration: capture canonical HomeScreen states as SVG for docs.
+//
+// Run `cargo test --test tuishot_capture` (or the module tests) to verify that
+// committed screenshots still match. Set `TUISHOT_UPDATE=1` to accept drift.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tuishot_shots {
+    use super::*;
+    use tuishot::Tuishot;
+
+    /// Build a temp-file-backed Db seeded with a known set of projects/sessions.
+    fn seeded_db() -> (Db, tempfile::NamedTempFile) {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let db = Db::open(&tmp.path().to_path_buf()).expect("open db");
+        db.create_session("20260101-120000", "claude-sonnet-4-20250514", Some("auth refactor"), Some("claux"))
+            .unwrap();
+        db.create_session("20260102-093000", "claude-sonnet-4-20250514", Some("tui polish"), Some("claux"))
+            .unwrap();
+        db.create_session("20260103-160000", "gpt-4o", Some("ssac brainstorm"), Some("tuishot"))
+            .unwrap();
+        (db, tmp)
+    }
+
+    #[derive(Tuishot)]
+    enum HomeShot {
+        #[tuishot(name = "home-empty", description = "First launch: no sessions yet")]
+        Empty,
+
+        #[tuishot(name = "home-populated", description = "Session browser with two projects")]
+        Populated,
+
+        #[tuishot(name = "home-new-session", description = "Creating a new session in the selected project")]
+        NewSession,
+
+        #[tuishot(name = "home-new-project", description = "Creating a new project")]
+        NewProject,
+    }
+
+    impl HomeShotRender for HomeShot {
+        fn render(&self, buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect) {
+            let theme = Theme::dark();
+            let (mut screen, _keepalive) = match self {
+                HomeShot::Empty => {
+                    let tmp = tempfile::NamedTempFile::new().unwrap();
+                    let db = Db::open(&tmp.path().to_path_buf()).unwrap();
+                    (HomeScreen::new(db, theme, "claude-sonnet-4-20250514"), Some(tmp))
+                }
+                _ => {
+                    let (db, tmp) = seeded_db();
+                    (HomeScreen::new(db, theme, "claude-sonnet-4-20250514"), Some(tmp))
+                }
+            };
+            match self {
+                HomeShot::NewSession => {
+                    screen.mode = Mode::NewSession;
+                    screen.input = String::from("refactor queue");
+                    screen.cursor = screen.input.len();
+                }
+                HomeShot::NewProject => {
+                    screen.mode = Mode::NewProject;
+                    screen.input = String::from("hosted-resumes");
+                    screen.cursor = screen.input.len();
+                }
+                _ => {}
+            }
+            // Render through a TestBackend so the same draw() powers the capture.
+            let rendered = tuishot::render_to_buffer(area.width, area.height, |f| {
+                screen.draw(f);
+            });
+            buf.clone_from(&rendered);
+        }
+    }
+
+    #[test]
+    fn capture_home_screens() {
+        HomeShot::check_all().expect("home screen capture");
+    }
+}

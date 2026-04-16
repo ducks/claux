@@ -66,3 +66,4 @@ rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 
 [dev-dependencies]
 tempfile = "3.0"
+tuishot = { git = "https://github.com/ducks/tuishot", version = "20260416.0.0" }
