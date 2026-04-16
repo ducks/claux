@@ -1,0 +1,4 @@
+output     = "docs/screens"
+size       = "100x20"
+background = "#0d1117"
+foreground = "#d0d0d0"
