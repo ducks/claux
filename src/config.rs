@@ -58,6 +58,77 @@ pub struct Config {
     /// Plugin configuration
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
+
+    /// MCP server configuration
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+/// The .mcp.json format matching Claude Code's schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpJsonConfig {
+    #[serde(rename = "mcpServers")]
+    pub mcp_servers: std::collections::HashMap<String, McpJsonServerEntry>,
+}
+
+/// A single server entry in .mcp.json (name comes from the key).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpJsonServerEntry {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+impl McpJsonServerEntry {
+    pub fn to_server_config(self, name: String) -> McpServerConfig {
+        McpServerConfig {
+            name,
+            command: self.command,
+            args: self.args,
+            env: self.env,
+        }
+    }
+}
+
+/// Load MCP servers from .mcp.json in the current directory (CC format).
+pub fn load_mcp_json() -> Vec<McpServerConfig> {
+    let path = std::env::current_dir()
+        .map(|p| p.join(".mcp.json"))
+        .unwrap_or_default();
+
+    if !path.exists() {
+        return Vec::new();
+    }
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<McpJsonConfig>(&content) {
+            Ok(config) => config
+                .mcp_servers
+                .into_iter()
+                .map(|(name, entry)| entry.to_server_config(name))
+                .collect(),
+            Err(e) => {
+                tracing::warn!("Failed to parse .mcp.json: {e}");
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            tracing::warn!("Failed to read .mcp.json: {e}");
+            Vec::new()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +187,7 @@ impl Default for Config {
             openai_api_key_cmd: None,
             openai_provider_name: None,
             plugins: Vec::new(),
+            mcp_servers: Vec::new(),
         }
     }
 }

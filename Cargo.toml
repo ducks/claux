@@ -64,6 +64,11 @@ pulldown-cmark = "0.13.3"
 # SQLite database
 rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 
+# MCP (Model Context Protocol) client
+mcp-client = "0.1"
+mcp-spec = "0.1"
+tower = { version = "0.4", features = ["timeout", "util"] }
+
 [dev-dependencies]
 tempfile = "3.0"
 tuishot = { git = "https://github.com/ducks/tuishot" }
