@@ -84,10 +84,30 @@ async fn main() -> Result<()> {
             .expect("failed to build agent provider")
     });
 
+    // Load MCP servers from config.toml + .mcp.json
+    let mut mcp_servers = config.mcp_servers.clone();
+    let mcp_json_servers = config::load_mcp_json();
+    if !mcp_json_servers.is_empty() {
+        tracing::info!("Loaded {} MCP server(s) from .mcp.json", mcp_json_servers.len());
+        mcp_servers.extend(mcp_json_servers);
+    }
+
+    // Connect to MCP servers
+    let mcp_tools = if !mcp_servers.is_empty() {
+        tracing::info!("Connecting to {} MCP server(s)...", mcp_servers.len());
+        tools::mcp::connect_mcp_servers(&mcp_servers).await
+    } else {
+        Vec::new()
+    };
+
     // One-shot mode: --print / -p
     if let Some(ref prompt) = args.prompt {
-        let tool_registry =
+        let mut tool_registry =
             tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
+        if !mcp_tools.is_empty() {
+            let oneshot_mcp = tools::mcp::connect_mcp_servers(&mcp_servers).await;
+            tool_registry.add_tools(oneshot_mcp);
+        }
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
         let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
         engine.set_auto_compact_threshold(config.auto_compact_threshold);
@@ -107,7 +127,8 @@ async fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    let tool_registry = tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
+    let mut tool_registry = tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
+    tool_registry.add_tools(mcp_tools);
     let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
     let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
     engine.set_auto_compact_threshold(config.auto_compact_threshold);

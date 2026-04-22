@@ -3,6 +3,7 @@ mod bash;
 mod edit;
 mod glob;
 mod grep;
+pub(crate) mod mcp;
 pub(crate) mod read;
 mod web_fetch;
 mod write;
@@ -77,6 +78,11 @@ impl ToolRegistry {
     /// Create a basic registry (no Agent).
     pub fn new() -> Self {
         Self::without_agent()
+    }
+
+    /// Add external tools (e.g. from MCP servers).
+    pub fn add_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
+        self.tools.extend(tools);
     }
 
     /// Get tool definitions for the API request.
