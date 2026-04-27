@@ -5,6 +5,7 @@ mod glob;
 mod grep;
 pub(crate) mod mcp;
 pub(crate) mod read;
+pub(crate) mod todo;
 mod web_fetch;
 mod write;
 
@@ -46,6 +47,7 @@ pub struct ToolRegistry {
 impl ToolRegistry {
     /// Create a registry with Agent tool using a provider factory.
     pub fn new_with_agent_factory(factory: agent::ProviderFactory, model: String) -> Self {
+        let todo_state = todo::new_todo_state();
         Self {
             tools: vec![
                 Box::new(read::ReadTool),
@@ -56,12 +58,14 @@ impl ToolRegistry {
                 Box::new(bash::BashTool),
                 Box::new(web_fetch::WebFetchTool::new()),
                 Box::new(agent::AgentTool::new(factory, model)),
+                Box::new(todo::TodoWriteTool::new(todo_state)),
             ],
         }
     }
 
     /// Create a registry without Agent (for sub-agents to prevent recursion).
     pub fn without_agent() -> Self {
+        let todo_state = todo::new_todo_state();
         Self {
             tools: vec![
                 Box::new(read::ReadTool),
@@ -71,6 +75,7 @@ impl ToolRegistry {
                 Box::new(grep::GrepTool),
                 Box::new(bash::BashTool),
                 Box::new(web_fetch::WebFetchTool::new()),
+                Box::new(todo::TodoWriteTool::new(todo_state)),
             ],
         }
     }
