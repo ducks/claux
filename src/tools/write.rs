@@ -48,7 +48,11 @@ impl Tool for WriteTool {
         input["file_path"].as_str().unwrap_or("?").to_string()
     }
 
-    async fn execute(&self, input: Value) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        input: Value,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let path = crate::tools::read::expand_tilde(&params.file_path);
 

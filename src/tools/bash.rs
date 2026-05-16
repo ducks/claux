@@ -2,8 +2,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 use super::{Tool, ToolOutput};
 
@@ -63,73 +66,136 @@ impl Tool for BashTool {
         }
     }
 
-    async fn execute(&self, input: Value) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
 
         let timeout_ms = params.timeout.unwrap_or(120_000).min(600_000);
         let timeout = Duration::from_millis(timeout_ms);
 
-        let result = tokio::time::timeout(timeout, async {
-            Command::new("sh")
-                .arg("-c")
-                .arg(&params.command)
-                .output()
-                .await
-        })
-        .await;
-
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-
-                let mut content = String::new();
-                if !stdout.is_empty() {
-                    content.push_str(&stdout);
-                }
-                if !stderr.is_empty() {
-                    if !content.is_empty() {
-                        content.push('\n');
-                    }
-                    content.push_str(&stderr);
-                }
-
-                if !output.status.success() {
-                    content.push_str(&format!("\nExit code: {}", output.status));
-                }
-
-                // Truncate very large output
-                if content.len() > 100_000 {
-                    content.truncate(100_000);
-                    content.push_str("\n... (output truncated)");
-                }
-
-                Ok(ToolOutput {
-                    content,
-                    is_error: !output.status.success(),
-                })
+        let mut child = match Command::new("sh")
+            .arg("-c")
+            .arg(&params.command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(ToolOutput {
+                    content: format!("Failed to execute command: {e}"),
+                    is_error: true,
+                });
             }
-            Ok(Err(e)) => Ok(ToolOutput {
-                content: format!("Failed to execute command: {e}"),
-                is_error: true,
-            }),
-            Err(_) => Ok(ToolOutput {
-                content: format!("Command timed out after {timeout_ms}ms"),
-                is_error: true,
-            }),
+        };
+
+        // Take the pipes so we can read them concurrently with wait().
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+
+        // Spawn readers so partial output is captured even if we get cancelled
+        // or time out mid-stream.
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(p) = stdout_pipe.as_mut() {
+                let _ = p.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(p) = stderr_pipe.as_mut() {
+                let _ = p.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+
+        let outcome = tokio::select! {
+            status = child.wait() => Outcome::Finished(status),
+            _ = cancel.cancelled() => Outcome::Cancelled,
+            _ = tokio::time::sleep(timeout) => Outcome::TimedOut,
+        };
+
+        // For Cancelled / TimedOut, the child is still alive — kill it.
+        if !matches!(outcome, Outcome::Finished(_)) {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
         }
+
+        let stdout = stdout_task.await.unwrap_or_default();
+        let stderr = stderr_task.await.unwrap_or_default();
+
+        let stdout_s = String::from_utf8_lossy(&stdout);
+        let stderr_s = String::from_utf8_lossy(&stderr);
+
+        let mut content = String::new();
+        if !stdout_s.is_empty() {
+            content.push_str(&stdout_s);
+        }
+        if !stderr_s.is_empty() {
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(&stderr_s);
+        }
+
+        let is_error = match &outcome {
+            Outcome::Finished(Ok(status)) => {
+                if !status.success() {
+                    content.push_str(&format!("\nExit code: {status}"));
+                }
+                !status.success()
+            }
+            Outcome::Finished(Err(e)) => {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(&format!("wait error: {e}"));
+                true
+            }
+            Outcome::Cancelled => {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str("Interrupted by user.");
+                true
+            }
+            Outcome::TimedOut => {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(&format!("Command timed out after {timeout_ms}ms"));
+                true
+            }
+        };
+
+        if content.len() > 100_000 {
+            content.truncate(100_000);
+            content.push_str("\n... (output truncated)");
+        }
+
+        Ok(ToolOutput { content, is_error })
     }
+}
+
+enum Outcome {
+    Finished(std::io::Result<std::process::ExitStatus>),
+    Cancelled,
+    TimedOut,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn token() -> CancellationToken {
+        CancellationToken::new()
+    }
+
     #[tokio::test]
     async fn bash_echo() {
         let tool = BashTool;
         let result = tool
-            .execute(json!({"command": "echo hello"}))
+            .execute(json!({"command": "echo hello"}), token())
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -139,7 +205,10 @@ mod tests {
     #[tokio::test]
     async fn bash_exit_code() {
         let tool = BashTool;
-        let result = tool.execute(json!({"command": "exit 1"})).await.unwrap();
+        let result = tool
+            .execute(json!({"command": "exit 1"}), token())
+            .await
+            .unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("Exit code"));
     }
@@ -148,7 +217,7 @@ mod tests {
     async fn bash_captures_stderr() {
         let tool = BashTool;
         let result = tool
-            .execute(json!({"command": "echo err >&2"}))
+            .execute(json!({"command": "echo err >&2"}), token())
             .await
             .unwrap();
         assert!(result.content.contains("err"));
@@ -158,10 +227,27 @@ mod tests {
     async fn bash_timeout() {
         let tool = BashTool;
         let result = tool
-            .execute(json!({"command": "sleep 10", "timeout": 100}))
+            .execute(json!({"command": "sleep 10", "timeout": 100}), token())
             .await
             .unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn bash_cancellation() {
+        let tool = BashTool;
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel_clone.cancel();
+        });
+        let result = tool
+            .execute(json!({"command": "sleep 30", "timeout": 60000}), cancel)
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("Interrupted"));
     }
 }

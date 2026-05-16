@@ -105,7 +105,11 @@ impl Tool for TodoWriteTool {
         format!("Updating todo list ({count} items)")
     }
 
-    async fn execute(&self, input: Value) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        input: Value,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolOutput> {
         let todos: Vec<TodoItem> = serde_json::from_value(
             input
                 .get("todos")
@@ -199,6 +203,7 @@ impl Tool for TodoWriteTool {
 
 #[cfg(test)]
 mod tests {
+    use tokio_util::sync::CancellationToken;
     use super::*;
 
     fn make_tool() -> (TodoWriteTool, TodoState) {
@@ -218,7 +223,7 @@ mod tests {
             ]
         });
 
-        let result = tool.execute(input).await.unwrap();
+        let result = tool.execute(input, CancellationToken::new()).await.unwrap();
         assert!(!result.is_error);
         assert!(result.content.contains("Run tests"));
 
@@ -231,23 +236,29 @@ mod tests {
         let (tool, state) = make_tool();
 
         // Add todos
-        tool.execute(serde_json::json!({
-            "todos": [
-                { "content": "Run tests", "status": "in_progress", "activeForm": "Running tests" },
-                { "content": "Fix bugs", "status": "pending", "activeForm": "Fixing bugs" }
-            ]
-        }))
+        tool.execute(
+            serde_json::json!({
+                "todos": [
+                    { "content": "Run tests", "status": "in_progress", "activeForm": "Running tests" },
+                    { "content": "Fix bugs", "status": "pending", "activeForm": "Fixing bugs" }
+                ]
+            }),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
         // Complete one
         let result = tool
-            .execute(serde_json::json!({
-                "todos": [
-                    { "content": "Run tests", "status": "completed", "activeForm": "Running tests" },
-                    { "content": "Fix bugs", "status": "in_progress", "activeForm": "Fixing bugs" }
-                ]
-            }))
+            .execute(
+                serde_json::json!({
+                    "todos": [
+                        { "content": "Run tests", "status": "completed", "activeForm": "Running tests" },
+                        { "content": "Fix bugs", "status": "in_progress", "activeForm": "Fixing bugs" }
+                    ]
+                }),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -260,12 +271,15 @@ mod tests {
     async fn test_all_completed_clears_list() {
         let (tool, state) = make_tool();
 
-        tool.execute(serde_json::json!({
-            "todos": [
-                { "content": "Run tests", "status": "completed", "activeForm": "Running tests" },
-                { "content": "Fix bugs", "status": "completed", "activeForm": "Fixing bugs" }
-            ]
-        }))
+        tool.execute(
+            serde_json::json!({
+                "todos": [
+                    { "content": "Run tests", "status": "completed", "activeForm": "Running tests" },
+                    { "content": "Fix bugs", "status": "completed", "activeForm": "Fixing bugs" }
+                ]
+            }),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 

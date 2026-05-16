@@ -12,6 +12,7 @@ mod write;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use crate::api::ToolDefinition;
 
@@ -36,7 +37,10 @@ pub trait Tool: Send + Sync {
         self.name().to_string()
     }
 
-    async fn execute(&self, input: Value) -> Result<ToolOutput>;
+    /// Execute the tool. `cancel` is signaled if the user has interrupted —
+    /// long-running tools should monitor it and clean up. Tools without a
+    /// natural interrupt point can ignore it.
+    async fn execute(&self, input: Value, cancel: CancellationToken) -> Result<ToolOutput>;
 }
 
 /// Registry holding all available tools.
@@ -103,14 +107,19 @@ impl ToolRegistry {
     }
 
     /// Execute a tool by name.
-    pub async fn execute(&self, name: &str, input: Value) -> Result<ToolOutput> {
+    pub async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput> {
         let tool = self
             .tools
             .iter()
             .find(|t| t.name() == name)
             .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?;
 
-        tool.execute(input).await
+        tool.execute(input, cancel).await
     }
 
     /// Get a human-readable summary of what the tool invocation will do.
@@ -198,7 +207,13 @@ mod tests {
     #[tokio::test]
     async fn execute_unknown_tool_errors() {
         let reg = ToolRegistry::new();
-        let result = reg.execute("FakeTool", serde_json::json!({})).await;
+        let result = reg
+            .execute(
+                "FakeTool",
+                serde_json::json!({}),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
         assert!(result.is_err());
     }
 
