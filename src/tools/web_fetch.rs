@@ -68,7 +68,11 @@ impl Tool for WebFetchTool {
         input["url"].as_str().unwrap_or("?").to_string()
     }
 
-    async fn execute(&self, input: Value) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        input: Value,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let max_length = params.max_length.unwrap_or(DEFAULT_MAX_LENGTH);
 
@@ -80,11 +84,19 @@ impl Tool for WebFetchTool {
             });
         }
 
-        let response = match self.http.get(&params.url).send().await {
-            Ok(r) => r,
-            Err(e) => {
+        let response = tokio::select! {
+            r = self.http.get(&params.url).send() => match r {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(ToolOutput {
+                        content: format!("Failed to fetch URL: {e}"),
+                        is_error: true,
+                    });
+                }
+            },
+            _ = cancel.cancelled() => {
                 return Ok(ToolOutput {
-                    content: format!("Failed to fetch URL: {e}"),
+                    content: "Interrupted by user.".to_string(),
                     is_error: true,
                 });
             }
@@ -110,11 +122,19 @@ impl Tool for WebFetchTool {
             .to_string();
 
         // Get response body
-        let body = match response.text().await {
-            Ok(text) => text,
-            Err(e) => {
+        let body = tokio::select! {
+            r = response.text() => match r {
+                Ok(text) => text,
+                Err(e) => {
+                    return Ok(ToolOutput {
+                        content: format!("Failed to read response body: {e}"),
+                        is_error: true,
+                    });
+                }
+            },
+            _ = cancel.cancelled() => {
                 return Ok(ToolOutput {
-                    content: format!("Failed to read response body: {e}"),
+                    content: "Interrupted by user.".to_string(),
                     is_error: true,
                 });
             }
@@ -263,6 +283,7 @@ fn strip_html(html: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tokio_util::sync::CancellationToken;
     use super::*;
 
     #[test]
@@ -300,7 +321,7 @@ mod tests {
     async fn rejects_non_http_url() {
         let tool = WebFetchTool::new();
         let result = tool
-            .execute(json!({"url": "ftp://example.com"}))
+            .execute(json!({"url": "ftp://example.com"}), CancellationToken::new())
             .await
             .unwrap();
         assert!(result.is_error);
@@ -310,7 +331,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_url() {
         let tool = WebFetchTool::new();
-        let result = tool.execute(json!({"url": "not-a-url"})).await.unwrap();
+        let result = tool
+            .execute(json!({"url": "not-a-url"}), CancellationToken::new())
+            .await
+            .unwrap();
         assert!(result.is_error);
     }
 }

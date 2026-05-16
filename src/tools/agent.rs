@@ -78,7 +78,11 @@ impl Tool for AgentTool {
             .to_string()
     }
 
-    async fn execute(&self, input: Value) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        input: Value,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
 
         let provider = (self.make_provider)();
@@ -98,20 +102,30 @@ impl Tool for AgentTool {
         );
         engine.set_system_prompt(agent_prompt);
 
-        match engine.submit(&params.prompt).await {
-            Ok(response) => {
-                let cost_summary = engine.cost.format_summary();
-                let mut content = response;
-                if !cost_summary.is_empty() {
-                    content.push_str(&format!("\n\n[Agent {cost_summary}]"));
+        // Race engine.submit against cancellation so a long-running sub-agent
+        // can be interrupted. Note: this aborts the submit future but the
+        // sub-agent's tools don't yet receive their own cancel token — that
+        // requires plumbing cancellation through Engine::submit.
+        tokio::select! {
+            result = engine.submit(&params.prompt) => match result {
+                Ok(response) => {
+                    let cost_summary = engine.cost.format_summary();
+                    let mut content = response;
+                    if !cost_summary.is_empty() {
+                        content.push_str(&format!("\n\n[Agent {cost_summary}]"));
+                    }
+                    Ok(ToolOutput {
+                        content,
+                        is_error: false,
+                    })
                 }
-                Ok(ToolOutput {
-                    content,
-                    is_error: false,
-                })
-            }
-            Err(e) => Ok(ToolOutput {
-                content: format!("Agent error: {e}"),
+                Err(e) => Ok(ToolOutput {
+                    content: format!("Agent error: {e}"),
+                    is_error: true,
+                }),
+            },
+            _ = cancel.cancelled() => Ok(ToolOutput {
+                content: "Sub-agent interrupted by user.".to_string(),
                 is_error: true,
             }),
         }

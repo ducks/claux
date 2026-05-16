@@ -61,7 +61,11 @@ impl Tool for EditTool {
     }
 
     #[allow(clippy::manual_find)]
-    async fn execute(&self, input: Value) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        input: Value,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let path = crate::tools::read::expand_tilde(&params.file_path);
 
@@ -126,6 +130,7 @@ impl Tool for EditTool {
 
 #[cfg(test)]
 mod tests {
+    use tokio_util::sync::CancellationToken;
     use super::*;
 
     #[tokio::test]
@@ -135,11 +140,14 @@ mod tests {
 
         let tool = EditTool;
         let result = tool
-            .execute(json!({
-                "file_path": tmp.path().to_str().unwrap(),
-                "old_string": "hello",
-                "new_string": "goodbye"
-            }))
+            .execute(
+                json!({
+                    "file_path": tmp.path().to_str().unwrap(),
+                    "old_string": "hello",
+                    "new_string": "goodbye"
+                }),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -155,11 +163,14 @@ mod tests {
 
         let tool = EditTool;
         let result = tool
-            .execute(json!({
-                "file_path": tmp.path().to_str().unwrap(),
-                "old_string": "nonexistent",
-                "new_string": "replacement"
-            }))
+            .execute(
+                json!({
+                    "file_path": tmp.path().to_str().unwrap(),
+                    "old_string": "nonexistent",
+                    "new_string": "replacement"
+                }),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -174,11 +185,14 @@ mod tests {
 
         let tool = EditTool;
         let result = tool
-            .execute(json!({
-                "file_path": tmp.path().to_str().unwrap(),
-                "old_string": "aaa",
-                "new_string": "ccc"
-            }))
+            .execute(
+                json!({
+                    "file_path": tmp.path().to_str().unwrap(),
+                    "old_string": "aaa",
+                    "new_string": "ccc"
+                }),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -193,12 +207,15 @@ mod tests {
 
         let tool = EditTool;
         let result = tool
-            .execute(json!({
-                "file_path": tmp.path().to_str().unwrap(),
-                "old_string": "aaa",
-                "new_string": "ccc",
-                "replace_all": true
-            }))
+            .execute(
+                json!({
+                    "file_path": tmp.path().to_str().unwrap(),
+                    "old_string": "aaa",
+                    "new_string": "ccc",
+                    "replace_all": true
+                }),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -211,11 +228,14 @@ mod tests {
     async fn edit_nonexistent_file() {
         let tool = EditTool;
         let result = tool
-            .execute(json!({
-                "file_path": "/tmp/definitely_does_not_exist_12345",
-                "old_string": "a",
-                "new_string": "b"
-            }))
+            .execute(
+                json!({
+                    "file_path": "/tmp/definitely_does_not_exist_12345",
+                    "old_string": "a",
+                    "new_string": "b"
+                }),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 

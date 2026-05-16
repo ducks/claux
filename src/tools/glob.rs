@@ -53,7 +53,11 @@ impl Tool for GlobTool {
         }
     }
 
-    async fn execute(&self, input: Value) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        input: Value,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let base = params.path.as_deref().unwrap_or(".");
         let base = crate::tools::read::expand_tilde(base);

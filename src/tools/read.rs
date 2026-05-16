@@ -60,7 +60,11 @@ impl Tool for ReadTool {
         }
     }
 
-    async fn execute(&self, input: Value) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        input: Value,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let path = expand_tilde(&params.file_path);
 
@@ -103,6 +107,7 @@ impl Tool for ReadTool {
 
 #[cfg(test)]
 mod tests {
+    use tokio_util::sync::CancellationToken;
     use super::*;
     use std::io::Write;
 
@@ -115,7 +120,10 @@ mod tests {
 
         let tool = ReadTool;
         let result = tool
-            .execute(json!({"file_path": tmp.path().to_str().unwrap()}))
+            .execute(
+                json!({"file_path": tmp.path().to_str().unwrap()}),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -134,11 +142,14 @@ mod tests {
 
         let tool = ReadTool;
         let result = tool
-            .execute(json!({
-                "file_path": tmp.path().to_str().unwrap(),
-                "offset": 3,
-                "limit": 2
-            }))
+            .execute(
+                json!({
+                    "file_path": tmp.path().to_str().unwrap(),
+                    "offset": 3,
+                    "limit": 2
+                }),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -152,7 +163,10 @@ mod tests {
     async fn read_nonexistent_file() {
         let tool = ReadTool;
         let result = tool
-            .execute(json!({"file_path": "/tmp/definitely_does_not_exist_12345"}))
+            .execute(
+                json!({"file_path": "/tmp/definitely_does_not_exist_12345"}),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 

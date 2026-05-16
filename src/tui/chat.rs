@@ -6,6 +6,8 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::Stdout;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::commands::{self, CommandResult};
 use crate::db::Db;
@@ -368,6 +370,7 @@ async fn drive_streaming(
 
     let mut text_buf = String::new();
     let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
+    let cancelled = Arc::new(AtomicBool::new(false));
 
     loop {
         loop {
@@ -395,12 +398,9 @@ async fn drive_streaming(
                     }
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                    if event::poll(std::time::Duration::from_millis(0))? {
-                        if let Event::Key(key) = event::read()? {
-                            if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
-                                return Ok(());
-                            }
-                        }
+                    if poll_cancel_key()? {
+                        cancelled.store(true, Ordering::Relaxed);
+                        break;
                     }
                     // Redraw periodically so the spinner animates
                     if app.thinking {
@@ -430,6 +430,26 @@ async fn drive_streaming(
                 .push(crate::api::Message::assistant_blocks(blocks));
         }
 
+        // If the stream was cancelled, every tool_use that came in is orphan.
+        // Pair them with synthetic interrupted tool_results so the next turn
+        // doesn't see unanswered tool calls and try to continue the chain.
+        if cancelled.load(Ordering::Relaxed) {
+            if !tool_uses.is_empty() {
+                engine
+                    .messages_mut()
+                    .push(crate::api::Message::tool_results(synthesize_interrupt_results(
+                        &tool_uses,
+                    )));
+            }
+            if !app.stream_buffer.is_empty() {
+                let content = app.stream_buffer.clone();
+                app.stream_buffer.clear();
+                app.add_message("assistant", &content);
+            }
+            app.add_message("system", "Interrupted by user.");
+            return Ok(());
+        }
+
         if tool_uses.is_empty() {
             if !app.stream_buffer.is_empty() {
                 let content = app.stream_buffer.clone();
@@ -441,7 +461,16 @@ async fn drive_streaming(
 
         // Execute tools
         let mut result_blocks = Vec::new();
-        for (id, name, input) in &tool_uses {
+        let mut interrupted_at: Option<usize> = None;
+        for (idx, (id, name, input)) in tool_uses.iter().enumerate() {
+            // Cancellation check between tools.
+            if poll_cancel_key()? {
+                cancelled.store(true, Ordering::Relaxed);
+            }
+            if cancelled.load(Ordering::Relaxed) {
+                interrupted_at = Some(idx);
+                break;
+            }
             let summary = engine.summarize_tool(name, input);
             // Flush any pending streamed text before showing tool
             if !app.stream_buffer.is_empty() {
@@ -457,7 +486,7 @@ async fn drive_streaming(
 
             let tool_output = match perm {
                 crate::permissions::PermissionResult::Allow => {
-                    engine.execute_tool(name, input.clone()).await?
+                    execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone()).await?
                 }
                 crate::permissions::PermissionResult::Deny(reason) => crate::tools::ToolOutput {
                     content: format!("Permission denied: {reason}"),
@@ -497,15 +526,19 @@ async fn drive_streaming(
 
                     match response {
                         PermissionResponse::Allow => {
-                            engine.execute_tool(name, input.clone()).await?
+                            execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone())
+                                .await?
                         }
                         PermissionResponse::AlwaysAllow => {
                             engine.always_allow_tool(name);
-                            engine.execute_tool(name, input.clone()).await?
+                            execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone())
+                                .await?
                         }
                         PermissionResponse::AlwaysAllowCommand(cmd) => {
                             engine.always_allow_tool(name);
-                            engine.execute_tool(name, input.clone()).await?
+                            engine.always_allow_command(&cmd);
+                            execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone())
+                                .await?
                         }
                         PermissionResponse::Deny => crate::tools::ToolOutput {
                             content: "Permission denied by user.".to_string(),
@@ -514,6 +547,35 @@ async fn drive_streaming(
                     }
                 }
             };
+
+            // The tool itself may have noticed cancellation and returned an
+            // error. The for-loop's top-of-iter check picks it up, but if
+            // the user cancelled *during* this tool, we want to honor it
+            // immediately rather than starting the next tool.
+            if cancelled.load(Ordering::Relaxed) {
+                // Push this tool's result (likely "Interrupted by user") and
+                // then mark interruption so the post-loop fixup synthesizes
+                // results for the rest.
+                let (content, _was_truncated) =
+                    crate::compact::truncate_tool_output(&tool_output.content);
+                if tool_output.is_error {
+                    app.update_last_tool_status(ToolStatus::Error);
+                } else {
+                    app.update_last_tool_status(ToolStatus::Success);
+                }
+                terminal.draw(|f| ui::draw_chat(f, app))?;
+                result_blocks.push(crate::api::ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content,
+                    is_error: if tool_output.is_error {
+                        Some(true)
+                    } else {
+                        None
+                    },
+                });
+                interrupted_at = Some(idx + 1);
+                break;
+            }
 
             let (content, _was_truncated) =
                 crate::compact::truncate_tool_output(&tool_output.content);
@@ -536,6 +598,24 @@ async fn drive_streaming(
             });
         }
 
+        // If we broke out due to cancellation, synthesize interrupted results
+        // for the unstarted tool_uses so the assistant message has paired
+        // tool_use/tool_result blocks. Otherwise the next turn sees orphans.
+        if let Some(idx) = interrupted_at {
+            for (id, _name, _input) in &tool_uses[idx..] {
+                result_blocks.push(crate::api::ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: "Interrupted by user.".to_string(),
+                    is_error: Some(true),
+                });
+            }
+            engine
+                .messages_mut()
+                .push(crate::api::Message::tool_results(result_blocks));
+            app.add_message("system", "Interrupted by user.");
+            return Ok(());
+        }
+
         engine
             .messages_mut()
             .push(crate::api::Message::tool_results(result_blocks));
@@ -548,6 +628,67 @@ async fn drive_streaming(
     }
 
     Ok(())
+}
+
+/// Non-blocking check for Ctrl+C. Returns true if Ctrl+C was pressed.
+fn poll_cancel_key() -> Result<bool> {
+    if event::poll(std::time::Duration::from_millis(0))? {
+        if let Event::Key(key) = event::read()? {
+            if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Run a tool while watching for Ctrl+C. Each invocation gets its own
+/// fresh CancellationToken so cancellation of one tool doesn't leak into
+/// later tool calls in the same chain. If the user presses Ctrl+C, the
+/// token is fired and the tool is expected to notice it and return promptly.
+/// `outer_cancelled` is signalled to the caller so it can decide to break
+/// out of any surrounding loops.
+async fn execute_tool_with_cancel(
+    engine: &mut crate::query::Engine,
+    name: &str,
+    input: serde_json::Value,
+    outer_cancelled: Arc<AtomicBool>,
+) -> Result<crate::tools::ToolOutput> {
+    let token = tokio_util::sync::CancellationToken::new();
+    let watcher_token = token.clone();
+    let watcher_flag = outer_cancelled.clone();
+    let watcher = tokio::spawn(async move {
+        loop {
+            if watcher_token.is_cancelled() {
+                return;
+            }
+            if poll_cancel_key().unwrap_or(false) {
+                watcher_flag.store(true, Ordering::Relaxed);
+                watcher_token.cancel();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    });
+
+    let result = engine.execute_tool(name, input, token.clone()).await;
+    token.cancel(); // wake the watcher so it exits
+    let _ = watcher.await;
+    result
+}
+
+/// Build "Interrupted by user" tool_result blocks for tool_uses that never ran.
+fn synthesize_interrupt_results(
+    tool_uses: &[(String, String, serde_json::Value)],
+) -> Vec<crate::api::ContentBlock> {
+    tool_uses
+        .iter()
+        .map(|(id, _name, _input)| crate::api::ContentBlock::ToolResult {
+            tool_use_id: id.clone(),
+            content: "Interrupted by user.".to_string(),
+            is_error: Some(true),
+        })
+        .collect()
 }
 
 fn format_permission_details(tool_name: &str, input: &serde_json::Value) -> Vec<String> {

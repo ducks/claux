@@ -152,13 +152,16 @@ impl Engine {
         self.tools.is_read_only(name)
     }
 
-    /// Execute a tool by name.
+    /// Execute a tool by name. Pass `CancellationToken::new()` (non-cancellable)
+    /// if the caller doesn't need to interrupt; pass a real token to support
+    /// mid-execution cancellation.
     pub async fn execute_tool(
         &self,
         name: &str,
         input: serde_json::Value,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<crate::tools::ToolOutput> {
-        self.tools.execute(name, input).await
+        self.tools.execute(name, input, cancel).await
     }
 
     /// Record a tool as always-allowed for the session.
@@ -448,7 +451,9 @@ impl Engine {
         let parallel_futures: Vec<_> = parallel_tools
             .iter()
             .map(|(idx, id, name, input)| async move {
-                let result = tools_ref.execute(name, input.clone()).await;
+                let result = tools_ref
+                    .execute(name, input.clone(), tokio_util::sync::CancellationToken::new())
+                    .await;
                 (*idx, id.clone(), result)
             })
             .collect();
@@ -459,7 +464,11 @@ impl Engine {
         let mut sequential_results = Vec::new();
         for (idx, id, name, input, perm) in sequential_tools {
             let tool_output = match perm {
-                PermissionResult::Allow => self.tools.execute(&name, input.clone()).await?,
+                PermissionResult::Allow => {
+                    self.tools
+                        .execute(&name, input.clone(), tokio_util::sync::CancellationToken::new())
+                        .await?
+                }
                 PermissionResult::Deny(reason) => crate::tools::ToolOutput {
                     content: format!("Permission denied: {reason}"),
                     is_error: true,
@@ -467,7 +476,9 @@ impl Engine {
                 PermissionResult::Ask { message, diff: _ } => {
                     // For non-streaming mode, just auto-allow (this path shouldn't normally be reached)
                     eprintln!("  [tool] {message} — auto-allowing");
-                    self.tools.execute(&name, input.clone()).await?
+                    self.tools
+                        .execute(&name, input.clone(), tokio_util::sync::CancellationToken::new())
+                        .await?
                 }
             };
             sequential_results.push((idx, id, Ok(tool_output)));
@@ -636,7 +647,11 @@ impl Engine {
                 let perm = self.permissions.check(name, input, is_read_only);
 
                 let tool_output = match perm {
-                    PermissionResult::Allow => self.tools.execute(name, input.clone()).await?,
+                    PermissionResult::Allow => {
+                        self.tools
+                            .execute(name, input.clone(), tokio_util::sync::CancellationToken::new())
+                            .await?
+                    }
                     PermissionResult::Deny(reason) => crate::tools::ToolOutput {
                         content: format!("Permission denied: {reason}"),
                         is_error: true,
@@ -664,15 +679,21 @@ impl Engine {
 
                         match resp_rx.await {
                             Ok(PermissionResponse::Allow) => {
-                                self.tools.execute(name, input.clone()).await?
+                                self.tools
+                                    .execute(name, input.clone(), tokio_util::sync::CancellationToken::new())
+                                    .await?
                             }
                             Ok(PermissionResponse::AlwaysAllow) => {
                                 self.permissions.always_allow(name);
-                                self.tools.execute(name, input.clone()).await?
+                                self.tools
+                                    .execute(name, input.clone(), tokio_util::sync::CancellationToken::new())
+                                    .await?
                             }
                             Ok(PermissionResponse::AlwaysAllowCommand(ref cmd)) => {
                                 self.permissions.always_allow_command(cmd);
-                                self.tools.execute(name, input.clone()).await?
+                                self.tools
+                                    .execute(name, input.clone(), tokio_util::sync::CancellationToken::new())
+                                    .await?
                             }
                             Ok(PermissionResponse::Deny) | Err(_) => crate::tools::ToolOutput {
                                 content: "Permission denied by user.".to_string(),

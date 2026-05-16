@@ -70,9 +70,22 @@ impl Tool for McpTool {
         format!("mcp:{} {}", self.server_name, self.tool_name)
     }
 
-    async fn execute(&self, input: Value) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        input: Value,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolOutput> {
         let client = self.client.lock().await;
-        let result = client.call_tool(&self.tool_name, input).await;
+
+        let result = tokio::select! {
+            r = client.call_tool(&self.tool_name, input) => r,
+            _ = cancel.cancelled() => {
+                return Ok(ToolOutput {
+                    content: "Interrupted by user.".to_string(),
+                    is_error: true,
+                });
+            }
+        };
 
         match result {
             Ok(call_result) => {
