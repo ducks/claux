@@ -41,8 +41,7 @@ pub async fn build_system_prompt_for_model(
     let block2 = build_runtime_section(model, plugins, trigger).await;
 
     Ok(format!(
-        "{}{}{}{}{}",
-        block0, SYSTEM_PROMPT_BLOCK_SEPARATOR, block1, SYSTEM_PROMPT_BLOCK_SEPARATOR, block2,
+        "{block0}{SYSTEM_PROMPT_BLOCK_SEPARATOR}{block1}{SYSTEM_PROMPT_BLOCK_SEPARATOR}{block2}",
     ))
 }
 

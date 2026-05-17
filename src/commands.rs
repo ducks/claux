@@ -192,6 +192,23 @@ async fn execute_theme(theme_name: Option<String>, engine: &mut Engine) -> Resul
     }
 }
 
+fn help_text() -> String {
+    "Available commands:
+  /help           Show this help
+  /cost           Show token usage and cost
+  /compact        Summarize conversation to free context
+  /model [name]   Show or switch model
+  /theme [name]   Show or switch theme (dark, light, ansi)
+  /resume [id]    List or resume past sessions
+  /clear          Clear screen
+  /exit           Exit claux
+
+Keyboard:
+  Ctrl+C    Cancel current request
+  Ctrl+D    Exit"
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,21 +295,4 @@ mod tests {
             panic!("expected Text");
         }
     }
-}
-
-fn help_text() -> String {
-    "Available commands:
-  /help           Show this help
-  /cost           Show token usage and cost
-  /compact        Summarize conversation to free context
-  /model [name]   Show or switch model
-  /theme [name]   Show or switch theme (dark, light, ansi)
-  /resume [id]    List or resume past sessions
-  /clear          Clear screen
-  /exit           Exit claux
-
-Keyboard:
-  Ctrl+C    Cancel current request
-  Ctrl+D    Exit"
-        .to_string()
 }

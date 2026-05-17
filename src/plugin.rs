@@ -175,7 +175,7 @@ mod tests {
         let plugin = CommandPlugin::new(
             "echo-test",
             "echo",
-            &vec!["hello world".to_string()],
+            &["hello world".to_string()],
             HookTrigger::OnContextBuild,
         );
         let result = plugin.execute(None).unwrap();
@@ -185,14 +185,14 @@ mod tests {
 
     #[test]
     fn test_command_plugin_empty_output() {
-        let plugin = CommandPlugin::new("true", "true", &vec![], HookTrigger::OnContextBuild);
+        let plugin = CommandPlugin::new("true", "true", &[], HookTrigger::OnContextBuild);
         let result = plugin.execute(None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_command_plugin_failure() {
-        let plugin = CommandPlugin::new("fail", "false", &vec![], HookTrigger::OnContextBuild);
+        let plugin = CommandPlugin::new("fail", "false", &[], HookTrigger::OnContextBuild);
         let result = plugin.execute(None).unwrap();
         assert!(result.is_none());
     }
@@ -271,13 +271,13 @@ mod tests {
 
     #[test]
     fn test_plugin_name() {
-        let plugin = CommandPlugin::new("my-plugin", "echo", &vec![], HookTrigger::OnContextBuild);
+        let plugin = CommandPlugin::new("my-plugin", "echo", &[], HookTrigger::OnContextBuild);
         assert_eq!(plugin.name(), "my-plugin");
     }
 
     #[test]
     fn test_plugin_trigger() {
-        let plugin = CommandPlugin::new("my-plugin", "echo", &vec![], HookTrigger::OnToolStart);
+        let plugin = CommandPlugin::new("my-plugin", "echo", &[], HookTrigger::OnToolStart);
         assert_eq!(*plugin.trigger(), HookTrigger::OnToolStart);
     }
 
@@ -289,7 +289,7 @@ mod tests {
         let plugin = CommandPlugin::new(
             "env-test",
             "sh",
-            &vec!["-c".to_string(), "echo $TEST_VAR".to_string()],
+            &["-c".to_string(), "echo $TEST_VAR".to_string()],
             HookTrigger::OnContextBuild,
         );
         let result = plugin.execute(Some(&env)).unwrap();
