@@ -92,7 +92,7 @@ pub struct McpJsonServerEntry {
 }
 
 impl McpJsonServerEntry {
-    pub fn to_server_config(self, name: String) -> McpServerConfig {
+    pub fn into_server_config(self, name: String) -> McpServerConfig {
         McpServerConfig {
             name,
             command: self.command,
@@ -117,7 +117,7 @@ pub fn load_mcp_json() -> Vec<McpServerConfig> {
             Ok(config) => config
                 .mcp_servers
                 .into_iter()
-                .map(|(name, entry)| entry.to_server_config(name))
+                .map(|(name, entry)| entry.into_server_config(name))
                 .collect(),
             Err(e) => {
                 tracing::warn!("Failed to parse .mcp.json: {e}");

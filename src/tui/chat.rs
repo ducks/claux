@@ -203,7 +203,7 @@ pub async fn run(
     db: &Db,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     theme: Theme,
-    plugins: &PluginRegistry,
+    _plugins: &PluginRegistry,
 ) -> Result<Action> {
     // Clear engine state and load this session's messages
     engine.messages_mut().clear();
@@ -479,7 +479,7 @@ async fn drive_streaming(
                 app.stream_buffer.clear();
                 app.add_message("assistant", &content);
             }
-            app.add_tool(&name, &summary, ToolStatus::Running);
+            app.add_tool(name, &summary, ToolStatus::Running);
             terminal.draw(|f| ui::draw_chat(f, app))?;
 
             let is_read_only = engine.is_tool_read_only(name);

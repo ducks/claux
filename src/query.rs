@@ -766,7 +766,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{ToolDefinition, Usage};
+    use crate::api::ToolDefinition;
     use crate::permissions::PermissionMode;
     use std::time::Instant;
 
@@ -860,7 +860,7 @@ mod tests {
             }
         }
 
-        println!("Parallel execution took: {:?}", duration);
+        println!("Parallel execution took: {duration:?}");
     }
 
     #[tokio::test]

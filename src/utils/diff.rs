@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn test_colorize_diff() {
         let diff = "--- a/test.txt\n+++ b/test.txt\n-old\n+new\n";
-        let colored = colorize_diff(&diff);
+        let colored = colorize_diff(diff);
 
         assert!(colored.contains("\x1b[31m-old\x1b[0m"));
         assert!(colored.contains("\x1b[32m+new\x1b[0m"));
@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn test_colorize_diff_headers() {
         let diff = "--- a/test.txt\n+++ b/test.txt\n";
-        let colored = colorize_diff(&diff);
+        let colored = colorize_diff(diff);
 
         // Headers should not be colored
         assert!(!colored.contains("\x1b[31m---"));

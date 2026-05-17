@@ -105,6 +105,15 @@ impl Tool for ReadTool {
     }
 }
 
+pub fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home).join(stripped);
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,7 +146,7 @@ mod tests {
     async fn read_with_offset_and_limit() {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         for i in 1..=10 {
-            writeln!(tmp, "line {}", i).unwrap();
+            writeln!(tmp, "line {i}").unwrap();
         }
 
         let tool = ReadTool;
@@ -186,13 +195,4 @@ mod tests {
         let path = expand_tilde("/tmp/test.txt");
         assert_eq!(path.to_str().unwrap(), "/tmp/test.txt");
     }
-}
-
-pub fn expand_tilde(path: &str) -> std::path::PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return std::path::PathBuf::from(home).join(stripped);
-        }
-    }
-    std::path::PathBuf::from(path)
 }

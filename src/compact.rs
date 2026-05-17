@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn snip_keeps_recent() {
         let msgs: Vec<Message> = (0..20)
-            .map(|i| Message::user(&format!("message {}", i)))
+            .map(|i| Message::user(&format!("message {i}")))
             .collect();
 
         let result = snip_old_messages(&msgs, 5).unwrap();
