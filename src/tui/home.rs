@@ -179,9 +179,7 @@ impl HomeScreen {
                 self.selected -= 1;
             }
 
-            (_, KeyCode::Down) | (_, KeyCode::Char('j'))
-                if self.selected + 1 < self.tree.len() =>
-            {
+            (_, KeyCode::Down) | (_, KeyCode::Char('j')) if self.selected + 1 < self.tree.len() => {
                 self.selected += 1;
             }
 
