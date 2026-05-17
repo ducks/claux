@@ -107,8 +107,8 @@ impl Tool for ReadTool {
 
 pub fn expand_tilde(path: &str) -> std::path::PathBuf {
     if let Some(stripped) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return std::path::PathBuf::from(home).join(stripped);
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
         }
     }
     std::path::PathBuf::from(path)
