@@ -88,7 +88,10 @@ async fn main() -> Result<()> {
     let mut mcp_servers = config.mcp_servers.clone();
     let mcp_json_servers = config::load_mcp_json();
     if !mcp_json_servers.is_empty() {
-        tracing::info!("Loaded {} MCP server(s) from .mcp.json", mcp_json_servers.len());
+        tracing::info!(
+            "Loaded {} MCP server(s) from .mcp.json",
+            mcp_json_servers.len()
+        );
         mcp_servers.extend(mcp_json_servers);
     }
 
@@ -127,7 +130,8 @@ async fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    let mut tool_registry = tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
+    let mut tool_registry =
+        tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
     tool_registry.add_tools(mcp_tools);
     let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
     let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);

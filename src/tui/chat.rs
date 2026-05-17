@@ -23,10 +23,7 @@ use super::ui;
 #[derive(Debug, Clone)]
 pub enum ChatMessage {
     /// User, assistant, system, or error text message.
-    Text {
-        role: String,
-        content: String,
-    },
+    Text { role: String, content: String },
     /// A tool invocation with its result status.
     Tool {
         name: String,
@@ -441,9 +438,9 @@ async fn drive_streaming(
             if !tool_uses.is_empty() {
                 engine
                     .messages_mut()
-                    .push(crate::api::Message::tool_results(synthesize_interrupt_results(
-                        &tool_uses,
-                    )));
+                    .push(crate::api::Message::tool_results(
+                        synthesize_interrupt_results(&tool_uses),
+                    ));
             }
             if !app.stream_buffer.is_empty() {
                 let content = app.stream_buffer.clone();
@@ -863,7 +860,13 @@ mod tests {
 
         assert_eq!(app.messages.len(), 3);
         assert!(matches!(&app.messages[0], ChatMessage::Text { role, .. } if role == "user"));
-        assert!(matches!(&app.messages[1], ChatMessage::Tool { status: ToolStatus::Success, .. }));
+        assert!(matches!(
+            &app.messages[1],
+            ChatMessage::Tool {
+                status: ToolStatus::Success,
+                ..
+            }
+        ));
         assert!(matches!(&app.messages[2], ChatMessage::Text { role, .. } if role == "assistant"));
     }
 }
@@ -901,13 +904,22 @@ mod tuishot_shots {
 
     #[derive(Tuishot)]
     enum ChatShot {
-        #[tuishot(name = "chat-conversation", description = "Mid-conversation with tool use and markdown")]
+        #[tuishot(
+            name = "chat-conversation",
+            description = "Mid-conversation with tool use and markdown"
+        )]
         Conversation,
 
-        #[tuishot(name = "chat-streaming", description = "Assistant mid-response with streaming cursor")]
+        #[tuishot(
+            name = "chat-streaming",
+            description = "Assistant mid-response with streaming cursor"
+        )]
         Streaming,
 
-        #[tuishot(name = "chat-permission", description = "Prompting for Bash permission")]
+        #[tuishot(
+            name = "chat-permission",
+            description = "Prompting for Bash permission"
+        )]
         Permission,
 
         #[tuishot(name = "chat-empty", description = "Fresh chat, no messages")]
@@ -924,7 +936,8 @@ mod tuishot_shots {
                     app.mode = Mode::Streaming;
                     app.stream_buffer = "Sure, let me look at the configuration handling next. \
                         The config module uses `toml` for parsing and supports both global \
-                        and per-project overrides".to_string();
+                        and per-project overrides"
+                        .to_string();
                     app.thinking = false;
                     app
                 }

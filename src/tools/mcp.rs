@@ -12,13 +12,8 @@ use tokio::sync::Mutex;
 use super::{Tool, ToolOutput};
 use crate::config::McpServerConfig;
 
-type McpClientType = McpClient<
-    tower::timeout::Timeout<
-        McpService<
-            <StdioTransport as Transport>::Handle,
-        >,
-    >,
->;
+type McpClientType =
+    McpClient<tower::timeout::Timeout<McpService<<StdioTransport as Transport>::Handle>>>;
 
 /// A tool backed by an MCP server.
 /// Wraps one tool from an MCP server's tools/list response.
@@ -113,9 +108,7 @@ impl Tool for McpTool {
 }
 
 /// Connect to all configured MCP servers and return their tools.
-pub async fn connect_mcp_servers(
-    configs: &[McpServerConfig],
-) -> Vec<Box<dyn Tool>> {
+pub async fn connect_mcp_servers(configs: &[McpServerConfig]) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
     for config in configs {
@@ -138,13 +131,11 @@ pub async fn connect_mcp_servers(
 }
 
 async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> {
-    let transport = StdioTransport::new(
-        &config.command,
-        config.args.clone(),
-        config.env.clone(),
-    );
+    let transport = StdioTransport::new(&config.command, config.args.clone(), config.env.clone());
 
-    let handle = transport.start().await
+    let handle = transport
+        .start()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to start MCP server '{}': {e}", config.name))?;
 
     let service = McpService::with_timeout(handle, Duration::from_secs(30));
@@ -161,10 +152,12 @@ async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> 
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize MCP server '{}': {e}", config.name))?;
 
-    let tool_list = client
-        .list_tools(None)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to list tools from MCP server '{}': {e}", config.name))?;
+    let tool_list = client.list_tools(None).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to list tools from MCP server '{}': {e}",
+            config.name
+        )
+    })?;
 
     let client = Arc::new(Mutex::new(client));
 

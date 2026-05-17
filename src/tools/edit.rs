@@ -130,8 +130,8 @@ impl Tool for EditTool {
 
 #[cfg(test)]
 mod tests {
-    use tokio_util::sync::CancellationToken;
     use super::*;
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn edit_replaces_string() {

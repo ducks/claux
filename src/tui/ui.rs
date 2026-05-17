@@ -96,8 +96,7 @@ pub fn draw_chat(f: &mut Frame, app: &mut ChatApp) {
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]));
-                    let rendered =
-                        markdown::render(content, Style::default().fg(app.theme.fg));
+                    let rendered = markdown::render(content, Style::default().fg(app.theme.fg));
                     for line in rendered {
                         let mut indented = vec![Span::raw("  ")];
                         indented.extend(line.spans);

@@ -107,9 +107,9 @@ impl Tool for ReadTool {
 
 #[cfg(test)]
 mod tests {
-    use tokio_util::sync::CancellationToken;
     use super::*;
     use std::io::Write;
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn read_existing_file() {
