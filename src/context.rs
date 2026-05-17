@@ -42,11 +42,7 @@ pub async fn build_system_prompt_for_model(
 
     Ok(format!(
         "{}{}{}{}{}",
-        block0,
-        SYSTEM_PROMPT_BLOCK_SEPARATOR,
-        block1,
-        SYSTEM_PROMPT_BLOCK_SEPARATOR,
-        block2,
+        block0, SYSTEM_PROMPT_BLOCK_SEPARATOR, block1, SYSTEM_PROMPT_BLOCK_SEPARATOR, block2,
     ))
 }
 
@@ -71,7 +67,8 @@ async fn build_runtime_section(
     } else {
         &shell
     };
-    let os_version = run_cmd("uname", &["-sr"]).await
+    let os_version = run_cmd("uname", &["-sr"])
+        .await
         .unwrap_or_else(|| format!("{} unknown", std::env::consts::OS));
 
     let mut env_items = vec![
@@ -113,11 +110,7 @@ async fn build_runtime_section(
         if let Ok(content) = std::fs::read_to_string(&memory_index) {
             if !content.trim().is_empty() {
                 // Truncate to 200 lines matching CC behavior
-                let truncated: String = content
-                    .lines()
-                    .take(200)
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let truncated: String = content.lines().take(200).collect::<Vec<_>>().join("\n");
                 parts.push(format!("\n# Memory Index (MEMORY.md)\n{truncated}"));
             }
         }
@@ -166,7 +159,8 @@ fn anthropic_system_prompt(_model: &str) -> String {
     // ~/.claude/projects/<sanitized-cwd>/memory/
     let memory_dir = build_memory_dir_path();
 
-    let prompt = format!(r##"You are Claude Code, Anthropic's official CLI for Claude.
+    let prompt = format!(
+        r##"You are Claude Code, Anthropic's official CLI for Claude.
 You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
 
 IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.
@@ -461,7 +455,8 @@ Important:
 - View comments on a Github PR: gh api repos/foo/bar/pulls/123/comments
 
 When working with tool results, write down any important information you might need later in your response, as the original tool result may be cleared later.
-"##);
+"##
+    );
     prompt
 }
 
@@ -473,9 +468,7 @@ fn build_memory_dir_path() -> String {
         .unwrap_or_else(|_| "unknown".to_string());
 
     // Sanitize the cwd path the same way CC does: replace path separators with dashes
-    let sanitized = cwd
-        .trim_start_matches('/')
-        .replace('/', "-");
+    let sanitized = cwd.trim_start_matches('/').replace('/', "-");
 
     format!("{home}/.claude/projects/{sanitized}/memory/")
 }
@@ -494,9 +487,12 @@ async fn git_status() -> Option<String> {
     let status = run_cmd("git", &["--no-optional-locks", "status", "--short"])
         .await
         .unwrap_or_default();
-    let log = run_cmd("git", &["--no-optional-locks", "log", "--oneline", "-n", "5"])
-        .await
-        .unwrap_or_default();
+    let log = run_cmd(
+        "git",
+        &["--no-optional-locks", "log", "--oneline", "-n", "5"],
+    )
+    .await
+    .unwrap_or_default();
 
     let truncated_status = if status.len() > 2000 {
         format!(
@@ -545,12 +541,24 @@ async fn detect_default_branch() -> String {
     }
 
     // Check if origin/main exists
-    if run_cmd("git", &["rev-parse", "--verify", "refs/remotes/origin/main"]).await.is_some() {
+    if run_cmd(
+        "git",
+        &["rev-parse", "--verify", "refs/remotes/origin/main"],
+    )
+    .await
+    .is_some()
+    {
         return "main".to_string();
     }
 
     // Check if origin/master exists
-    if run_cmd("git", &["rev-parse", "--verify", "refs/remotes/origin/master"]).await.is_some() {
+    if run_cmd(
+        "git",
+        &["rev-parse", "--verify", "refs/remotes/origin/master"],
+    )
+    .await
+    .is_some()
+    {
         return "master".to_string();
     }
 

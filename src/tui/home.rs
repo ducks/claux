@@ -496,12 +496,27 @@ mod tuishot_shots {
     fn seeded_db() -> (Db, tempfile::NamedTempFile) {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let db = Db::open(&tmp.path().to_path_buf()).expect("open db");
-        db.create_session("20260101-120000", "claude-sonnet-4-20250514", Some("auth refactor"), Some("claux"))
-            .unwrap();
-        db.create_session("20260102-093000", "claude-sonnet-4-20250514", Some("tui polish"), Some("claux"))
-            .unwrap();
-        db.create_session("20260103-160000", "gpt-4o", Some("ssac brainstorm"), Some("tuishot"))
-            .unwrap();
+        db.create_session(
+            "20260101-120000",
+            "claude-sonnet-4-20250514",
+            Some("auth refactor"),
+            Some("claux"),
+        )
+        .unwrap();
+        db.create_session(
+            "20260102-093000",
+            "claude-sonnet-4-20250514",
+            Some("tui polish"),
+            Some("claux"),
+        )
+        .unwrap();
+        db.create_session(
+            "20260103-160000",
+            "gpt-4o",
+            Some("ssac brainstorm"),
+            Some("tuishot"),
+        )
+        .unwrap();
         (db, tmp)
     }
 
@@ -510,10 +525,16 @@ mod tuishot_shots {
         #[tuishot(name = "home-empty", description = "First launch: no sessions yet")]
         Empty,
 
-        #[tuishot(name = "home-populated", description = "Session browser with two projects")]
+        #[tuishot(
+            name = "home-populated",
+            description = "Session browser with two projects"
+        )]
         Populated,
 
-        #[tuishot(name = "home-new-session", description = "Creating a new session in the selected project")]
+        #[tuishot(
+            name = "home-new-session",
+            description = "Creating a new session in the selected project"
+        )]
         NewSession,
 
         #[tuishot(name = "home-new-project", description = "Creating a new project")]
@@ -527,11 +548,17 @@ mod tuishot_shots {
                 HomeShot::Empty => {
                     let tmp = tempfile::NamedTempFile::new().unwrap();
                     let db = Db::open(&tmp.path().to_path_buf()).unwrap();
-                    (HomeScreen::new(db, theme, "claude-sonnet-4-20250514"), Some(tmp))
+                    (
+                        HomeScreen::new(db, theme, "claude-sonnet-4-20250514"),
+                        Some(tmp),
+                    )
                 }
                 _ => {
                     let (db, tmp) = seeded_db();
-                    (HomeScreen::new(db, theme, "claude-sonnet-4-20250514"), Some(tmp))
+                    (
+                        HomeScreen::new(db, theme, "claude-sonnet-4-20250514"),
+                        Some(tmp),
+                    )
                 }
             };
             match self {

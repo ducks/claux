@@ -110,12 +110,8 @@ impl Tool for TodoWriteTool {
         input: Value,
         _cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ToolOutput> {
-        let todos: Vec<TodoItem> = serde_json::from_value(
-            input
-                .get("todos")
-                .cloned()
-                .unwrap_or(Value::Array(vec![])),
-        )?;
+        let todos: Vec<TodoItem> =
+            serde_json::from_value(input.get("todos").cloned().unwrap_or(Value::Array(vec![])))?;
 
         let old_todos = {
             let state = self.state.lock().unwrap();
@@ -203,8 +199,8 @@ impl Tool for TodoWriteTool {
 
 #[cfg(test)]
 mod tests {
-    use tokio_util::sync::CancellationToken;
     use super::*;
+    use tokio_util::sync::CancellationToken;
 
     fn make_tool() -> (TodoWriteTool, TodoState) {
         let state = new_todo_state();

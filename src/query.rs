@@ -452,7 +452,11 @@ impl Engine {
             .iter()
             .map(|(idx, id, name, input)| async move {
                 let result = tools_ref
-                    .execute(name, input.clone(), tokio_util::sync::CancellationToken::new())
+                    .execute(
+                        name,
+                        input.clone(),
+                        tokio_util::sync::CancellationToken::new(),
+                    )
                     .await;
                 (*idx, id.clone(), result)
             })
@@ -466,7 +470,11 @@ impl Engine {
             let tool_output = match perm {
                 PermissionResult::Allow => {
                     self.tools
-                        .execute(&name, input.clone(), tokio_util::sync::CancellationToken::new())
+                        .execute(
+                            &name,
+                            input.clone(),
+                            tokio_util::sync::CancellationToken::new(),
+                        )
                         .await?
                 }
                 PermissionResult::Deny(reason) => crate::tools::ToolOutput {
@@ -477,7 +485,11 @@ impl Engine {
                     // For non-streaming mode, just auto-allow (this path shouldn't normally be reached)
                     eprintln!("  [tool] {message} — auto-allowing");
                     self.tools
-                        .execute(&name, input.clone(), tokio_util::sync::CancellationToken::new())
+                        .execute(
+                            &name,
+                            input.clone(),
+                            tokio_util::sync::CancellationToken::new(),
+                        )
                         .await?
                 }
             };
@@ -649,7 +661,11 @@ impl Engine {
                 let tool_output = match perm {
                     PermissionResult::Allow => {
                         self.tools
-                            .execute(name, input.clone(), tokio_util::sync::CancellationToken::new())
+                            .execute(
+                                name,
+                                input.clone(),
+                                tokio_util::sync::CancellationToken::new(),
+                            )
                             .await?
                     }
                     PermissionResult::Deny(reason) => crate::tools::ToolOutput {
@@ -680,19 +696,31 @@ impl Engine {
                         match resp_rx.await {
                             Ok(PermissionResponse::Allow) => {
                                 self.tools
-                                    .execute(name, input.clone(), tokio_util::sync::CancellationToken::new())
+                                    .execute(
+                                        name,
+                                        input.clone(),
+                                        tokio_util::sync::CancellationToken::new(),
+                                    )
                                     .await?
                             }
                             Ok(PermissionResponse::AlwaysAllow) => {
                                 self.permissions.always_allow(name);
                                 self.tools
-                                    .execute(name, input.clone(), tokio_util::sync::CancellationToken::new())
+                                    .execute(
+                                        name,
+                                        input.clone(),
+                                        tokio_util::sync::CancellationToken::new(),
+                                    )
                                     .await?
                             }
                             Ok(PermissionResponse::AlwaysAllowCommand(ref cmd)) => {
                                 self.permissions.always_allow_command(cmd);
                                 self.tools
-                                    .execute(name, input.clone(), tokio_util::sync::CancellationToken::new())
+                                    .execute(
+                                        name,
+                                        input.clone(),
+                                        tokio_util::sync::CancellationToken::new(),
+                                    )
                                     .await?
                             }
                             Ok(PermissionResponse::Deny) | Err(_) => crate::tools::ToolOutput {

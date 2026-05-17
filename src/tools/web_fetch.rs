@@ -283,8 +283,8 @@ fn strip_html(html: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use tokio_util::sync::CancellationToken;
     use super::*;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn strip_html_basic() {
@@ -321,7 +321,10 @@ mod tests {
     async fn rejects_non_http_url() {
         let tool = WebFetchTool::new();
         let result = tool
-            .execute(json!({"url": "ftp://example.com"}), CancellationToken::new())
+            .execute(
+                json!({"url": "ftp://example.com"}),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         assert!(result.is_error);

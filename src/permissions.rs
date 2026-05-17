@@ -357,7 +357,10 @@ mod tests {
 
         if let PermissionResult::Ask { message, diff } = checker.check("Edit", &input, false) {
             assert!(message.contains("src/main.rs"));
-            assert!(diff.is_some(), "Diff should be generated when old_string and new_string are provided");
+            assert!(
+                diff.is_some(),
+                "Diff should be generated when old_string and new_string are provided"
+            );
             let diff_content = diff.unwrap();
             assert!(diff_content.contains("src/main.rs"));
             assert!(diff_content.contains("-let x = 1"));
@@ -374,7 +377,10 @@ mod tests {
 
         if let PermissionResult::Ask { message, diff } = checker.check("Edit", &input, false) {
             assert!(message.contains("src/main.rs"));
-            assert!(diff.is_none(), "Diff should be None when old_string/new_string are missing");
+            assert!(
+                diff.is_none(),
+                "Diff should be None when old_string/new_string are missing"
+            );
         } else {
             panic!("expected Ask");
         }
