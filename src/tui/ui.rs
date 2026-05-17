@@ -43,7 +43,7 @@ pub fn draw_chat(f: &mut Frame, app: &mut ChatApp) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("v{}", env!("CARGO_PKG_VERSION")),
+            format!("v{}", app.version),
             Style::default().fg(app.theme.dim),
         ),
     ]));

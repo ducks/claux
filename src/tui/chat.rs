@@ -69,6 +69,9 @@ pub struct ChatApp {
     pub total_lines: u16,
     pub thinking: bool,
     pub theme: Theme,
+    /// Displayed in the header. Defaults to CARGO_PKG_VERSION; overridable
+    /// so snapshot tests can pin it to a stable value across version bumps.
+    pub version: String,
 }
 
 impl ChatApp {
@@ -90,6 +93,7 @@ impl ChatApp {
             total_lines: 0,
             thinking: false,
             theme,
+            version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 
@@ -869,9 +873,14 @@ mod tuishot_shots {
     use super::*;
     use tuishot::Tuishot;
 
+    /// Version string used in snapshot renders. Pinning this keeps version
+    /// bumps from drifting every screenshot on every release.
+    const SNAPSHOT_VERSION: &str = "TEST";
+
     fn sample_conversation() -> ChatApp {
         let theme = crate::theme::Theme::dark();
         let mut app = ChatApp::new("claude-sonnet-4-20250514", theme);
+        app.version = SNAPSHOT_VERSION.to_string();
 
         app.add_message("user", "Can you read src/main.rs and explain what it does?");
         app.add_tool("Read", "src/main.rs (42 lines)", ToolStatus::Success);
@@ -931,7 +940,11 @@ mod tuishot_shots {
                     ]);
                     app
                 }
-                ChatShot::Empty => ChatApp::new("claude-sonnet-4-20250514", theme),
+                ChatShot::Empty => {
+                    let mut app = ChatApp::new("claude-sonnet-4-20250514", theme);
+                    app.version = SNAPSHOT_VERSION.to_string();
+                    app
+                }
             };
             let rendered = tuishot::render_to_buffer(area.width, area.height, |f| {
                 ui::draw_chat(f, &mut app);
