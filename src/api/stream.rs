@@ -131,21 +131,21 @@ pub async fn read_sse_stream(
                     }
                 }
 
-                "content_block_stop" => {
-                    if !current_tool_name.is_empty() && !current_tool_input.is_empty() {
-                        if let Ok(input) = serde_json::from_str(&current_tool_input) {
-                            let _ = tx
-                                .send(ApiEvent::ToolUse {
-                                    id: current_tool_id.clone(),
-                                    name: current_tool_name.clone(),
-                                    input,
-                                })
-                                .await;
-                        }
-                        current_tool_name.clear();
-                        current_tool_input.clear();
-                        current_tool_id.clear();
+                "content_block_stop"
+                    if !current_tool_name.is_empty() && !current_tool_input.is_empty() =>
+                {
+                    if let Ok(input) = serde_json::from_str(&current_tool_input) {
+                        let _ = tx
+                            .send(ApiEvent::ToolUse {
+                                id: current_tool_id.clone(),
+                                name: current_tool_name.clone(),
+                                input,
+                            })
+                            .await;
                     }
+                    current_tool_name.clear();
+                    current_tool_input.clear();
+                    current_tool_id.clear();
                 }
 
                 "message_stop" => {

@@ -33,12 +33,10 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
     for event in parser {
         match event {
             Event::Start(tag) => match tag {
-                Tag::Paragraph => {
-                    // Start new line for paragraph
-                    if !current_line.is_empty() {
-                        lines.push(Line::from(current_line.clone()));
-                        current_line.clear();
-                    }
+                // Start new line for paragraph
+                Tag::Paragraph if !current_line.is_empty() => {
+                    lines.push(Line::from(current_line.clone()));
+                    current_line.clear();
                 }
                 Tag::Heading { level, .. } => {
                     _in_heading = true;
@@ -147,11 +145,9 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                         current_line.clear();
                     }
                 }
-                TagEnd::Item => {
-                    if !current_line.is_empty() {
-                        lines.push(Line::from(current_line.clone()));
-                        current_line.clear();
-                    }
+                TagEnd::Item if !current_line.is_empty() => {
+                    lines.push(Line::from(current_line.clone()));
+                    current_line.clear();
                 }
                 TagEnd::Emphasis | TagEnd::Strong => {
                     style_stack.pop();
@@ -189,11 +185,9 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                 current_line.push(Span::raw(" "));
             }
 
-            Event::HardBreak => {
-                if !current_line.is_empty() {
-                    lines.push(Line::from(current_line.clone()));
-                    current_line.clear();
-                }
+            Event::HardBreak if !current_line.is_empty() => {
+                lines.push(Line::from(current_line.clone()));
+                current_line.clear();
             }
 
             Event::Rule => {

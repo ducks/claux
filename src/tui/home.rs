@@ -175,16 +175,14 @@ impl HomeScreen {
                 return Ok(Some(Action::Quit));
             }
 
-            (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
+            (_, KeyCode::Up) | (_, KeyCode::Char('k')) if self.selected > 0 => {
+                self.selected -= 1;
             }
 
-            (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
-                if self.selected + 1 < self.tree.len() {
-                    self.selected += 1;
-                }
+            (_, KeyCode::Down) | (_, KeyCode::Char('j'))
+                if self.selected + 1 < self.tree.len() =>
+            {
+                self.selected += 1;
             }
 
             (_, KeyCode::Enter) => {
@@ -277,11 +275,9 @@ impl HomeScreen {
                     _ => {}
                 }
             }
-            KeyCode::Backspace => {
-                if self.cursor > 0 {
-                    self.cursor -= 1;
-                    self.input.remove(self.cursor);
-                }
+            KeyCode::Backspace if self.cursor > 0 => {
+                self.cursor -= 1;
+                self.input.remove(self.cursor);
             }
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor, c);

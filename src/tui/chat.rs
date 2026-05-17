@@ -136,26 +136,18 @@ impl ChatApp {
             (_, KeyCode::Enter) => {
                 // Submit handled by caller
             }
-            (_, KeyCode::Backspace) => {
-                if self.cursor > 0 {
-                    self.cursor -= 1;
-                    self.input.remove(self.cursor);
-                }
+            (_, KeyCode::Backspace) if self.cursor > 0 => {
+                self.cursor -= 1;
+                self.input.remove(self.cursor);
             }
-            (_, KeyCode::Delete) => {
-                if self.cursor < self.input.len() {
-                    self.input.remove(self.cursor);
-                }
+            (_, KeyCode::Delete) if self.cursor < self.input.len() => {
+                self.input.remove(self.cursor);
             }
-            (_, KeyCode::Left) => {
-                if self.cursor > 0 {
-                    self.cursor -= 1;
-                }
+            (_, KeyCode::Left) if self.cursor > 0 => {
+                self.cursor -= 1;
             }
-            (_, KeyCode::Right) => {
-                if self.cursor < self.input.len() {
-                    self.cursor += 1;
-                }
+            (_, KeyCode::Right) if self.cursor < self.input.len() => {
+                self.cursor += 1;
             }
             (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
                 self.cursor = 0;
