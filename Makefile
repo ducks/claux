@@ -1,4 +1,4 @@
-.PHONY: help version-bump release build test clean clippy
+.PHONY: help version-bump release build test clean clippy fmt fmt-check lint install-hooks
 
 # Auto-generate version from today's date with auto-incrementing patch
 # Format: YYYYMMDD.0.X where X increments if releasing multiple times per day
@@ -80,3 +80,24 @@ clippy:
 # Clean build artifacts
 clean:
 	cargo clean
+
+# Run rustfmt to format the code
+fmt:
+	cargo fmt
+
+# Check that rustfmt is satisfied without modifying files (mirrors CI)
+fmt-check:
+	cargo fmt -- --check
+
+# Run all the checks CI runs, in order. Cheap to run locally before pushing.
+lint: fmt-check
+	cargo clippy -- -D warnings
+	cargo test
+
+# Install a pre-push hook that runs `make lint` before any push, so CI
+# failures from formatting / clippy / tests are caught locally.
+install-hooks:
+	@mkdir -p .git/hooks
+	@printf '#!/usr/bin/env bash\nset -e\nexec make lint\n' > .git/hooks/pre-push
+	@chmod +x .git/hooks/pre-push
+	@echo "Installed pre-push hook -> make lint"
