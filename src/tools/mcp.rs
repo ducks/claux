@@ -1,10 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use rmcp::{
-    RoleClient, ServiceExt,
     model::{CallToolRequestParams, ClientInfo, Implementation, RawContent},
     service::RunningService,
     transport::{ConfigureCommandExt, TokioChildProcess},
+    RoleClient, ServiceExt,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -165,9 +165,10 @@ async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> 
     let mut client_info = ClientInfo::default();
     client_info.client_info = Implementation::new("claux", env!("CARGO_PKG_VERSION"));
 
-    let client = client_info.serve(transport).await.map_err(|e| {
-        anyhow::anyhow!("Failed to initialize MCP server '{}': {e}", config.name)
-    })?;
+    let client = client_info
+        .serve(transport)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize MCP server '{}': {e}", config.name))?;
 
     let tool_list = client.list_all_tools().await.map_err(|e| {
         anyhow::anyhow!(
