@@ -481,16 +481,18 @@ impl Engine {
                     content: format!("Permission denied: {reason}"),
                     is_error: true,
                 },
-                PermissionResult::Ask { message, diff: _ } => {
-                    // For non-streaming mode, just auto-allow (this path shouldn't normally be reached)
-                    eprintln!("  [tool] {message} — auto-allowing");
-                    self.tools
-                        .execute(
-                            &name,
-                            input.clone(),
-                            tokio_util::sync::CancellationToken::new(),
-                        )
-                        .await?
+                PermissionResult::Ask { message, .. } => {
+                    // Non-streaming mode (`-p`/one-shot) has no interactive prompt to
+                    // ask the user, so a tool requiring confirmation must be denied
+                    // rather than silently auto-allowed. Set permission_mode to
+                    // accept-edits or bypass in config.toml to run tools that would
+                    // otherwise ask.
+                    crate::tools::ToolOutput {
+                        content: format!(
+                            "Permission denied: {message} (one-shot mode has no prompt; set permission_mode in config.toml to allow)"
+                        ),
+                        is_error: true,
+                    }
                 }
             };
             sequential_results.push((idx, id, Ok(tool_output)));
@@ -912,6 +914,57 @@ mod tests {
                 let expected_id = format!("test{}", i + 1);
                 assert_eq!(tool_use_id, &expected_id, "Results should maintain order");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ask_permission_denies_in_non_streaming_mode() {
+        // submit()/execute_tools_parallel has no interactive prompt to fall back
+        // on, so a tool that would normally ask for confirmation must be denied,
+        // not silently auto-allowed.
+        let provider = Box::new(MockProvider);
+        let tools = ToolRegistry::without_agent();
+        let permissions = PermissionChecker::new(PermissionMode::Default);
+
+        let mut engine = Engine {
+            provider,
+            tools,
+            permissions,
+            messages: vec![],
+            system_prompt: String::new(),
+            model: "test".to_string(),
+            max_tokens: 1000,
+            auto_compact_threshold: 0.8,
+            cost: CostTracker::new("test"),
+        };
+
+        // Under PermissionMode::Default, Read asks for confirmation.
+        let tool_uses = vec![(
+            "test1".to_string(),
+            "Read".to_string(),
+            serde_json::json!({"file_path": "/etc/hosts"}),
+        )];
+
+        let result = engine.execute_tools_parallel(&tool_uses).await;
+        assert!(result.is_ok());
+        let blocks = result.unwrap();
+        assert_eq!(blocks.len(), 1);
+
+        match &blocks[0] {
+            ContentBlock::ToolResult {
+                is_error, content, ..
+            } => {
+                assert_eq!(
+                    *is_error,
+                    Some(true),
+                    "Ask-permission tool must be denied, not executed, in non-streaming mode"
+                );
+                assert!(
+                    content.contains("Permission denied"),
+                    "expected a permission-denied message, got: {content}"
+                );
+            }
+            _ => panic!("Expected ToolResult block"),
         }
     }
 }
