@@ -60,7 +60,7 @@ impl Tool for BashTool {
         let cmd = input["command"].as_str().unwrap_or("?");
         // Truncate long commands
         if cmd.len() > 80 {
-            format!("{}...", &cmd[..77])
+            format!("{}...", crate::utils::truncate_str(cmd, 77))
         } else {
             cmd.to_string()
         }
