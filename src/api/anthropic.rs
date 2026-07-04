@@ -51,10 +51,9 @@ impl Provider for AnthropicProvider {
     ) -> Result<mpsc::Receiver<ApiEvent>> {
         let (tx, rx) = mpsc::channel(256);
 
-        // Split system prompt into blocks matching Claude Code's 3-block array format.
-        // Block 0: billing/version header
-        // Block 1: identity + runtime context
-        // Block 2: static instructions
+        // Split system prompt into an array of text blocks:
+        // Block 0: static claux instructions (identical across sessions)
+        // Block 1: runtime context (environment, git status, project files)
         let system_blocks: Vec<serde_json::Value> = system
             .split(SYSTEM_PROMPT_BLOCK_SEPARATOR)
             .map(|block| {

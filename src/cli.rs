@@ -2,7 +2,7 @@ use clap::Parser;
 
 #[derive(Parser)]
 #[command(name = "claux")]
-#[command(about = "claux — Claude Code rewritten in Rust")]
+#[command(about = "claux — an open, hackable terminal AI coding assistant in Rust")]
 pub struct Cli {
     /// One-shot prompt (non-interactive)
     #[arg(short = 'p', long = "print")]
