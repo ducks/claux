@@ -69,9 +69,9 @@ pub fn truncate_tool_output(output: &str) -> (String, bool) {
     let keep_start = TOOL_OUTPUT_MAX_CHARS * 2 / 3;
     let keep_end = TOOL_OUTPUT_MAX_CHARS / 6;
 
-    let start = &output[..keep_start];
-    let end = &output[output.len() - keep_end..];
-    let truncated_chars = output.len() - keep_start - keep_end;
+    let start = crate::utils::truncate_str(output, keep_start);
+    let end = crate::utils::tail_str(output, keep_end);
+    let truncated_chars = output.len() - start.len() - end.len();
 
     let result = format!("{start}\n\n... ({truncated_chars} characters truncated) ...\n\n{end}");
 
@@ -182,6 +182,19 @@ mod tests {
         assert!(truncated);
         assert!(result.len() < long.len());
         assert!(result.contains("truncated"));
+    }
+
+    #[test]
+    fn truncate_long_multibyte_output_no_panic() {
+        // Regression: byte-indexed slicing panicked when a cut point landed
+        // mid-codepoint. 4-byte chars guarantee both cut points do.
+        let long = "🦀".repeat(15_000); // 60k bytes
+        let (result, truncated) = truncate_tool_output(&long);
+        assert!(truncated);
+        assert!(result.contains("truncated"));
+        // Both kept segments must still be valid crab-only text
+        assert!(result.starts_with('🦀'));
+        assert!(result.ends_with('🦀'));
     }
 
     #[test]

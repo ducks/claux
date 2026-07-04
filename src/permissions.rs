@@ -196,11 +196,7 @@ impl PermissionChecker {
 }
 
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
+    crate::utils::truncate_str(s, max)
 }
 
 #[cfg(test)]

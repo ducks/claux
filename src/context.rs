@@ -496,7 +496,7 @@ async fn git_status() -> Option<String> {
     let truncated_status = if status.len() > 2000 {
         format!(
             "{}... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using Bash)",
-            &status[..2000]
+            crate::utils::truncate_str(&status, 2000)
         )
     } else if status.trim().is_empty() {
         "(clean)".to_string()

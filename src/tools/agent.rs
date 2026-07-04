@@ -70,9 +70,13 @@ impl Tool for AgentTool {
         input["description"]
             .as_str()
             .or_else(|| {
-                input["prompt"]
-                    .as_str()
-                    .map(|p| if p.len() > 60 { &p[..57] } else { p })
+                input["prompt"].as_str().map(|p| {
+                    if p.len() > 60 {
+                        crate::utils::truncate_str(p, 57)
+                    } else {
+                        p
+                    }
+                })
             })
             .unwrap_or("sub-agent task")
             .to_string()
