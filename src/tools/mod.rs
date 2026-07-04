@@ -107,19 +107,31 @@ impl ToolRegistry {
     }
 
     /// Execute a tool by name.
-    pub async fn execute(
-        &self,
-        name: &str,
-        input: Value,
-        cancel: CancellationToken,
-    ) -> Result<ToolOutput> {
-        let tool = self
-            .tools
-            .iter()
-            .find(|t| t.name() == name)
-            .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?;
+    ///
+    /// Never fails: an unknown tool name or a tool-level error is returned
+    /// as an error ToolOutput so it becomes a tool_result block the model
+    /// can see and recover from. Propagating an Err here would abort the
+    /// whole turn and leave a dangling tool_use in history, which the API
+    /// rejects on the next request.
+    pub async fn execute(&self, name: &str, input: Value, cancel: CancellationToken) -> ToolOutput {
+        let Some(tool) = self.tools.iter().find(|t| t.name() == name) else {
+            let available: Vec<&str> = self.tools.iter().map(|t| t.name()).collect();
+            return ToolOutput {
+                content: format!(
+                    "Unknown tool: {name}. Available tools: {}",
+                    available.join(", ")
+                ),
+                is_error: true,
+            };
+        };
 
-        tool.execute(input, cancel).await
+        match tool.execute(input, cancel).await {
+            Ok(output) => output,
+            Err(e) => ToolOutput {
+                content: format!("Tool {name} failed: {e}"),
+                is_error: true,
+            },
+        }
     }
 
     /// Get a human-readable summary of what the tool invocation will do.
@@ -205,16 +217,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_unknown_tool_errors() {
+    async fn execute_unknown_tool_returns_error_output() {
         let reg = ToolRegistry::new();
-        let result = reg
+        let output = reg
             .execute(
                 "FakeTool",
                 serde_json::json!({}),
                 tokio_util::sync::CancellationToken::new(),
             )
             .await;
-        assert!(result.is_err());
+        assert!(output.is_error);
+        assert!(output.content.contains("Unknown tool: FakeTool"));
+        // The model should be able to self-correct from the message
+        assert!(output.content.contains("Read"));
+    }
+
+    #[tokio::test]
+    async fn execute_bad_params_returns_error_output() {
+        let reg = ToolRegistry::new();
+        // Read requires file_path; missing it must not abort the turn
+        let output = reg
+            .execute(
+                "Read",
+                serde_json::json!({}),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
+        assert!(output.is_error);
+        assert!(output.content.contains("Read"));
     }
 
     #[test]

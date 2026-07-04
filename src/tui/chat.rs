@@ -479,7 +479,7 @@ async fn drive_streaming(
 
             let tool_output = match perm {
                 crate::permissions::PermissionResult::Allow => {
-                    execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone()).await?
+                    execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone()).await
                 }
                 crate::permissions::PermissionResult::Deny(reason) => crate::tools::ToolOutput {
                     content: format!("Permission denied: {reason}"),
@@ -520,18 +520,18 @@ async fn drive_streaming(
                     match response {
                         PermissionResponse::Allow => {
                             execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone())
-                                .await?
+                                .await
                         }
                         PermissionResponse::AlwaysAllow => {
                             engine.always_allow_tool(name);
                             execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone())
-                                .await?
+                                .await
                         }
                         PermissionResponse::AlwaysAllowCommand(cmd) => {
                             engine.always_allow_tool(name);
                             engine.always_allow_command(&cmd);
                             execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone())
-                                .await?
+                                .await
                         }
                         PermissionResponse::Deny => crate::tools::ToolOutput {
                             content: "Permission denied by user.".to_string(),
@@ -646,7 +646,7 @@ async fn execute_tool_with_cancel(
     name: &str,
     input: serde_json::Value,
     outer_cancelled: Arc<AtomicBool>,
-) -> Result<crate::tools::ToolOutput> {
+) -> crate::tools::ToolOutput {
     let token = tokio_util::sync::CancellationToken::new();
     let watcher_token = token.clone();
     let watcher_flag = outer_cancelled.clone();
