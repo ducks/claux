@@ -1,4 +1,6 @@
 use anyhow::Result;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::api::{ApiEvent, ContentBlock, Message, Provider};
@@ -6,6 +8,12 @@ use crate::compact::{self};
 use crate::cost::CostTracker;
 use crate::permissions::{PermissionChecker, PermissionResponse, PermissionResult};
 use crate::tools::ToolRegistry;
+
+/// Queue of user messages typed while a turn is running ("steering").
+/// UIs push into it from input handlers; the turn loop drains it before
+/// each API call and injects the entries as user messages, so the model
+/// hears the user without the tool sequence being aborted.
+pub type SteeringQueue = Arc<Mutex<VecDeque<String>>>;
 
 /// The query engine: conversation loop that sends messages, streams responses,
 /// dispatches tools, and continues until the assistant stops.
@@ -18,6 +26,7 @@ pub struct Engine {
     model: String,
     max_tokens: u32,
     auto_compact_threshold: f64,
+    steering: SteeringQueue,
     pub cost: CostTracker,
 }
 
@@ -67,8 +76,29 @@ impl Engine {
             model: model.to_string(),
             max_tokens: 16384,
             auto_compact_threshold: 0.8,
+            steering: SteeringQueue::default(),
             cost: CostTracker::new(model),
         }
+    }
+
+    /// Clone a handle to the steering queue. UIs (or their input threads)
+    /// push typed-mid-turn messages through this handle.
+    pub fn steering_queue(&self) -> SteeringQueue {
+        self.steering.clone()
+    }
+
+    /// Drain queued steering messages into the conversation as user
+    /// messages. Returns the drained texts so the caller can display them.
+    /// Call between turn-loop iterations, after tool results are pushed.
+    pub fn inject_steering(&mut self) -> Vec<String> {
+        let drained: Vec<String> = {
+            let mut q = self.steering.lock().expect("steering queue poisoned");
+            q.drain(..).collect()
+        };
+        for text in &drained {
+            self.messages.push(Message::user(text));
+        }
+        drained
     }
 
     /// Set the auto-compact threshold (0.0-1.0).
@@ -308,6 +338,9 @@ impl Engine {
 
         // Turn loop: keep going as long as the assistant requests tool use
         loop {
+            // Deliver any steering messages queued since the last API call
+            self.inject_steering();
+
             let tool_defs = self.tools.definitions();
             let stream_result = self
                 .provider
@@ -549,6 +582,14 @@ impl Engine {
         const MAX_RECOVERY: u32 = 3;
 
         loop {
+            // Deliver any steering messages queued since the last API call,
+            // and tell the UI they're now in the conversation.
+            for text in self.inject_steering() {
+                let _ = tx
+                    .send(StreamEvent::Text(format!("\n[steering sent: {text}]\n")))
+                    .await;
+            }
+
             let tool_defs = self.tools.definitions();
             let stream_result = self
                 .provider
@@ -819,6 +860,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
+            steering: SteeringQueue::default(),
             cost: CostTracker::new("test"),
         };
 
@@ -878,6 +920,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
+            steering: SteeringQueue::default(),
             cost: CostTracker::new("test"),
         };
 
@@ -913,6 +956,103 @@ mod tests {
         }
     }
 
+    /// Provider that emits one Glob tool_use on the first call and ends the
+    /// turn on the second. On the first call it also pushes a steering
+    /// message into the queue, deterministically simulating a user typing
+    /// while tools run.
+    struct SteeringMockProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        steering: SteeringQueue,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SteeringMockProvider {
+        fn name(&self) -> &str {
+            "steering-mock"
+        }
+
+        fn model(&self) -> &str {
+            "test-model"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+        ) -> Result<mpsc::Receiver<ApiEvent>> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (tx, rx) = mpsc::channel(10);
+            if call == 0 {
+                self.steering
+                    .lock()
+                    .unwrap()
+                    .push_back("also check the auth module".to_string());
+                let _ = tx
+                    .send(ApiEvent::ToolUse {
+                        id: "tu_1".to_string(),
+                        name: "Glob".to_string(),
+                        input: serde_json::json!({"pattern": "*.does-not-exist"}),
+                    })
+                    .await;
+            }
+            let _ = tx.send(ApiEvent::Done).await;
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_steering_message_injected_after_tool_results() {
+        let steering = SteeringQueue::default();
+        let provider = Box::new(SteeringMockProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            steering: steering.clone(),
+        });
+        let tools = ToolRegistry::without_agent();
+        let permissions = PermissionChecker::new(PermissionMode::Bypass);
+
+        let mut engine = Engine {
+            provider,
+            tools,
+            permissions,
+            messages: vec![],
+            system_prompt: String::new(),
+            model: "test".to_string(),
+            max_tokens: 1000,
+            auto_compact_threshold: 0.8,
+            steering,
+            cost: CostTracker::new("test"),
+        };
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        engine
+            .submit_streaming("do a deep review", tx)
+            .await
+            .unwrap();
+        drain.await.unwrap();
+
+        // Expected: user prompt, assistant(tool_use), user(tool_results),
+        // then the steering text as its own user message before round two.
+        let msgs = engine.messages();
+        assert_eq!(msgs.len(), 4, "got: {msgs:?}");
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[2].role, "user"); // tool results
+        assert_eq!(msgs[3].role, "user");
+        match &msgs[3].content {
+            crate::api::MessageContent::Text(t) => {
+                assert_eq!(t, "also check the auth module")
+            }
+            other => panic!("expected steering text message, got {other:?}"),
+        }
+        // Queue fully drained
+        assert!(engine.steering_queue().lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn test_unknown_tool_yields_error_block_not_abort() {
         // A hallucinated tool name must produce an error tool_result the
@@ -931,6 +1071,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
+            steering: SteeringQueue::default(),
             cost: CostTracker::new("test"),
         };
 
@@ -975,6 +1116,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
+            steering: SteeringQueue::default(),
             cost: CostTracker::new("test"),
         };
 

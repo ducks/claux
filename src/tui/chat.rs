@@ -7,13 +7,13 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::Stdout;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::commands::{self, CommandResult};
 use crate::db::Db;
 use crate::permissions::PermissionResponse;
 use crate::plugin::PluginRegistry;
-use crate::query::Engine;
+use crate::query::{Engine, SteeringQueue};
 use crate::theme::{Theme, ThemeName};
 
 use super::screen::Action;
@@ -66,6 +66,10 @@ pub struct ChatApp {
     pub total_lines: u16,
     pub thinking: bool,
     pub theme: Theme,
+    /// Text being typed while a turn runs, before Enter queues it as a
+    /// steering message. Behind Arc<Mutex> because the during-tool key
+    /// watcher runs on a separate task.
+    pub steer_buf: Arc<Mutex<String>>,
     /// Displayed in the header. Defaults to CARGO_PKG_VERSION; overridable
     /// so snapshot tests can pin it to a stable value across version bumps.
     pub version: String,
@@ -90,6 +94,7 @@ impl ChatApp {
             total_lines: 0,
             thinking: false,
             theme,
+            steer_buf: Arc::new(Mutex::new(String::new())),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
@@ -358,6 +363,15 @@ async fn drive_streaming(
 ) -> Result<()> {
     engine.messages_mut().push(crate::api::Message::user(input));
 
+    // Deliver steering left over from a previous turn (typed after that
+    // turn's last drain point).
+    for text in engine.inject_steering() {
+        app.add_message("user", &text);
+    }
+
+    let steering = engine.steering_queue();
+    let steer_buf = app.steer_buf.clone();
+
     let tool_defs = engine.tool_definitions();
     let mut api_rx = engine.start_stream(&tool_defs).await?;
 
@@ -391,14 +405,13 @@ async fn drive_streaming(
                     }
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                    if poll_cancel_key()? {
+                    if poll_stream_key(&steer_buf, &steering)? {
                         cancelled.store(true, Ordering::Relaxed);
                         break;
                     }
-                    // Redraw periodically so the spinner animates
-                    if app.thinking {
-                        terminal.draw(|f| ui::draw_chat(f, app))?;
-                    }
+                    // Redraw periodically so the spinner animates and the
+                    // steering buffer stays visible as the user types
+                    terminal.draw(|f| ui::draw_chat(f, app))?;
                 }
             }
         }
@@ -456,8 +469,8 @@ async fn drive_streaming(
         let mut result_blocks = Vec::new();
         let mut interrupted_at: Option<usize> = None;
         for (idx, (id, name, input)) in tool_uses.iter().enumerate() {
-            // Cancellation check between tools.
-            if poll_cancel_key()? {
+            // Cancellation/steering check between tools.
+            if poll_stream_key(&steer_buf, &steering)? {
                 cancelled.store(true, Ordering::Relaxed);
             }
             if cancelled.load(Ordering::Relaxed) {
@@ -479,7 +492,14 @@ async fn drive_streaming(
 
             let tool_output = match perm {
                 crate::permissions::PermissionResult::Allow => {
-                    execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone()).await
+                    execute_tool_with_cancel(
+                        engine,
+                        name,
+                        input.clone(),
+                        cancelled.clone(),
+                        steer_buf.clone(),
+                    )
+                    .await
                 }
                 crate::permissions::PermissionResult::Deny(reason) => crate::tools::ToolOutput {
                     content: format!("Permission denied: {reason}"),
@@ -519,19 +539,37 @@ async fn drive_streaming(
 
                     match response {
                         PermissionResponse::Allow => {
-                            execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone())
-                                .await
+                            execute_tool_with_cancel(
+                                engine,
+                                name,
+                                input.clone(),
+                                cancelled.clone(),
+                                steer_buf.clone(),
+                            )
+                            .await
                         }
                         PermissionResponse::AlwaysAllow => {
                             engine.always_allow_tool(name);
-                            execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone())
-                                .await
+                            execute_tool_with_cancel(
+                                engine,
+                                name,
+                                input.clone(),
+                                cancelled.clone(),
+                                steer_buf.clone(),
+                            )
+                            .await
                         }
                         PermissionResponse::AlwaysAllowCommand(cmd) => {
                             engine.always_allow_tool(name);
                             engine.always_allow_command(&cmd);
-                            execute_tool_with_cancel(engine, name, input.clone(), cancelled.clone())
-                                .await
+                            execute_tool_with_cancel(
+                                engine,
+                                name,
+                                input.clone(),
+                                cancelled.clone(),
+                                steer_buf.clone(),
+                            )
+                            .await
                         }
                         PermissionResponse::Deny => crate::tools::ToolOutput {
                             content: "Permission denied by user.".to_string(),
@@ -613,6 +651,13 @@ async fn drive_streaming(
             .messages_mut()
             .push(crate::api::Message::tool_results(result_blocks));
 
+        // Deliver steering typed while tools were running, so the next API
+        // call sees it right after the tool results.
+        for text in engine.inject_steering() {
+            app.add_message("user", &text);
+        }
+        terminal.draw(|f| ui::draw_chat(f, app))?;
+
         text_buf.clear();
         tool_uses.clear();
 
@@ -623,22 +668,46 @@ async fn drive_streaming(
     Ok(())
 }
 
-/// Non-blocking check for Ctrl+C. Returns true if Ctrl+C was pressed.
-fn poll_cancel_key() -> Result<bool> {
+/// Non-blocking key poll while a turn is running. Ctrl+C cancels (returns
+/// true). Everything else builds the steering buffer: printable characters
+/// append, Backspace deletes, and Enter moves the buffer into the engine's
+/// steering queue, which the turn loop drains before its next API call.
+fn poll_stream_key(steer_buf: &Arc<Mutex<String>>, steering: &SteeringQueue) -> Result<bool> {
     if event::poll(std::time::Duration::from_millis(0))? {
         if let Event::Key(key) = event::read()? {
-            if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
-                return Ok(true);
+            match (key.modifiers, key.code) {
+                (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Ok(true),
+                (_, KeyCode::Enter) => {
+                    let text = {
+                        let mut buf = steer_buf.lock().expect("steer buffer poisoned");
+                        std::mem::take(&mut *buf)
+                    };
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        steering
+                            .lock()
+                            .expect("steering queue poisoned")
+                            .push_back(text);
+                    }
+                }
+                (_, KeyCode::Backspace) => {
+                    steer_buf.lock().expect("steer buffer poisoned").pop();
+                }
+                (m, KeyCode::Char(c)) if m.is_empty() || m == KeyModifiers::SHIFT => {
+                    steer_buf.lock().expect("steer buffer poisoned").push(c);
+                }
+                _ => {}
             }
         }
     }
     Ok(false)
 }
 
-/// Run a tool while watching for Ctrl+C. Each invocation gets its own
+/// Run a tool while watching the keyboard. Each invocation gets its own
 /// fresh CancellationToken so cancellation of one tool doesn't leak into
-/// later tool calls in the same chain. If the user presses Ctrl+C, the
-/// token is fired and the tool is expected to notice it and return promptly.
+/// later tool calls in the same chain. Ctrl+C fires the token and the tool
+/// is expected to notice it and return promptly; other keys feed the
+/// steering buffer so the user can type while a long tool runs.
 /// `outer_cancelled` is signalled to the caller so it can decide to break
 /// out of any surrounding loops.
 async fn execute_tool_with_cancel(
@@ -646,16 +715,18 @@ async fn execute_tool_with_cancel(
     name: &str,
     input: serde_json::Value,
     outer_cancelled: Arc<AtomicBool>,
+    steer_buf: Arc<Mutex<String>>,
 ) -> crate::tools::ToolOutput {
     let token = tokio_util::sync::CancellationToken::new();
     let watcher_token = token.clone();
     let watcher_flag = outer_cancelled.clone();
+    let steering = engine.steering_queue();
     let watcher = tokio::spawn(async move {
         loop {
             if watcher_token.is_cancelled() {
                 return;
             }
-            if poll_cancel_key().unwrap_or(false) {
+            if poll_stream_key(&steer_buf, &steering).unwrap_or(false) {
                 watcher_flag.store(true, Ordering::Relaxed);
                 watcher_token.cancel();
                 return;
