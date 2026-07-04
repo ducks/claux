@@ -154,13 +154,15 @@ impl Engine {
 
     /// Execute a tool by name. Pass `CancellationToken::new()` (non-cancellable)
     /// if the caller doesn't need to interrupt; pass a real token to support
-    /// mid-execution cancellation.
+    /// mid-execution cancellation. Failures (unknown tool, bad params, tool
+    /// errors) come back as error ToolOutputs, never as Err — see
+    /// ToolRegistry::execute.
     pub async fn execute_tool(
         &self,
         name: &str,
         input: serde_json::Value,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<crate::tools::ToolOutput> {
+    ) -> crate::tools::ToolOutput {
         self.tools.execute(name, input, cancel).await
     }
 
@@ -412,7 +414,7 @@ impl Engine {
 
             // Execute tools and collect results (with output truncation)
             // Partition tools into parallel (read-only) and sequential (write) groups
-            let result_blocks = self.execute_tools_parallel(&tool_uses).await?;
+            let result_blocks = self.execute_tools_parallel(&tool_uses).await;
 
             self.messages.push(Message::tool_results(result_blocks));
         }
@@ -425,7 +427,7 @@ impl Engine {
     async fn execute_tools_parallel(
         &mut self,
         tool_uses: &[(String, String, serde_json::Value)],
-    ) -> Result<Vec<ContentBlock>> {
+    ) -> Vec<ContentBlock> {
         // Partition tools into read-only (parallel) and write (sequential)
         let mut parallel_tools = Vec::new();
         let mut sequential_tools = Vec::new();
@@ -475,7 +477,7 @@ impl Engine {
                             input.clone(),
                             tokio_util::sync::CancellationToken::new(),
                         )
-                        .await?
+                        .await
                 }
                 PermissionResult::Deny(reason) => crate::tools::ToolOutput {
                     content: format!("Permission denied: {reason}"),
@@ -495,20 +497,18 @@ impl Engine {
                     }
                 }
             };
-            sequential_results.push((idx, id, Ok(tool_output)));
+            sequential_results.push((idx, id, tool_output));
         }
 
         // Combine and sort results back into original order
-        let mut all_results: Vec<(usize, String, Result<crate::tools::ToolOutput>)> = Vec::new();
+        let mut all_results: Vec<(usize, String, crate::tools::ToolOutput)> = Vec::new();
         all_results.extend(parallel_results);
         all_results.extend(sequential_results);
         all_results.sort_by_key(|(idx, _, _)| *idx);
 
         // Build result blocks
         let mut result_blocks = Vec::new();
-        for (_, id, result) in all_results {
-            let tool_output = result?;
-
+        for (_, id, tool_output) in all_results {
             // Truncate large tool outputs to avoid context overflow
             let (content, was_truncated) = compact::truncate_tool_output(&tool_output.content);
             if was_truncated {
@@ -526,7 +526,7 @@ impl Engine {
             });
         }
 
-        Ok(result_blocks)
+        result_blocks
     }
 
     /// Submit with streaming callbacks (for the REPL).
@@ -668,7 +668,7 @@ impl Engine {
                                 input.clone(),
                                 tokio_util::sync::CancellationToken::new(),
                             )
-                            .await?
+                            .await
                     }
                     PermissionResult::Deny(reason) => crate::tools::ToolOutput {
                         content: format!("Permission denied: {reason}"),
@@ -703,7 +703,7 @@ impl Engine {
                                         input.clone(),
                                         tokio_util::sync::CancellationToken::new(),
                                     )
-                                    .await?
+                                    .await
                             }
                             Ok(PermissionResponse::AlwaysAllow) => {
                                 self.permissions.always_allow(name);
@@ -713,7 +713,7 @@ impl Engine {
                                         input.clone(),
                                         tokio_util::sync::CancellationToken::new(),
                                     )
-                                    .await?
+                                    .await
                             }
                             Ok(PermissionResponse::AlwaysAllowCommand(ref cmd)) => {
                                 self.permissions.always_allow_command(cmd);
@@ -723,7 +723,7 @@ impl Engine {
                                         input.clone(),
                                         tokio_util::sync::CancellationToken::new(),
                                     )
-                                    .await?
+                                    .await
                             }
                             Ok(PermissionResponse::Deny) | Err(_) => crate::tools::ToolOutput {
                                 content: "Permission denied by user.".to_string(),
@@ -842,11 +842,9 @@ mod tests {
         ];
 
         let start = Instant::now();
-        let result = engine.execute_tools_parallel(&tool_uses).await;
+        let blocks = engine.execute_tools_parallel(&tool_uses).await;
         let duration = start.elapsed();
 
-        assert!(result.is_ok(), "Parallel execution should succeed");
-        let blocks = result.unwrap();
         assert_eq!(blocks.len(), 3, "Should have 3 result blocks");
 
         // Verify results are in correct order
@@ -902,10 +900,8 @@ mod tests {
             ),
         ];
 
-        let result = engine.execute_tools_parallel(&tool_uses).await;
+        let blocks = engine.execute_tools_parallel(&tool_uses).await;
 
-        assert!(result.is_ok(), "Mixed execution should succeed");
-        let blocks = result.unwrap();
         assert_eq!(blocks.len(), 3, "Should have 3 result blocks");
 
         // Verify order is maintained
@@ -914,6 +910,50 @@ mod tests {
                 let expected_id = format!("test{}", i + 1);
                 assert_eq!(tool_use_id, &expected_id, "Results should maintain order");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unknown_tool_yields_error_block_not_abort() {
+        // A hallucinated tool name must produce an error tool_result the
+        // model can recover from. Aborting the turn here left a dangling
+        // tool_use in history, which the API rejects on the next request.
+        let provider = Box::new(MockProvider);
+        let tools = ToolRegistry::without_agent();
+        let permissions = PermissionChecker::new(PermissionMode::Bypass);
+
+        let mut engine = Engine {
+            provider,
+            tools,
+            permissions,
+            messages: vec![],
+            system_prompt: String::new(),
+            model: "test".to_string(),
+            max_tokens: 1000,
+            auto_compact_threshold: 0.8,
+            cost: CostTracker::new("test"),
+        };
+
+        let tool_uses = vec![(
+            "test1".to_string(),
+            "TaskCreate".to_string(), // not in the registry
+            serde_json::json!({"subject": "x"}),
+        )];
+
+        let blocks = engine.execute_tools_parallel(&tool_uses).await;
+        assert_eq!(blocks.len(), 1, "every tool_use must get a tool_result");
+
+        match &blocks[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                content,
+            } => {
+                assert_eq!(tool_use_id, "test1");
+                assert_eq!(*is_error, Some(true));
+                assert!(content.contains("Unknown tool"));
+            }
+            _ => panic!("Expected ToolResult block"),
         }
     }
 
@@ -945,9 +985,7 @@ mod tests {
             serde_json::json!({"file_path": "/etc/hosts"}),
         )];
 
-        let result = engine.execute_tools_parallel(&tool_uses).await;
-        assert!(result.is_ok());
-        let blocks = result.unwrap();
+        let blocks = engine.execute_tools_parallel(&tool_uses).await;
         assert_eq!(blocks.len(), 1);
 
         match &blocks[0] {
