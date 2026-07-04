@@ -12,6 +12,7 @@ A terminal-based AI coding assistant written in Rust. Streams responses, execute
 - **Sub-agents** — Agent tool spawns scoped sub-conversations
 - **Auto-compact** — triggers when conversation gets large
 - **Cost tracking** — per-model token usage and USD estimates
+- **Prompt caching** — automatic Anthropic cache breakpoints on the system prompt and conversation, cutting input cost and latency on long sessions
 - **Context assembly** — git status, CLAUDE.md, environment info in system prompt
 - **TUI mode** — full-screen ratatui interface with `--tui`
 - **Multi-provider** — Anthropic, OpenAI, Ollama, or any OpenAI-compatible endpoint
