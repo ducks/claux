@@ -16,7 +16,8 @@ A terminal-based AI coding assistant written in Rust. Streams responses, execute
 - **Context assembly** — git status, CLAUDE.md, environment info in system prompt
 - **TUI mode** — full-screen ratatui interface with `--tui`
 - **Multi-provider** — Anthropic, OpenAI, Ollama, or any OpenAI-compatible endpoint
-- **OAuth support** — works with existing `claude login` credentials
+- **OAuth support** — can reuse existing `claude login` credentials (best-effort; see Auth)
+- **Native system prompt** — claux speaks as claux; the full prompt is readable in `src/context.rs`, and what you read is what the model gets
 - **Markdown rendering** — code blocks, bold, headers in the TUI
 
 ## Screenshots
@@ -51,6 +52,11 @@ claux resolves authentication in order:
 4. OAuth token from `~/.claude/.credentials.json`
 
 If you've already run `claude login`, claux picks up those credentials automatically.
+
+Note: the OAuth path is best-effort. claux sends its own system prompt and
+identifies as claux, and Anthropic may restrict subscription OAuth tokens to
+official clients. An API key (or an OpenAI-compatible endpoint) is the
+supported path.
 
 ### OpenAI-compatible providers
 
