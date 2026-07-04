@@ -260,7 +260,12 @@ pub fn draw_chat(f: &mut Frame, app: &mut ChatApp) {
         f.render_widget(perm_widget, chunks[2]);
     } else {
         let input_text = if app.mode == Mode::Streaming {
-            "...".to_string()
+            let steer = app.steer_buf.lock().expect("steer buffer poisoned");
+            if steer.is_empty() {
+                "... (type to steer, Enter to queue, Ctrl+C to interrupt)".to_string()
+            } else {
+                steer.clone()
+            }
         } else {
             app.input.clone()
         };
