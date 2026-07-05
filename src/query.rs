@@ -804,7 +804,9 @@ impl Engine {
                                 self.permissions.always_allow_command(cmd);
                                 self.execute_tool_steerable(name, input.clone()).await
                             }
-                            Ok(PermissionResponse::Deny) | Err(_) => crate::tools::ToolOutput {
+                            Ok(PermissionResponse::Deny)
+                            | Ok(PermissionResponse::DenyAndCancel)
+                            | Err(_) => crate::tools::ToolOutput {
                                 content: "Permission denied by user.".to_string(),
                                 is_error: true,
                             },
