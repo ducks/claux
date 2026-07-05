@@ -110,6 +110,10 @@ impl ChatApp {
     }
 
     pub fn add_tool(&mut self, name: &str, summary: &str, status: ToolStatus) {
+        // A tool arriving means the model has responded; without this, a
+        // turn that opens with tool calls (no text) leaves the "thinking"
+        // spinner running under tool output and permission prompts.
+        self.thinking = false;
         self.messages.push(ChatMessage::Tool {
             name: name.to_string(),
             summary: summary.to_string(),
@@ -857,6 +861,24 @@ fn format_permission_details(tool_name: &str, input: &serde_json::Value) -> Vec<
                 for line in prompt.lines().take(5) {
                     lines.push(format!("  {line}"));
                 }
+            }
+        }
+        "Read" => {
+            if let Some(path) = input["file_path"].as_str() {
+                lines.push(format!("File: {path}"));
+            }
+        }
+        "Grep" => {
+            if let Some(pattern) = input["pattern"].as_str() {
+                lines.push(format!("Pattern: {pattern}"));
+            }
+            if let Some(path) = input["path"].as_str() {
+                lines.push(format!("In: {path}"));
+            }
+        }
+        "WebFetch" => {
+            if let Some(url) = input["url"].as_str() {
+                lines.push(format!("URL: {url}"));
             }
         }
         _ => {

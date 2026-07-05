@@ -26,6 +26,8 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
     let mut list_depth: usize = 0;
     let mut _in_heading = false;
     let mut _heading_level = HeadingLevel::H1;
+    let mut first_table_cell = false;
+    let mut table_col_count: usize = 0;
 
     let options = Options::all();
     let parser = Parser::new_ext(text, options);
@@ -102,6 +104,29 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                         Style::default().fg(BLUE),
                     ));
                 }
+                // Tables render as pipe-separated rows: without these
+                // handlers the cell text concatenates into one word soup.
+                Tag::Table(alignments) => {
+                    if !current_line.is_empty() {
+                        lines.push(Line::from(current_line.clone()));
+                        current_line.clear();
+                    }
+                    table_col_count = alignments.len();
+                }
+                Tag::TableHead => {
+                    first_table_cell = true;
+                    let current_style = *style_stack.last().unwrap_or(&base_style);
+                    style_stack.push(current_style.add_modifier(Modifier::BOLD));
+                }
+                Tag::TableRow => {
+                    first_table_cell = true;
+                }
+                Tag::TableCell => {
+                    if !first_table_cell {
+                        current_line.push(Span::styled(" │ ", Style::default().fg(GRAY)));
+                    }
+                    first_table_cell = false;
+                }
                 _ => {}
             },
 
@@ -155,6 +180,27 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                 TagEnd::Link => {
                     current_line.push(Span::raw("]"));
                     style_stack.pop();
+                }
+                TagEnd::TableHead => {
+                    style_stack.pop();
+                    if !current_line.is_empty() {
+                        lines.push(Line::from(current_line.clone()));
+                        current_line.clear();
+                    }
+                    // Rule under the header row, sized loosely to the table
+                    lines.push(Line::from(Span::styled(
+                        "─".repeat((table_col_count.max(1) * 12).min(60)),
+                        Style::default().fg(GRAY),
+                    )));
+                }
+                TagEnd::TableRow => {
+                    if !current_line.is_empty() {
+                        lines.push(Line::from(current_line.clone()));
+                        current_line.clear();
+                    }
+                }
+                TagEnd::Table => {
+                    lines.push(Line::from(""));
                 }
                 _ => {}
             },
@@ -317,5 +363,47 @@ mod tests {
         let lines = render("", Style::default());
         // Empty string should result in empty lines vec
         assert!(lines.is_empty() || lines.len() == 1);
+    }
+
+    #[test]
+    fn table_cells_are_separated() {
+        // Regression: cells used to concatenate into "PatternWhereRisk"
+        let text = "| Pattern | Where | Risk |\n|---|---|---|\n| lock | query.rs | panic |";
+        let lines = render(text, Style::default());
+
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        let header = rows
+            .iter()
+            .find(|r| r.contains("Pattern"))
+            .expect("header row rendered");
+        assert!(
+            header.contains("Pattern │ Where │ Risk"),
+            "cells must be separated, got: {header}"
+        );
+
+        let body = rows
+            .iter()
+            .find(|r| r.contains("lock"))
+            .expect("body row rendered");
+        assert!(body.contains("lock │ query.rs │ panic"), "got: {body}");
+
+        // Header and body are distinct lines with a rule between
+        assert!(rows.iter().any(|r| r.contains("───")));
+    }
+
+    #[test]
+    fn table_head_is_bold() {
+        let text = "| A | B |\n|---|---|\n| 1 | 2 |";
+        let lines = render(text, Style::default());
+        let header_bold = lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.as_ref() == "A" && span.style.add_modifier.contains(Modifier::BOLD)
+            })
+        });
+        assert!(header_bold, "header cells should be bold");
     }
 }
