@@ -196,19 +196,25 @@ pub fn draw_chat(f: &mut Frame, app: &mut ChatApp) {
         )));
     }
 
-    // Long lines wrap rather than overflow the right edge, so the scroll
-    // math must count rendered rows, not logical lines. Estimate each
-    // line's row count from its display width against the inner width
-    // (word wrapping can only use more rows than this, never fewer, so
-    // the estimate errs toward showing slightly older content).
-    let inner_width = msg_area.width.saturating_sub(2).max(1) as usize;
-    let rendered_rows: u16 = lines
-        .iter()
-        .map(|l| (l.width().max(1)).div_ceil(inner_width) as u16)
-        .sum();
-    app.total_lines = rendered_rows;
+    let messages_widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(app.theme.dim)),
+        )
+        .wrap(Wrap { trim: false });
 
-    let visible_height = msg_area.height.saturating_sub(2);
+    // Long lines wrap rather than overflow the right edge, so the scroll
+    // math must count rendered rows, not logical lines. line_count runs
+    // the same WordWrapper the render uses, so the count is exact; an
+    // estimate here under-counts word wrap and hides the newest rows
+    // below the viewport. The width passed is the text width inside the
+    // left/right borders; those borders take no vertical space, so the
+    // full area height is visible.
+    let inner_width = msg_area.width.saturating_sub(2).max(1);
+    app.total_lines = messages_widget.line_count(inner_width) as u16;
+
+    let visible_height = msg_area.height;
     let max_scroll = app.total_lines.saturating_sub(visible_height);
     if !app.manual_scroll {
         app.scroll = 0;
@@ -220,14 +226,7 @@ pub fn draw_chat(f: &mut Frame, app: &mut ChatApp) {
         max_scroll
     };
 
-    let messages_widget = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(app.theme.dim)),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((scroll_offset, 0));
+    let messages_widget = messages_widget.scroll((scroll_offset, 0));
     f.render_widget(messages_widget, msg_area);
 
     // Input area
