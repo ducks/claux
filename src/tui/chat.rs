@@ -468,6 +468,7 @@ async fn drive_streaming(
         // Execute tools
         let mut result_blocks = Vec::new();
         let mut interrupted_at: Option<usize> = None;
+        let mut steered_at: Option<usize> = None;
         for (idx, (id, name, input)) in tool_uses.iter().enumerate() {
             // Cancellation/steering check between tools.
             if poll_stream_key(&steer_buf, &steering)? {
@@ -475,6 +476,12 @@ async fn drive_streaming(
             }
             if cancelled.load(Ordering::Relaxed) {
                 interrupted_at = Some(idx);
+                break;
+            }
+            // A pending steering message supersedes the rest of the batch;
+            // skip it so the model reads the correction immediately.
+            if !steering.lock().expect("steering queue poisoned").is_empty() {
+                steered_at = Some(idx);
                 break;
             }
             let summary = engine.summarize_tool(name, input);
@@ -647,6 +654,27 @@ async fn drive_streaming(
             return Ok(());
         }
 
+        // A steering message superseded the rest of the batch: pair the
+        // unstarted tool_uses with synthetic results and continue the turn.
+        // No "interrupted" note is added; the injected user message below
+        // explains the skip to the model, matching Claude Code's
+        // submit-interrupt behavior.
+        if let Some(idx) = steered_at {
+            let skipped = tool_uses.len() - idx;
+            for (id, name, _input) in &tool_uses[idx..] {
+                app.add_tool(name, "skipped (steering)", ToolStatus::Error);
+                result_blocks.push(crate::api::ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: Engine::SKIPPED_FOR_STEERING.to_string(),
+                    is_error: Some(true),
+                });
+            }
+            app.add_message(
+                "system",
+                &format!("Skipped {skipped} queued tool(s) to apply your message."),
+            );
+        }
+
         engine
             .messages_mut()
             .push(crate::api::Message::tool_results(result_blocks));
@@ -728,6 +756,13 @@ async fn execute_tool_with_cancel(
             }
             if poll_stream_key(&steer_buf, &steering).unwrap_or(false) {
                 watcher_flag.store(true, Ordering::Relaxed);
+                watcher_token.cancel();
+                return;
+            }
+            // A steering message cancels the running tool but not the turn:
+            // outer_cancelled stays false, so the batch loop continues,
+            // sees the pending message, and skips the rest of the batch.
+            if !steering.lock().expect("steering queue poisoned").is_empty() {
                 watcher_token.cancel();
                 return;
             }

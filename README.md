@@ -6,7 +6,7 @@ A terminal-based AI coding assistant written in Rust. Streams responses, execute
 
 - **Streaming chat** with tool execution (Read, Write, Edit, Glob, Grep, Bash, WebFetch, Agent)
 - **Interactive permissions** — prompts before writes, `y/n/a` (always allow per-session)
-- **Mid-turn steering** — type while claux is running tools and press Enter; your message is queued and delivered to the model before its next step (Ctrl+C in the TUI interrupts outright)
+- **Mid-turn steering** — type while claux is running tools and press Enter; the running tool is cancelled, remaining queued tools are skipped, and your message reaches the model immediately (Ctrl+C in the TUI interrupts the whole turn)
 - **Session persistence** — JSONL-based, resume with `/resume` or `--resume`
 - **Compaction** — `/compact` summarizes conversation to free context
 - **Model switching** — `/model <name>` mid-conversation
