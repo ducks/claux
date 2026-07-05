@@ -32,12 +32,14 @@ pub enum PermissionResult {
 pub enum PermissionResponse {
     /// Allow this one time
     Allow,
-    /// Deny this one time
+    /// Deny this one time and cancel remaining tools in the batch
     Deny,
     /// Always allow this tool for the rest of the session
     AlwaysAllow,
     /// Always allow this specific command (for Bash tool only)
     AlwaysAllowCommand(String),
+    /// Deny and cancel remaining tools, with a message sent to the model
+    DenyAndCancel,
 }
 
 pub struct PermissionChecker {

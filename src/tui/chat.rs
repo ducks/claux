@@ -72,6 +72,12 @@ pub struct ChatApp {
     pub steer_buf: Arc<Mutex<String>>,
     /// Double-press state for Ctrl+C so one stray press can't kill the app.
     pub ctrl_c: crate::utils::CtrlCArm,
+    /// Bumped whenever `messages` changes; keys the rendered-line cache in
+    /// ui::draw_chat so history isn't re-rendered on every frame.
+    pub messages_rev: u64,
+    /// Cached rendering of `messages` (see ui::draw_chat). None until the
+    /// first draw or after invalidation.
+    pub history_cache: Option<super::ui::HistoryCache>,
     /// Displayed in the header. Defaults to CARGO_PKG_VERSION; overridable
     /// so snapshot tests can pin it to a stable value across version bumps.
     pub version: String,
@@ -98,11 +104,14 @@ impl ChatApp {
             theme,
             steer_buf: Arc::new(Mutex::new(String::new())),
             ctrl_c: crate::utils::CtrlCArm::default(),
+            messages_rev: 0,
+            history_cache: None,
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 
     pub fn add_message(&mut self, role: &str, content: &str) {
+        self.messages_rev += 1;
         self.messages.push(ChatMessage::Text {
             role: role.to_string(),
             content: content.to_string(),
@@ -114,6 +123,7 @@ impl ChatApp {
         // turn that opens with tool calls (no text) leaves the "thinking"
         // spinner running under tool output and permission prompts.
         self.thinking = false;
+        self.messages_rev += 1;
         self.messages.push(ChatMessage::Tool {
             name: name.to_string(),
             summary: summary.to_string(),
@@ -123,6 +133,7 @@ impl ChatApp {
 
     /// Update the last tool message's status (e.g., from Running to Success/Error).
     pub fn update_last_tool_status(&mut self, new_status: ToolStatus) {
+        self.messages_rev += 1;
         if let Some(ChatMessage::Tool { status, .. }) = self.messages.last_mut() {
             *status = new_status;
         }
@@ -130,6 +141,8 @@ impl ChatApp {
 
     pub fn set_theme(&mut self, theme_name: ThemeName) {
         self.theme = Theme::from_name(theme_name);
+        // Cached lines bake in theme colors
+        self.messages_rev += 1;
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -400,17 +413,26 @@ async fn drive_streaming(
     let cancelled = Arc::new(AtomicBool::new(false));
 
     loop {
+        // A persistent interval, not a fresh sleep per select iteration: a
+        // sleep future recreated each loop never fires while stream chunks
+        // arrive faster than its duration, which would starve redraws and
+        // key polling exactly when the model streams quickly.
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 Some(event) = api_rx.recv() => {
                     match event {
                         crate::api::ApiEvent::Text(t) => {
+                            // No draw here: chunks can arrive far faster
+                            // than frames are worth painting. The 50ms
+                            // tick below redraws, coalescing however many
+                            // chunks arrived since the last frame.
                             app.stream_buffer.push_str(&t);
                             text_buf.push_str(&t);
                             if app.thinking {
                                 app.thinking = false;
                             }
-                            terminal.draw(|f| ui::draw_chat(f, app))?;
                         }
                         crate::api::ApiEvent::ToolUse { id, name, input } => {
                             tool_uses.push((id, name, input));
@@ -424,13 +446,14 @@ async fn drive_streaming(
                         }
                     }
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                _ = tick.tick() => {
                     if poll_stream_key(&steer_buf, &steering)? {
                         cancelled.store(true, Ordering::Relaxed);
                         break;
                     }
-                    // Redraw periodically so the spinner animates and the
-                    // steering buffer stays visible as the user types
+                    // The tick is the only draw during streaming: it
+                    // coalesces all chunks since the last frame, animates
+                    // the spinner, and keeps the steering buffer visible.
                     terminal.draw(|f| ui::draw_chat(f, app))?;
                 }
             }
@@ -541,28 +564,56 @@ async fn drive_streaming(
                     app.mode = Mode::Permission;
                     terminal.draw(|f| ui::draw_chat(f, app))?;
 
+                    let mut perm_input = String::new();
+
                     let response = loop {
                         if event::poll(std::time::Duration::from_millis(50))? {
                             if let Event::Key(key) = event::read()? {
                                 match key.code {
-                                    KeyCode::Char('y') | KeyCode::Enter => {
+                                    KeyCode::Char('y') | KeyCode::Enter
+                                        if perm_input.is_empty() =>
+                                    {
                                         break PermissionResponse::Allow;
                                     }
-                                    KeyCode::Char('a') => {
+                                    KeyCode::Char('a') if perm_input.is_empty() => {
                                         break PermissionResponse::AlwaysAllow;
                                     }
-                                    KeyCode::Char('n') | KeyCode::Esc => {
+                                    KeyCode::Char('n') if perm_input.is_empty() => {
                                         break PermissionResponse::Deny;
+                                    }
+                                    KeyCode::Esc if perm_input.is_empty() => {
+                                        break PermissionResponse::Deny;
+                                    }
+                                    KeyCode::Enter if !perm_input.is_empty() => {
+                                        // User typed a message: deny current tool
+                                        // and inject the message as steering.
+                                        steering
+                                            .lock()
+                                            .expect("steering queue poisoned")
+                                            .push_back(perm_input.clone());
+                                        app.add_message("user", &perm_input);
+                                        break PermissionResponse::DenyAndCancel;
+                                    }
+                                    KeyCode::Backspace if !perm_input.is_empty() => {
+                                        perm_input.pop();
+                                    }
+                                    KeyCode::Char(c) => {
+                                        perm_input.push(c);
                                     }
                                     _ => {}
                                 }
                             }
                         }
+                        // Redraw so the typed text stays visible
+                        app.status =
+                            format!("{} | deny and message: {}", engine.model(), perm_input);
+                        terminal.draw(|f| ui::draw_chat(f, app))?;
                     };
 
                     app.permission_prompt = None;
                     app.permission_details = None;
                     app.mode = Mode::Streaming;
+                    app.status = format!("{} | {}", engine.model(), engine.cost.format_summary());
 
                     match response {
                         PermissionResponse::Allow => {
@@ -598,10 +649,20 @@ async fn drive_streaming(
                             )
                             .await
                         }
-                        PermissionResponse::Deny => crate::tools::ToolOutput {
-                            content: "Permission denied by user.".to_string(),
-                            is_error: true,
-                        },
+                        PermissionResponse::Deny => {
+                            cancelled.store(true, Ordering::Relaxed);
+                            crate::tools::ToolOutput {
+                                content: "Permission denied by user.".to_string(),
+                                is_error: true,
+                            }
+                        }
+                        PermissionResponse::DenyAndCancel => {
+                            cancelled.store(true, Ordering::Relaxed);
+                            crate::tools::ToolOutput {
+                                content: "Permission denied by user.".to_string(),
+                                is_error: true,
+                            }
+                        }
                     }
                 }
             };
