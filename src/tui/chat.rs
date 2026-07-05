@@ -70,6 +70,8 @@ pub struct ChatApp {
     /// steering message. Behind Arc<Mutex> because the during-tool key
     /// watcher runs on a separate task.
     pub steer_buf: Arc<Mutex<String>>,
+    /// Double-press state for Ctrl+C so one stray press can't kill the app.
+    pub ctrl_c: crate::utils::CtrlCArm,
     /// Displayed in the header. Defaults to CARGO_PKG_VERSION; overridable
     /// so snapshot tests can pin it to a stable value across version bumps.
     pub version: String,
@@ -95,6 +97,7 @@ impl ChatApp {
             thinking: false,
             theme,
             steer_buf: Arc::new(Mutex::new(String::new())),
+            ctrl_c: crate::utils::CtrlCArm::default(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
@@ -133,9 +136,22 @@ impl ChatApp {
     }
 
     fn handle_input_key(&mut self, key: KeyEvent) {
+        // Any key other than Ctrl+C stands down a pending exit confirmation.
+        let is_ctrl_c = key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c');
+        if !is_ctrl_c && self.ctrl_c.is_armed() {
+            self.ctrl_c.disarm();
+            self.status = format!("{} | /help for commands", self.model);
+        }
+
         match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c'))
-            | (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                if self.ctrl_c.press() {
+                    self.should_exit = true;
+                } else {
+                    self.status = "Press Ctrl+C again to exit".to_string();
+                }
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
                 self.should_exit = true;
             }
             (_, KeyCode::Enter) => {
@@ -861,6 +877,40 @@ mod tests {
 
     fn test_app() -> ChatApp {
         ChatApp::new("test-model", Theme::dark())
+    }
+
+    fn ctrl_c_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn single_ctrl_c_warns_double_exits() {
+        let mut app = test_app();
+        app.handle_key(ctrl_c_key());
+        assert!(!app.should_exit, "first Ctrl+C must not exit");
+        assert!(app.status.contains("again"), "status should show the hint");
+        app.handle_key(ctrl_c_key());
+        assert!(app.should_exit, "second Ctrl+C must exit");
+    }
+
+    #[test]
+    fn typing_disarms_pending_ctrl_c() {
+        let mut app = test_app();
+        app.handle_key(ctrl_c_key());
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(!app.status.contains("again"), "hint should clear");
+        app.handle_key(ctrl_c_key());
+        assert!(
+            !app.should_exit,
+            "Ctrl+C after typing re-arms instead of exiting"
+        );
+    }
+
+    #[test]
+    fn ctrl_d_still_exits_immediately() {
+        let mut app = test_app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(app.should_exit);
     }
 
     #[test]

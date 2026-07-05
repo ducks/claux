@@ -52,16 +52,32 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
 
     println!("\x1b[1;36mclaux\x1b[0m v{}", env!("CARGO_PKG_VERSION"));
     println!("Model: \x1b[33m{}\x1b[0m", engine.model());
-    println!("Type /help for commands, Ctrl+D to exit.");
+    println!("Type /help for commands, Ctrl+D (or double Ctrl+C) to exit.");
     println!("\x1b[2mWhile claux is working, type a message and press Enter to steer it.\x1b[0m\n");
+
+    // Double-press guard: a single Ctrl+C warns instead of killing the app.
+    // Registering the tokio handler also disables the default SIGINT kill.
+    let mut ctrl_c = crate::utils::CtrlCArm::default();
 
     loop {
         // Read user input
         print!("\x1b[1;34m>\x1b[0m ");
         stdout().flush()?;
-        let input = match stdin_rx.recv().await {
-            Some(input) => input,
-            None => break, // Ctrl+D
+        let input = loop {
+            tokio::select! {
+                line = stdin_rx.recv() => break line,
+                _ = tokio::signal::ctrl_c() => {
+                    if ctrl_c.press() {
+                        break None;
+                    }
+                    println!("\n  \x1b[2m(press Ctrl+C again to exit)\x1b[0m");
+                    print!("\x1b[1;34m>\x1b[0m ");
+                    stdout().flush()?;
+                }
+            }
+        };
+        let Some(input) = input else {
+            break; // Ctrl+D or confirmed double Ctrl+C
         };
 
         let trimmed = input.trim();
@@ -106,6 +122,7 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
         // all race in one select loop. Typed lines become steering messages
         // while the turn runs; permission prompts consume the next line.
         let mut submit_result: Option<Result<()>> = None;
+        let mut exit_app = false;
         {
             let submit_fut = engine.submit_streaming(trimmed, tx);
             tokio::pin!(submit_fut);
@@ -117,6 +134,13 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
                 tokio::select! {
                     res = &mut submit_fut, if submit_result.is_none() => {
                         submit_result = Some(res);
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        if ctrl_c.press() {
+                            exit_app = true;
+                            break;
+                        }
+                        println!("\n  \x1b[2m(press Ctrl+C again to exit claux; type a message + Enter to steer it instead)\x1b[0m");
                     }
                     event = rx.recv() => {
                         let Some(event) = event else {
@@ -209,6 +233,11 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
         // Save assistant response
         if let Some(last) = engine.messages().last() {
             let _ = session::append_message(&session_path, last);
+        }
+
+        if exit_app {
+            println!("\n\x1b[2mTurn abandoned; exiting.\x1b[0m");
+            break;
         }
     }
 
