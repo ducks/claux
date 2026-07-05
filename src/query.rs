@@ -101,6 +101,48 @@ impl Engine {
         drained
     }
 
+    /// True if a steering message is waiting. Tool batches check this
+    /// between tools to decide whether to skip the rest of the batch.
+    pub fn steering_pending(&self) -> bool {
+        !self
+            .steering
+            .lock()
+            .expect("steering queue poisoned")
+            .is_empty()
+    }
+
+    /// Synthetic tool_result content for tools skipped because the user
+    /// sent a steering message before they ran.
+    pub const SKIPPED_FOR_STEERING: &'static str =
+        "Skipped: superseded by a new user message before this tool ran.";
+
+    /// Execute a tool, cancelling it if a steering message arrives while it
+    /// runs. Mirrors Claude Code's submit-interrupt: a mid-batch user
+    /// message shouldn't wait out a doomed cargo test. The watcher polls
+    /// the queue at 50ms, the same cadence the TUI polls the keyboard.
+    async fn execute_tool_steerable(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+    ) -> crate::tools::ToolOutput {
+        let token = tokio_util::sync::CancellationToken::new();
+        let steering = self.steering.clone();
+        let watch_token = token.clone();
+        let watcher = tokio::spawn(async move {
+            loop {
+                if !steering.lock().expect("steering queue poisoned").is_empty() {
+                    watch_token.cancel();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+
+        let output = self.tools.execute(name, input, token).await;
+        watcher.abort();
+        output
+    }
+
     /// Set the auto-compact threshold (0.0-1.0).
     pub fn set_auto_compact_threshold(&mut self, threshold: f64) {
         self.auto_compact_threshold = threshold.clamp(0.0, 1.0);
@@ -698,18 +740,32 @@ impl Engine {
             // Execute tools
             let mut result_blocks = Vec::new();
             for (id, name, input) in &tool_uses {
+                // A steering message supersedes the rest of the batch:
+                // give the remaining tools synthetic results so the model
+                // reads the user's correction instead of finishing a plan
+                // it may be about to abandon.
+                if self.steering_pending() {
+                    let _ = tx
+                        .send(StreamEvent::ToolResult {
+                            name: name.clone(),
+                            content: Self::SKIPPED_FOR_STEERING.to_string(),
+                            is_error: true,
+                        })
+                        .await;
+                    result_blocks.push(ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: Self::SKIPPED_FOR_STEERING.to_string(),
+                        is_error: Some(true),
+                    });
+                    continue;
+                }
+
                 let is_read_only = self.tools.is_read_only(name);
                 let perm = self.permissions.check(name, input, is_read_only);
 
                 let tool_output = match perm {
                     PermissionResult::Allow => {
-                        self.tools
-                            .execute(
-                                name,
-                                input.clone(),
-                                tokio_util::sync::CancellationToken::new(),
-                            )
-                            .await
+                        self.execute_tool_steerable(name, input.clone()).await
                     }
                     PermissionResult::Deny(reason) => crate::tools::ToolOutput {
                         content: format!("Permission denied: {reason}"),
@@ -738,33 +794,15 @@ impl Engine {
 
                         match resp_rx.await {
                             Ok(PermissionResponse::Allow) => {
-                                self.tools
-                                    .execute(
-                                        name,
-                                        input.clone(),
-                                        tokio_util::sync::CancellationToken::new(),
-                                    )
-                                    .await
+                                self.execute_tool_steerable(name, input.clone()).await
                             }
                             Ok(PermissionResponse::AlwaysAllow) => {
                                 self.permissions.always_allow(name);
-                                self.tools
-                                    .execute(
-                                        name,
-                                        input.clone(),
-                                        tokio_util::sync::CancellationToken::new(),
-                                    )
-                                    .await
+                                self.execute_tool_steerable(name, input.clone()).await
                             }
                             Ok(PermissionResponse::AlwaysAllowCommand(ref cmd)) => {
                                 self.permissions.always_allow_command(cmd);
-                                self.tools
-                                    .execute(
-                                        name,
-                                        input.clone(),
-                                        tokio_util::sync::CancellationToken::new(),
-                                    )
-                                    .await
+                                self.execute_tool_steerable(name, input.clone()).await
                             }
                             Ok(PermissionResponse::Deny) | Err(_) => crate::tools::ToolOutput {
                                 content: "Permission denied by user.".to_string(),
@@ -956,19 +994,20 @@ mod tests {
         }
     }
 
-    /// Provider that emits one Glob tool_use on the first call and ends the
-    /// turn on the second. On the first call it also pushes a steering
-    /// message into the queue, deterministically simulating a user typing
-    /// while tools run.
-    struct SteeringMockProvider {
+    /// Provider that emits a scripted set of tool_uses on its first call
+    /// and ends the turn on the second. Optionally pushes a steering
+    /// message during the first call, deterministically simulating a user
+    /// typing while the model streams.
+    struct ScriptedProvider {
         calls: std::sync::atomic::AtomicUsize,
-        steering: SteeringQueue,
+        first_round: Vec<(String, String, serde_json::Value)>,
+        push_on_first_call: Option<(SteeringQueue, String)>,
     }
 
     #[async_trait::async_trait]
-    impl Provider for SteeringMockProvider {
+    impl Provider for ScriptedProvider {
         fn name(&self) -> &str {
-            "steering-mock"
+            "scripted-mock"
         }
 
         fn model(&self) -> &str {
@@ -987,37 +1026,38 @@ mod tests {
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (tx, rx) = mpsc::channel(10);
             if call == 0 {
-                self.steering
-                    .lock()
-                    .unwrap()
-                    .push_back("also check the auth module".to_string());
-                let _ = tx
-                    .send(ApiEvent::ToolUse {
-                        id: "tu_1".to_string(),
-                        name: "Glob".to_string(),
-                        input: serde_json::json!({"pattern": "*.does-not-exist"}),
-                    })
-                    .await;
+                if let Some((queue, text)) = &self.push_on_first_call {
+                    queue.lock().unwrap().push_back(text.clone());
+                }
+                for (id, name, input) in &self.first_round {
+                    let _ = tx
+                        .send(ApiEvent::ToolUse {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                        })
+                        .await;
+                }
             }
             let _ = tx.send(ApiEvent::Done).await;
             Ok(rx)
         }
     }
 
-    #[tokio::test]
-    async fn test_steering_message_injected_after_tool_results() {
+    fn steering_engine(
+        first_round: Vec<(String, String, serde_json::Value)>,
+        push_on_first_call: Option<String>,
+    ) -> Engine {
         let steering = SteeringQueue::default();
-        let provider = Box::new(SteeringMockProvider {
+        let provider = Box::new(ScriptedProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            steering: steering.clone(),
+            first_round,
+            push_on_first_call: push_on_first_call.map(|t| (steering.clone(), t)),
         });
-        let tools = ToolRegistry::without_agent();
-        let permissions = PermissionChecker::new(PermissionMode::Bypass);
-
-        let mut engine = Engine {
+        Engine {
             provider,
-            tools,
-            permissions,
+            tools: ToolRegistry::without_agent(),
+            permissions: PermissionChecker::new(PermissionMode::Bypass),
             messages: vec![],
             system_prompt: String::new(),
             model: "test".to_string(),
@@ -1025,15 +1065,28 @@ mod tests {
             auto_compact_threshold: 0.8,
             steering,
             cost: CostTracker::new("test"),
-        };
+        }
+    }
 
+    async fn run_streaming(engine: &mut Engine, prompt: &str) {
         let (tx, mut rx) = mpsc::channel(64);
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        engine
-            .submit_streaming("do a deep review", tx)
-            .await
-            .unwrap();
+        engine.submit_streaming(prompt, tx).await.unwrap();
         drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_steering_message_injected_after_tool_results() {
+        let mut engine = steering_engine(
+            vec![(
+                "tu_1".to_string(),
+                "Glob".to_string(),
+                serde_json::json!({"pattern": "*.does-not-exist"}),
+            )],
+            Some("also check the auth module".to_string()),
+        );
+
+        run_streaming(&mut engine, "do a deep review").await;
 
         // Expected: user prompt, assistant(tool_use), user(tool_results),
         // then the steering text as its own user message before round two.
@@ -1051,6 +1104,86 @@ mod tests {
         }
         // Queue fully drained
         assert!(engine.steering_queue().lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pending_steering_skips_whole_batch() {
+        let mut engine = steering_engine(
+            vec![
+                (
+                    "tu_1".to_string(),
+                    "Glob".to_string(),
+                    serde_json::json!({"pattern": "*.a"}),
+                ),
+                (
+                    "tu_2".to_string(),
+                    "Glob".to_string(),
+                    serde_json::json!({"pattern": "*.b"}),
+                ),
+            ],
+            Some("wrong direction, stop".to_string()),
+        );
+
+        run_streaming(&mut engine, "explore").await;
+
+        // Both tools were superseded by the steering message: their
+        // tool_results are synthetic skips, not Glob output.
+        let msgs = engine.messages();
+        let crate::api::MessageContent::Blocks(blocks) = &msgs[2].content else {
+            panic!("expected tool results, got {msgs:?}");
+        };
+        assert_eq!(blocks.len(), 2);
+        for block in blocks {
+            match block {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    assert_eq!(content, Engine::SKIPPED_FOR_STEERING);
+                    assert_eq!(*is_error, Some(true));
+                }
+                other => panic!("expected ToolResult, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_steering_cancels_running_tool() {
+        // A slow tool (sleep 5) must be cancelled when steering arrives
+        // ~200ms in, not waited out.
+        let mut engine = steering_engine(
+            vec![(
+                "tu_1".to_string(),
+                "Bash".to_string(),
+                serde_json::json!({"command": "sleep 5"}),
+            )],
+            None,
+        );
+
+        let steering = engine.steering_queue();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            steering
+                .lock()
+                .unwrap()
+                .push_back("no, run it in nix-shell instead".to_string());
+        });
+
+        let start = std::time::Instant::now();
+        run_streaming(&mut engine, "run the tests").await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "steering should cancel the running tool, not wait it out (took {:?})",
+            start.elapsed()
+        );
+
+        // The steering message made it into the conversation.
+        let last = engine.messages().last().unwrap();
+        match &last.content {
+            crate::api::MessageContent::Text(t) => {
+                assert_eq!(t, "no, run it in nix-shell instead")
+            }
+            other => panic!("expected steering message last, got {other:?}"),
+        }
     }
 
     #[tokio::test]
