@@ -77,6 +77,9 @@ impl Tool for BashTool {
             .arg(&params.command)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // If the surrounding future is dropped (abandoned turn, killed
+            // sub-agent), the command must not outlive it as an orphan.
+            .kill_on_drop(true)
             .spawn()
         {
             Ok(c) => c,

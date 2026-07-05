@@ -144,10 +144,10 @@ fn execute_model(new_model: Option<String>, engine: &mut Engine) -> Result<Strin
         None => Ok(format!(
             "Current model: \x1b[33m{}\x1b[0m\n\n\
              Available:\n  \
-             claude-opus-4-20250514\n  \
-             claude-sonnet-4-20250514\n  \
+             claude-opus-4-8\n  \
+             claude-sonnet-5\n  \
              claude-haiku-4-5-20251001\n\n\
-             Use /model <name> to switch.",
+             Use /model <name> to switch (any provider model id works).",
             engine.model()
         )),
     }
