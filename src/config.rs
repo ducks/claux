@@ -157,7 +157,7 @@ fn default_trigger() -> HookTrigger {
 }
 
 fn default_model() -> String {
-    "claude-sonnet-4-20250514".to_string()
+    "claude-sonnet-5".to_string()
 }
 
 fn default_api_key_env() -> String {

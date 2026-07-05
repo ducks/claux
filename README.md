@@ -8,10 +8,10 @@ A terminal-based AI coding assistant written in Rust. Streams responses, execute
 - **Interactive permissions** — prompts before writes, `y/n/a` (always allow per-session)
 - **Mid-turn steering** — type while claux is running tools and press Enter; the running tool is cancelled, remaining queued tools are skipped, and your message reaches the model immediately (Ctrl+C in the TUI interrupts the whole turn)
 - **Double Ctrl+C to exit** — a single Ctrl+C warns instead of killing the app; press it twice within 2s to quit (Ctrl+D still exits immediately)
-- **Session persistence** — JSONL-based, resume with `/resume` or `--resume`
+- **Session persistence** — SQLite-backed with search, resume with `/resume` or `--resume`
 - **Compaction** — `/compact` summarizes conversation to free context
 - **Model switching** — `/model <name>` mid-conversation
-- **Sub-agents** — Agent tool spawns scoped sub-conversations
+- **Sub-agents** — Agent tool spawns scoped sub-conversations. Caveat: sub-agents currently run without permission prompts, so approving the Agent tool authorizes everything it does; permission inheritance is planned
 - **Auto-compact** — triggers when conversation gets large
 - **Cost tracking** — per-model token usage and USD estimates
 - **Prompt caching** — automatic Anthropic cache breakpoints on the system prompt and conversation, cutting input cost and latency on long sessions
@@ -112,7 +112,7 @@ claux --resume 20260401-143022
 Global: `~/.config/claux/config.toml`
 
 ```toml
-model = "claude-sonnet-4-20250514"
+model = "claude-sonnet-5"
 permission_mode = "default"  # default | accept-edits | bypass | plan
 ```
 
