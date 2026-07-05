@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -19,7 +19,10 @@ pub fn draw_chat(f: &mut Frame, app: &mut ChatApp) {
             .as_ref()
             .map(|d| d.len())
             .unwrap_or(0);
-        (detail_lines as u16 + 4).min(f.area().height / 2)
+        // Content: summary + blank + details + blank + y/n/a options,
+        // plus 2 border rows. Undersizing this clips the options line,
+        // leaving the user with a question and no visible answers.
+        (detail_lines as u16 + 6).min(f.area().height / 2)
     } else {
         3
     };
@@ -193,7 +196,17 @@ pub fn draw_chat(f: &mut Frame, app: &mut ChatApp) {
         )));
     }
 
-    app.total_lines = lines.len() as u16;
+    // Long lines wrap rather than overflow the right edge, so the scroll
+    // math must count rendered rows, not logical lines. Estimate each
+    // line's row count from its display width against the inner width
+    // (word wrapping can only use more rows than this, never fewer, so
+    // the estimate errs toward showing slightly older content).
+    let inner_width = msg_area.width.saturating_sub(2).max(1) as usize;
+    let rendered_rows: u16 = lines
+        .iter()
+        .map(|l| (l.width().max(1)).div_ceil(inner_width) as u16)
+        .sum();
+    app.total_lines = rendered_rows;
 
     let visible_height = msg_area.height.saturating_sub(2);
     let max_scroll = app.total_lines.saturating_sub(visible_height);
@@ -213,6 +226,7 @@ pub fn draw_chat(f: &mut Frame, app: &mut ChatApp) {
                 .borders(Borders::LEFT | Borders::RIGHT)
                 .border_style(Style::default().fg(app.theme.dim)),
         )
+        .wrap(Wrap { trim: false })
         .scroll((scroll_offset, 0));
     f.render_widget(messages_widget, msg_area);
 
