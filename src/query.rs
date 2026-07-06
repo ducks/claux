@@ -33,6 +33,9 @@ pub struct Engine {
 /// Events sent from the engine to the UI during streaming.
 pub enum StreamEvent {
     Text(String),
+    /// Engine status line (compaction, steering delivery). Display-only:
+    /// never part of the assistant's response text.
+    Notice(String),
     ToolStart {
         name: String,
         id: String,
@@ -367,254 +370,56 @@ impl Engine {
         err.contains("max_output_tokens") || err.contains("max_tokens_exceeded")
     }
 
-    /// Submit a user message and run the full turn loop (chat → tools → chat → ...).
-    /// Includes error recovery for prompt-too-long and max-output-tokens.
-    /// Returns the final assistant text response.
+    /// Submit a user message and run the full turn loop, returning the
+    /// final assistant text. Non-interactive: tools that would ask for
+    /// confirmation are denied. This is a thin collector over the same
+    /// run_turn that powers submit_streaming, so the two can't drift.
     pub async fn submit(&mut self, user_input: &str) -> Result<String> {
-        let _ = self.maybe_auto_compact().await; // Ignore result for non-streaming
-        self.messages.push(Message::user(user_input));
+        let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
 
-        let mut full_response = String::new();
-        let mut recovery_attempts = 0;
-        const MAX_RECOVERY: u32 = 3;
-
-        // Turn loop: keep going as long as the assistant requests tool use
-        loop {
-            // Deliver any steering messages queued since the last API call
-            self.inject_steering();
-
-            let tool_defs = self.tools.definitions();
-            let stream_result = self
-                .provider
-                .stream(
-                    &self.messages,
-                    &self.system_prompt,
-                    &tool_defs,
-                    self.max_tokens,
-                )
-                .await;
-
-            // Handle connection-level errors (413, etc.)
-            let mut rx = match stream_result {
-                Ok(rx) => rx,
-                Err(e) => {
-                    let err_str = e.to_string();
-                    if Self::is_prompt_too_long(&err_str) && recovery_attempts < MAX_RECOVERY {
-                        recovery_attempts += 1;
-                        tracing::warn!(
-                            "Prompt too long (attempt {}), compacting and retrying",
-                            recovery_attempts
-                        );
-                        self.compact().await?;
-                        continue;
-                    }
-                    return Err(e);
-                }
-            };
-
-            let mut text_buf = String::new();
-            let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
-            let mut had_error = false;
-
+        let collector = tokio::spawn(async move {
+            let mut text = String::new();
             while let Some(event) = rx.recv().await {
-                match event {
-                    ApiEvent::Text(t) => {
-                        text_buf.push_str(&t);
-                    }
-                    ApiEvent::ToolUse { id, name, input } => {
-                        tool_uses.push((id, name, input));
-                    }
-                    ApiEvent::Usage(usage) => {
-                        self.cost.add_usage(&usage);
-                    }
-                    ApiEvent::Done => break,
-                    ApiEvent::Error(e) => {
-                        // Check for recoverable stream-level errors
-                        if Self::is_prompt_too_long(&e) && recovery_attempts < MAX_RECOVERY {
-                            recovery_attempts += 1;
-                            tracing::warn!(
-                                "Prompt too long during stream (attempt {}), compacting",
-                                recovery_attempts
-                            );
-                            had_error = true;
-                            break;
-                        }
-                        if Self::is_max_output_tokens(&e) && self.max_tokens < 64_000 {
-                            tracing::warn!(
-                                "Max output tokens hit, escalating {} -> {}",
-                                self.max_tokens,
-                                self.max_tokens * 2
-                            );
-                            self.max_tokens = (self.max_tokens * 2).min(64_000);
-                            had_error = true;
-                            break;
-                        }
-                        return Err(anyhow::anyhow!("API error: {e}"));
-                    }
+                if let StreamEvent::Text(t) = event {
+                    text.push_str(&t);
                 }
             }
+            text
+        });
 
-            // If we hit a recoverable error, compact/adjust and retry
-            if had_error {
-                if recovery_attempts > 0 {
-                    self.compact().await?;
-                }
-                continue;
-            }
-
-            // Build the assistant message
-            let mut blocks = Vec::new();
-            if !text_buf.is_empty() {
-                blocks.push(ContentBlock::Text {
-                    text: text_buf.clone(),
-                });
-                full_response.push_str(&text_buf);
-            }
-            for (id, name, input) in &tool_uses {
-                blocks.push(ContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                });
-            }
-
-            if !blocks.is_empty() {
-                self.messages.push(Message::assistant_blocks(blocks));
-            }
-
-            // If no tool use, we're done
-            if tool_uses.is_empty() {
-                break;
-            }
-
-            // Execute tools and collect results (with output truncation)
-            // Partition tools into parallel (read-only) and sequential (write) groups
-            let result_blocks = self.execute_tools_parallel(&tool_uses).await;
-
-            self.messages.push(Message::tool_results(result_blocks));
-        }
-
-        Ok(full_response)
+        let result = self.run_turn(user_input, tx, false).await;
+        let text = collector.await.unwrap_or_default();
+        result?;
+        Ok(text)
     }
 
-    /// Execute tools with parallel execution for read-only tools.
-    /// Returns result blocks in the same order as tool_uses.
-    async fn execute_tools_parallel(
-        &mut self,
-        tool_uses: &[(String, String, serde_json::Value)],
-    ) -> Vec<ContentBlock> {
-        // Partition tools into read-only (parallel) and write (sequential)
-        let mut parallel_tools = Vec::new();
-        let mut sequential_tools = Vec::new();
-
-        for (idx, (id, name, input)) in tool_uses.iter().enumerate() {
-            let is_read_only = self.tools.is_read_only(name);
-            let perm = self.permissions.check(name, input, is_read_only);
-
-            // Only read-only AND auto-allowed tools can run in parallel
-            let can_parallelize = is_read_only && matches!(perm, PermissionResult::Allow);
-
-            if can_parallelize {
-                parallel_tools.push((idx, id.clone(), name.clone(), input.clone()));
-            } else {
-                sequential_tools.push((idx, id.clone(), name.clone(), input.clone(), perm));
-            }
-        }
-
-        // Execute parallel tools concurrently
-        // Since all tool implementations use &self (immutable), we can safely
-        // execute multiple read-only tools in parallel
-        let tools_ref = &self.tools;
-        let parallel_futures: Vec<_> = parallel_tools
-            .iter()
-            .map(|(idx, id, name, input)| async move {
-                let result = tools_ref
-                    .execute(
-                        name,
-                        input.clone(),
-                        tokio_util::sync::CancellationToken::new(),
-                    )
-                    .await;
-                (*idx, id.clone(), result)
-            })
-            .collect();
-
-        let parallel_results = futures_util::future::join_all(parallel_futures).await;
-
-        // Execute sequential tools one by one
-        let mut sequential_results = Vec::new();
-        for (idx, id, name, input, perm) in sequential_tools {
-            let tool_output = match perm {
-                PermissionResult::Allow => {
-                    self.tools
-                        .execute(
-                            &name,
-                            input.clone(),
-                            tokio_util::sync::CancellationToken::new(),
-                        )
-                        .await
-                }
-                PermissionResult::Deny(reason) => crate::tools::ToolOutput {
-                    content: format!("Permission denied: {reason}"),
-                    is_error: true,
-                },
-                PermissionResult::Ask { message, .. } => {
-                    // Non-streaming mode (`-p`/one-shot) has no interactive prompt to
-                    // ask the user, so a tool requiring confirmation must be denied
-                    // rather than silently auto-allowed. Set permission_mode to
-                    // accept-edits or bypass in config.toml to run tools that would
-                    // otherwise ask.
-                    crate::tools::ToolOutput {
-                        content: format!(
-                            "Permission denied: {message} (one-shot mode has no prompt; set permission_mode in config.toml to allow)"
-                        ),
-                        is_error: true,
-                    }
-                }
-            };
-            sequential_results.push((idx, id, tool_output));
-        }
-
-        // Combine and sort results back into original order
-        let mut all_results: Vec<(usize, String, crate::tools::ToolOutput)> = Vec::new();
-        all_results.extend(parallel_results);
-        all_results.extend(sequential_results);
-        all_results.sort_by_key(|(idx, _, _)| *idx);
-
-        // Build result blocks
-        let mut result_blocks = Vec::new();
-        for (_, id, tool_output) in all_results {
-            // Truncate large tool outputs to avoid context overflow
-            let (content, was_truncated) = compact::truncate_tool_output(&tool_output.content);
-            if was_truncated {
-                tracing::debug!("Truncated tool output for {}", id);
-            }
-
-            result_blocks.push(ContentBlock::ToolResult {
-                tool_use_id: id,
-                content,
-                is_error: if tool_output.is_error {
-                    Some(true)
-                } else {
-                    None
-                },
-            });
-        }
-
-        result_blocks
-    }
-
-    /// Submit with streaming callbacks (for the REPL).
+    /// Submit with streaming callbacks (for the REPL). Interactive: tools
+    /// that need confirmation emit PermissionRequest events and wait.
     pub async fn submit_streaming(
         &mut self,
         user_input: &str,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
+        self.run_turn(user_input, tx, true).await
+    }
+
+    /// The turn loop: chat -> tools -> chat -> ... until the assistant
+    /// stops requesting tools. Handles steering injection, recoverable API
+    /// errors (prompt-too-long -> compact, max-output-tokens -> escalate),
+    /// and tool execution. `interactive` decides what happens when a tool
+    /// needs user confirmation: emit a PermissionRequest event and wait,
+    /// or deny with a pointer at permission_mode config.
+    async fn run_turn(
+        &mut self,
+        user_input: &str,
+        tx: mpsc::Sender<StreamEvent>,
+        interactive: bool,
+    ) -> Result<()> {
         let compacted = self.maybe_auto_compact().await?;
         if compacted {
             let _ = tx
-                .send(StreamEvent::Text(
-                    "\n[conversation auto-compacted to free context]\n".to_string(),
+                .send(StreamEvent::Notice(
+                    "conversation auto-compacted to free context".to_string(),
                 ))
                 .await;
         }
@@ -628,7 +433,7 @@ impl Engine {
             // and tell the UI they're now in the conversation.
             for text in self.inject_steering() {
                 let _ = tx
-                    .send(StreamEvent::Text(format!("\n[steering sent: {text}]\n")))
+                    .send(StreamEvent::Notice(format!("steering sent: {text}")))
                     .await;
             }
 
@@ -650,8 +455,8 @@ impl Engine {
                     if Self::is_prompt_too_long(&err_str) && recovery_attempts < MAX_RECOVERY {
                         recovery_attempts += 1;
                         let _ = tx
-                            .send(StreamEvent::Text(
-                                "\n[compacting conversation...]\n".to_string(),
+                            .send(StreamEvent::Notice(
+                                "compacting conversation...".to_string(),
                             ))
                             .await;
                         self.compact().await?;
@@ -691,8 +496,8 @@ impl Engine {
                         if Self::is_prompt_too_long(&e) && recovery_attempts < MAX_RECOVERY {
                             recovery_attempts += 1;
                             let _ = tx
-                                .send(StreamEvent::Text(
-                                    "\n[compacting conversation...]\n".to_string(),
+                                .send(StreamEvent::Notice(
+                                    "compacting conversation...".to_string(),
                                 ))
                                 .await;
                             self.compact().await?;
@@ -737,112 +542,182 @@ impl Engine {
                 break;
             }
 
-            // Execute tools
-            let mut result_blocks = Vec::new();
-            for (id, name, input) in &tool_uses {
-                // A steering message supersedes the rest of the batch:
-                // give the remaining tools synthetic results so the model
-                // reads the user's correction instead of finishing a plan
-                // it may be about to abandon.
-                if self.steering_pending() {
-                    let _ = tx
-                        .send(StreamEvent::ToolResult {
-                            name: name.clone(),
-                            content: Self::SKIPPED_FOR_STEERING.to_string(),
-                            is_error: true,
-                        })
-                        .await;
-                    result_blocks.push(ContentBlock::ToolResult {
-                        tool_use_id: id.clone(),
-                        content: Self::SKIPPED_FOR_STEERING.to_string(),
-                        is_error: Some(true),
-                    });
-                    continue;
-                }
-
-                let is_read_only = self.tools.is_read_only(name);
-                let perm = self.permissions.check(name, input, is_read_only);
-
-                let tool_output = match perm {
-                    PermissionResult::Allow => {
-                        self.execute_tool_steerable(name, input.clone()).await
-                    }
-                    PermissionResult::Deny(reason) => crate::tools::ToolOutput {
-                        content: format!("Permission denied: {reason}"),
-                        is_error: true,
-                    },
-                    PermissionResult::Ask { message, diff } => {
-                        // Send permission request to UI, wait for response
-                        let (resp_tx, resp_rx) = oneshot::channel();
-
-                        let event = if let Some(d) = diff {
-                            StreamEvent::PermissionRequestWithDiff {
-                                tool_name: name.clone(),
-                                summary: message,
-                                diff: d,
-                                respond: resp_tx,
-                            }
-                        } else {
-                            StreamEvent::PermissionRequest {
-                                tool_name: name.clone(),
-                                summary: message,
-                                respond: resp_tx,
-                            }
-                        };
-
-                        let _ = tx.send(event).await;
-
-                        match resp_rx.await {
-                            Ok(PermissionResponse::Allow) => {
-                                self.execute_tool_steerable(name, input.clone()).await
-                            }
-                            Ok(PermissionResponse::AlwaysAllow) => {
-                                self.permissions.always_allow(name);
-                                self.execute_tool_steerable(name, input.clone()).await
-                            }
-                            Ok(PermissionResponse::AlwaysAllowCommand(ref cmd)) => {
-                                self.permissions.always_allow_command(cmd);
-                                self.execute_tool_steerable(name, input.clone()).await
-                            }
-                            Ok(PermissionResponse::Deny)
-                            | Ok(PermissionResponse::DenyAndCancel)
-                            | Err(_) => crate::tools::ToolOutput {
-                                content: "Permission denied by user.".to_string(),
-                                is_error: true,
-                            },
-                        }
-                    }
-                };
-
-                // Truncate large tool outputs
-                let (content, was_truncated) = compact::truncate_tool_output(&tool_output.content);
-                if was_truncated {
-                    tracing::debug!("Truncated tool output for {}", name);
-                }
-
-                let _ = tx
-                    .send(StreamEvent::ToolResult {
-                        name: name.clone(),
-                        content: content.clone(),
-                        is_error: tool_output.is_error,
-                    })
-                    .await;
-
-                result_blocks.push(ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content,
-                    is_error: if tool_output.is_error {
-                        Some(true)
-                    } else {
-                        None
-                    },
-                });
-            }
-
+            let result_blocks = self.execute_tool_batch(&tool_uses, &tx, interactive).await;
             self.messages.push(Message::tool_results(result_blocks));
         }
 
         Ok(())
+    }
+
+    /// Execute one batch of tool calls.
+    ///
+    /// Read-only tools that are auto-allowed run concurrently; everything
+    /// else runs sequentially in order (permission prompts are inherently
+    /// serial). A pending steering message supersedes the batch: tools not
+    /// yet started get synthetic skipped results, and running tools are
+    /// cancelled by their steering watchers. Result blocks come back in
+    /// the original tool_use order.
+    async fn execute_tool_batch(
+        &mut self,
+        tool_uses: &[(String, String, serde_json::Value)],
+        tx: &mpsc::Sender<StreamEvent>,
+        interactive: bool,
+    ) -> Vec<ContentBlock> {
+        let mut outputs: Vec<Option<crate::tools::ToolOutput>> =
+            (0..tool_uses.len()).map(|_| None).collect();
+
+        // Classify up front. Only read-only AND auto-allowed tools run in
+        // parallel; the permission check is repeated for sequential tools
+        // below because an AlwaysAllow answer during the batch can change
+        // later results.
+        let parallel: Vec<usize> = tool_uses
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, name, input))| {
+                let ro = self.tools.is_read_only(name);
+                ro && matches!(
+                    self.permissions.check(name, input, ro),
+                    PermissionResult::Allow
+                )
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+
+        // Phase 1: run the parallel group concurrently. Tool impls take
+        // &self, so concurrent immutable borrows are safe.
+        if !self.steering_pending() && !parallel.is_empty() {
+            let this: &Self = &*self;
+            let futures: Vec<_> = parallel
+                .iter()
+                .map(|&idx| {
+                    let (_, name, input) = &tool_uses[idx];
+                    async move { (idx, this.execute_tool_steerable(name, input.clone()).await) }
+                })
+                .collect();
+            for (idx, output) in futures_util::future::join_all(futures).await {
+                outputs[idx] = Some(output);
+            }
+        }
+
+        // Phase 2: everything not yet run, in order.
+        for (idx, (_, name, input)) in tool_uses.iter().enumerate() {
+            if outputs[idx].is_some() {
+                continue;
+            }
+
+            // A steering message supersedes the rest of the batch: give
+            // the remaining tools synthetic results so the model reads the
+            // user's correction instead of finishing an abandoned plan.
+            if self.steering_pending() {
+                outputs[idx] = Some(crate::tools::ToolOutput {
+                    content: Self::SKIPPED_FOR_STEERING.to_string(),
+                    is_error: true,
+                });
+                continue;
+            }
+
+            let is_read_only = self.tools.is_read_only(name);
+            let perm = self.permissions.check(name, input, is_read_only);
+
+            let output = match perm {
+                PermissionResult::Allow => self.execute_tool_steerable(name, input.clone()).await,
+                PermissionResult::Deny(reason) => crate::tools::ToolOutput {
+                    content: format!("Permission denied: {reason}"),
+                    is_error: true,
+                },
+                PermissionResult::Ask { message, diff } => {
+                    if !interactive {
+                        // One-shot mode has no prompt to ask the user, so a
+                        // tool requiring confirmation must be denied rather
+                        // than silently auto-allowed.
+                        crate::tools::ToolOutput {
+                            content: format!(
+                                "Permission denied: {message} (one-shot mode has no prompt; set permission_mode in config.toml to allow)"
+                            ),
+                            is_error: true,
+                        }
+                    } else {
+                        self.ask_permission(name, input, message, diff, tx).await
+                    }
+                }
+            };
+            outputs[idx] = Some(output);
+        }
+
+        // Phase 3: truncate, emit events, and build blocks in order.
+        let mut result_blocks = Vec::with_capacity(tool_uses.len());
+        for (idx, (id, name, _)) in tool_uses.iter().enumerate() {
+            let output = outputs[idx].take().expect("every tool got an output");
+            let (content, was_truncated) = compact::truncate_tool_output(&output.content);
+            if was_truncated {
+                tracing::debug!("Truncated tool output for {}", name);
+            }
+
+            let _ = tx
+                .send(StreamEvent::ToolResult {
+                    name: name.clone(),
+                    content: content.clone(),
+                    is_error: output.is_error,
+                })
+                .await;
+
+            result_blocks.push(ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content,
+                is_error: if output.is_error { Some(true) } else { None },
+            });
+        }
+
+        result_blocks
+    }
+
+    /// Ask the UI for permission and run (or deny) the tool accordingly.
+    async fn ask_permission(
+        &mut self,
+        name: &str,
+        input: &serde_json::Value,
+        message: String,
+        diff: Option<String>,
+        tx: &mpsc::Sender<StreamEvent>,
+    ) -> crate::tools::ToolOutput {
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        let event = if let Some(d) = diff {
+            StreamEvent::PermissionRequestWithDiff {
+                tool_name: name.to_string(),
+                summary: message,
+                diff: d,
+                respond: resp_tx,
+            }
+        } else {
+            StreamEvent::PermissionRequest {
+                tool_name: name.to_string(),
+                summary: message,
+                respond: resp_tx,
+            }
+        };
+
+        let _ = tx.send(event).await;
+
+        match resp_rx.await {
+            Ok(PermissionResponse::Allow) => self.execute_tool_steerable(name, input.clone()).await,
+            Ok(PermissionResponse::AlwaysAllow) => {
+                self.permissions.always_allow(name);
+                self.execute_tool_steerable(name, input.clone()).await
+            }
+            Ok(PermissionResponse::AlwaysAllowCommand(ref cmd)) => {
+                self.permissions.always_allow_command(cmd);
+                self.execute_tool_steerable(name, input.clone()).await
+            }
+            // DenyAndCancel queues the typed message as steering; the
+            // steering_pending check skips the rest of the batch.
+            Ok(PermissionResponse::Deny) | Ok(PermissionResponse::DenyAndCancel) | Err(_) => {
+                crate::tools::ToolOutput {
+                    content: "Permission denied by user.".to_string(),
+                    is_error: true,
+                }
+            }
+        }
     }
 }
 
@@ -924,7 +799,13 @@ mod tests {
         ];
 
         let start = Instant::now();
-        let blocks = engine.execute_tools_parallel(&tool_uses).await;
+        let (batch_tx, mut batch_rx) = mpsc::channel(64);
+        let drain = tokio::spawn(async move { while batch_rx.recv().await.is_some() {} });
+        let blocks = engine
+            .execute_tool_batch(&tool_uses, &batch_tx, false)
+            .await;
+        drop(batch_tx);
+        drain.await.unwrap();
         let duration = start.elapsed();
 
         assert_eq!(blocks.len(), 3, "Should have 3 result blocks");
@@ -983,7 +864,13 @@ mod tests {
             ),
         ];
 
-        let blocks = engine.execute_tools_parallel(&tool_uses).await;
+        let (batch_tx, mut batch_rx) = mpsc::channel(64);
+        let drain = tokio::spawn(async move { while batch_rx.recv().await.is_some() {} });
+        let blocks = engine
+            .execute_tool_batch(&tool_uses, &batch_tx, false)
+            .await;
+        drop(batch_tx);
+        drain.await.unwrap();
 
         assert_eq!(blocks.len(), 3, "Should have 3 result blocks");
 
@@ -1002,6 +889,7 @@ mod tests {
     /// typing while the model streams.
     struct ScriptedProvider {
         calls: std::sync::atomic::AtomicUsize,
+        first_round_text: Option<String>,
         first_round: Vec<(String, String, serde_json::Value)>,
         push_on_first_call: Option<(SteeringQueue, String)>,
     }
@@ -1031,6 +919,9 @@ mod tests {
                 if let Some((queue, text)) = &self.push_on_first_call {
                     queue.lock().unwrap().push_back(text.clone());
                 }
+                if let Some(text) = &self.first_round_text {
+                    let _ = tx.send(ApiEvent::Text(text.clone())).await;
+                }
                 for (id, name, input) in &self.first_round {
                     let _ = tx
                         .send(ApiEvent::ToolUse {
@@ -1053,6 +944,7 @@ mod tests {
         let steering = SteeringQueue::default();
         let provider = Box::new(ScriptedProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
+            first_round_text: Some("working on it".to_string()),
             first_round,
             push_on_first_call: push_on_first_call.map(|t| (steering.clone(), t)),
         });
@@ -1189,6 +1081,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_submit_returns_text_without_notices() {
+        // submit() is a collector over the unified turn loop. Steering
+        // delivery generates a Notice event; the returned text must be the
+        // assistant's words only.
+        let mut engine = steering_engine(
+            vec![(
+                "tu_1".to_string(),
+                "Glob".to_string(),
+                serde_json::json!({"pattern": "*.x"}),
+            )],
+            Some("check auth too".to_string()),
+        );
+
+        let text = engine.submit("go").await.unwrap();
+        assert_eq!(text, "working on it", "notices must not leak into text");
+        // The steering message still made it into the conversation
+        let last = engine.messages().last().unwrap();
+        match &last.content {
+            crate::api::MessageContent::Text(t) => assert_eq!(t, "check auth too"),
+            other => panic!("expected steering message last, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_steering_preempts_in_non_streaming_submit() {
+        // Before unification, steering preemption only existed in the
+        // streaming path; submit() (one-shot, sub-agents) waited out the
+        // whole batch. Both entry points now share run_turn.
+        let mut engine = steering_engine(
+            vec![(
+                "tu_1".to_string(),
+                "Bash".to_string(),
+                serde_json::json!({"command": "sleep 5"}),
+            )],
+            None,
+        );
+
+        let steering = engine.steering_queue();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            steering
+                .lock()
+                .unwrap()
+                .push_back("stop, wrong command".to_string());
+        });
+
+        let start = std::time::Instant::now();
+        engine.submit("run it").await.unwrap();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "steering should cancel the running tool via submit() too (took {:?})",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
     async fn test_unknown_tool_yields_error_block_not_abort() {
         // A hallucinated tool name must produce an error tool_result the
         // model can recover from. Aborting the turn here left a dangling
@@ -1216,7 +1164,13 @@ mod tests {
             serde_json::json!({"subject": "x"}),
         )];
 
-        let blocks = engine.execute_tools_parallel(&tool_uses).await;
+        let (batch_tx, mut batch_rx) = mpsc::channel(64);
+        let drain = tokio::spawn(async move { while batch_rx.recv().await.is_some() {} });
+        let blocks = engine
+            .execute_tool_batch(&tool_uses, &batch_tx, false)
+            .await;
+        drop(batch_tx);
+        drain.await.unwrap();
         assert_eq!(blocks.len(), 1, "every tool_use must get a tool_result");
 
         match &blocks[0] {
@@ -1235,7 +1189,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ask_permission_denies_in_non_streaming_mode() {
-        // submit()/execute_tools_parallel has no interactive prompt to fall back
+        // Non-interactive batches have no prompt to fall back
         // on, so a tool that would normally ask for confirmation must be denied,
         // not silently auto-allowed.
         let provider = Box::new(MockProvider);
@@ -1262,7 +1216,13 @@ mod tests {
             serde_json::json!({"file_path": "/etc/hosts"}),
         )];
 
-        let blocks = engine.execute_tools_parallel(&tool_uses).await;
+        let (batch_tx, mut batch_rx) = mpsc::channel(64);
+        let drain = tokio::spawn(async move { while batch_rx.recv().await.is_some() {} });
+        let blocks = engine
+            .execute_tool_batch(&tool_uses, &batch_tx, false)
+            .await;
+        drop(batch_tx);
+        drain.await.unwrap();
         assert_eq!(blocks.len(), 1);
 
         match &blocks[0] {

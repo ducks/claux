@@ -145,6 +145,13 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
                             break; // tx dropped: turn is over and events drained
                         };
                         match event {
+                            StreamEvent::Notice(n) => {
+                                if in_tool {
+                                    println!();
+                                    in_tool = false;
+                                }
+                                println!("\n  \x1b[2m[{n}]\x1b[0m");
+                            }
                             StreamEvent::Text(t) => {
                                 if in_tool {
                                     println!();
