@@ -13,6 +13,8 @@ mod plugin;
 mod query;
 mod repl;
 mod session;
+#[cfg(test)]
+mod test_support;
 mod theme;
 mod tools;
 mod tui;

@@ -93,6 +93,28 @@ impl Engine {
         }
     }
 
+    /// Test constructor: a bare engine over any provider, with the standard
+    /// tool registry (minus Agent) and the given permission mode.
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        provider: Box<dyn Provider>,
+        steering: SteeringQueue,
+        mode: crate::permissions::PermissionMode,
+    ) -> Self {
+        Self {
+            provider,
+            tools: ToolRegistry::without_agent(),
+            permissions: PermissionChecker::new(mode),
+            messages: vec![],
+            system_prompt: String::new(),
+            model: "test".to_string(),
+            max_tokens: 1000,
+            auto_compact_threshold: 0.8,
+            steering,
+            cost: CostTracker::new("test"),
+        }
+    }
+
     /// Clone a handle to the steering queue. UIs (or their input threads)
     /// push typed-mid-turn messages through this handle.
     pub fn steering_queue(&self) -> SteeringQueue {
@@ -1000,83 +1022,16 @@ mod tests {
         }
     }
 
-    /// Provider that emits a scripted set of tool_uses on its first call
-    /// and ends the turn on the second. Optionally pushes a steering
-    /// message during the first call, deterministically simulating a user
-    /// typing while the model streams.
-    struct ScriptedProvider {
-        calls: std::sync::atomic::AtomicUsize,
-        first_round_text: Option<String>,
-        first_round: Vec<(String, String, serde_json::Value)>,
-        push_on_first_call: Option<(SteeringQueue, String)>,
-    }
-
-    #[async_trait::async_trait]
-    impl Provider for ScriptedProvider {
-        fn name(&self) -> &str {
-            "scripted-mock"
-        }
-
-        fn model(&self) -> &str {
-            "test-model"
-        }
-
-        fn set_model(&mut self, _model: &str) {}
-
-        async fn stream(
-            &self,
-            _messages: &[Message],
-            _system: &str,
-            _tools: &[ToolDefinition],
-            _max_tokens: u32,
-        ) -> Result<mpsc::Receiver<ApiEvent>> {
-            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let (tx, rx) = mpsc::channel(10);
-            if call == 0 {
-                if let Some((queue, text)) = &self.push_on_first_call {
-                    queue.lock().unwrap().push_back(text.clone());
-                }
-                if let Some(text) = &self.first_round_text {
-                    let _ = tx.send(ApiEvent::Text(text.clone())).await;
-                }
-                for (id, name, input) in &self.first_round {
-                    let _ = tx
-                        .send(ApiEvent::ToolUse {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                        })
-                        .await;
-                }
-            }
-            let _ = tx.send(ApiEvent::Done).await;
-            Ok(rx)
-        }
-    }
-
+    /// Bypass-mode scripted engine; see crate::test_support.
     fn steering_engine(
         first_round: Vec<(String, String, serde_json::Value)>,
         push_on_first_call: Option<String>,
     ) -> Engine {
-        let steering = SteeringQueue::default();
-        let provider = Box::new(ScriptedProvider {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-            first_round_text: Some("working on it".to_string()),
+        crate::test_support::scripted_engine(
             first_round,
-            push_on_first_call: push_on_first_call.map(|t| (steering.clone(), t)),
-        });
-        Engine {
-            provider,
-            tools: ToolRegistry::without_agent(),
-            permissions: PermissionChecker::new(PermissionMode::Bypass),
-            messages: vec![],
-            system_prompt: String::new(),
-            model: "test".to_string(),
-            max_tokens: 1000,
-            auto_compact_threshold: 0.8,
-            steering,
-            cost: CostTracker::new("test"),
-        }
+            push_on_first_call,
+            PermissionMode::Bypass,
+        )
     }
 
     async fn run_streaming(engine: &mut Engine, prompt: &str) {

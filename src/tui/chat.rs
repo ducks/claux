@@ -354,7 +354,8 @@ pub async fn run(
 
             app.status = format!("{} | thinking...", app.model);
 
-            let submit_result = drive_streaming(engine, &trimmed, &mut app, terminal).await;
+            let submit_result =
+                drive_streaming(engine, &trimmed, &mut app, terminal, &mut CrosstermKeys).await;
 
             if let Err(e) = submit_result {
                 app.add_message("error", &format!("Error: {e}"));
@@ -407,15 +408,15 @@ pub async fn run(
 /// pairing), and this function is a select over the submit future, the
 /// event stream, and a 50ms draw/key tick. Permission prompts arrive as
 /// events carrying the tool input and a oneshot responder.
-async fn drive_streaming(
+async fn drive_streaming<B: ratatui::backend::Backend>(
     engine: &mut Engine,
     input: &str,
     app: &mut ChatApp,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<B>,
+    keys: &mut dyn KeySource,
 ) -> Result<()> {
     let steering = engine.steering_queue();
     let steer_buf = app.steer_buf.clone();
-    let model_name = engine.model().to_string();
     let cancel = tokio_util::sync::CancellationToken::new();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(256);
 
@@ -430,7 +431,12 @@ async fn drive_streaming(
         let mut running_tools: std::collections::VecDeque<usize> =
             std::collections::VecDeque::new();
 
-        let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+        // First tick after one period, not immediately: keys and draws
+        // shouldn't race the event stream at t=0.
+        let mut tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(50),
+        );
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
@@ -476,12 +482,14 @@ async fn drive_streaming(
                             let response = prompt_permission_tui(
                                 app,
                                 terminal,
-                                &model_name,
+                                keys,
+
                                 &tool_name,
                                 &summary,
                                 &input,
                                 &steering,
-                            )?;
+                            )
+                            .await?;
                             // Denying outright ends the turn (the engine
                             // pairs the rest of the batch as interrupted);
                             // DenyAndCancel instead queued steering, which
@@ -508,7 +516,7 @@ async fn drive_streaming(
                     }
                 }
                 _ = tick.tick() => {
-                    if poll_stream_key(&steer_buf, &steering)? {
+                    if poll_stream_key(keys, &steer_buf, &steering)? {
                         cancel.cancel();
                     }
                     // The tick is the only draw during streaming: it
@@ -535,10 +543,11 @@ fn flush_stream_buffer(app: &mut ChatApp) {
 /// Full-screen permission prompt. Returns the user's decision; typing a
 /// message and pressing Enter queues it as steering and denies the tool
 /// (the engine then skips the rest of the batch and delivers the message).
-fn prompt_permission_tui(
+async fn prompt_permission_tui<B: ratatui::backend::Backend>(
     app: &mut ChatApp,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    model_name: &str,
+    terminal: &mut Terminal<B>,
+    keys: &mut dyn KeySource,
+
     tool_name: &str,
     summary: &str,
     input: &serde_json::Value,
@@ -552,8 +561,12 @@ fn prompt_permission_tui(
     let mut perm_input = String::new();
 
     let response = loop {
-        if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+        match keys.poll_key()? {
+            None => {
+                // Nothing typed: yield to the runtime before polling again
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Some(key) => {
                 match key.code {
                     KeyCode::Char('y') | KeyCode::Enter if perm_input.is_empty() => {
                         break PermissionResponse::Allow;
@@ -585,27 +598,53 @@ fn prompt_permission_tui(
                     }
                     _ => {}
                 }
+                // Redraw so the typed text stays visible
+                app.status = format!("{} | deny and message: {perm_input}", app.model);
+                terminal.draw(|f| ui::draw_chat(f, app))?;
             }
         }
-        // Redraw so the typed text stays visible
-        app.status = format!("{model_name} | deny and message: {perm_input}");
-        terminal.draw(|f| ui::draw_chat(f, app))?;
     };
 
     app.permission_prompt = None;
     app.permission_details = None;
     app.mode = Mode::Streaming;
-    app.status = model_name.to_string();
+    app.status = app.model.clone();
     Ok(response)
+}
+
+/// Key input for the streaming turn path. Production reads the real
+/// terminal via crossterm; tests feed scripted keystrokes, which is what
+/// makes the interactive flow (steering, permission prompts, Ctrl+C)
+/// coverable by `cargo test`.
+pub trait KeySource {
+    fn poll_key(&mut self) -> Result<Option<KeyEvent>>;
+}
+
+/// Reads keys from the real terminal without blocking.
+pub struct CrosstermKeys;
+
+impl KeySource for CrosstermKeys {
+    fn poll_key(&mut self) -> Result<Option<KeyEvent>> {
+        if event::poll(std::time::Duration::from_millis(0))? {
+            if let Event::Key(key) = event::read()? {
+                return Ok(Some(key));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Non-blocking key poll while a turn is running. Ctrl+C cancels (returns
 /// true). Everything else builds the steering buffer: printable characters
 /// append, Backspace deletes, and Enter moves the buffer into the engine's
 /// steering queue, which the turn loop drains before its next API call.
-fn poll_stream_key(steer_buf: &Arc<Mutex<String>>, steering: &SteeringQueue) -> Result<bool> {
-    if event::poll(std::time::Duration::from_millis(0))? {
-        if let Event::Key(key) = event::read()? {
+fn poll_stream_key(
+    keys: &mut dyn KeySource,
+    steer_buf: &Arc<Mutex<String>>,
+    steering: &SteeringQueue,
+) -> Result<bool> {
+    {
+        if let Some(key) = keys.poll_key()? {
             match (key.modifiers, key.code) {
                 (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Ok(true),
                 (_, KeyCode::Enter) => {
@@ -862,6 +901,246 @@ mod tests {
             }
         ));
         assert!(matches!(&app.messages[2], ChatMessage::Text { role, .. } if role == "assistant"));
+    }
+}
+
+/// End-to-end interactive turn tests: a scripted provider drives the
+/// engine, scripted keystrokes drive the UI, and a ratatui TestBackend
+/// captures what would have been drawn. This is the automated coverage
+/// for flows that previously only a human at a keyboard could exercise.
+#[cfg(test)]
+mod turn_tests {
+    use super::*;
+    use crate::permissions::PermissionMode;
+    use crate::test_support::{scripted_engine, tool_use};
+    use ratatui::backend::TestBackend;
+
+    struct ScriptedKeys(std::collections::VecDeque<KeyEvent>);
+
+    impl KeySource for ScriptedKeys {
+        fn poll_key(&mut self) -> Result<Option<KeyEvent>> {
+            Ok(self.0.pop_front())
+        }
+    }
+
+    fn ch(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    /// Run one full turn through drive_streaming with scripted keys.
+    async fn run_turn(
+        engine: &mut Engine,
+        keystrokes: Vec<KeyEvent>,
+    ) -> (ChatApp, Terminal<TestBackend>) {
+        let mut app = ChatApp::new("test-model", Theme::dark());
+        app.mode = Mode::Streaming;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut keys = ScriptedKeys(keystrokes.into());
+
+        drive_streaming(engine, "go", &mut app, &mut terminal, &mut keys)
+            .await
+            .unwrap();
+
+        // Final frame with the settled state
+        app.mode = Mode::Input;
+        terminal.draw(|f| ui::draw_chat(f, &mut app)).unwrap();
+        (app, terminal)
+    }
+
+    fn tool_statuses(app: &ChatApp) -> Vec<ToolStatus> {
+        app.messages
+            .iter()
+            .filter_map(|m| match m {
+                ChatMessage::Tool { status, .. } => Some(status.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn turn_renders_text_and_tool_result() {
+        let mut engine = scripted_engine(
+            vec![tool_use(
+                "tu_1",
+                "Glob",
+                serde_json::json!({"pattern": "*.zz"}),
+            )],
+            None,
+            PermissionMode::Bypass,
+        );
+
+        let (app, terminal) = run_turn(&mut engine, vec![]).await;
+
+        assert_eq!(tool_statuses(&app), vec![ToolStatus::Success]);
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("working on it"), "assistant text rendered");
+        assert!(screen.contains("Glob"), "tool bubble rendered");
+        // Engine side: user, assistant(text+tool_use), tool results
+        assert_eq!(engine.messages().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn permission_y_allows_the_tool() {
+        let mut engine = scripted_engine(
+            vec![tool_use(
+                "tu_1",
+                "Bash",
+                serde_json::json!({"command": "echo approved-ok"}),
+            )],
+            None,
+            PermissionMode::Default, // Bash asks for confirmation
+        );
+
+        let (app, _terminal) = run_turn(&mut engine, vec![ch('y')]).await;
+
+        assert_eq!(tool_statuses(&app), vec![ToolStatus::Success]);
+        let crate::api::MessageContent::Blocks(blocks) = &engine.messages()[2].content else {
+            panic!("expected tool results");
+        };
+        let crate::api::ContentBlock::ToolResult { content, .. } = &blocks[0] else {
+            panic!("expected ToolResult");
+        };
+        assert!(
+            content.contains("approved-ok"),
+            "tool actually ran: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_n_denies_and_ends_turn() {
+        let mut engine = scripted_engine(
+            vec![tool_use(
+                "tu_1",
+                "Bash",
+                serde_json::json!({"command": "echo never-runs"}),
+            )],
+            None,
+            PermissionMode::Default,
+        );
+
+        let (app, _terminal) = run_turn(&mut engine, vec![ch('n')]).await;
+
+        assert!(
+            app.messages.iter().any(|m| matches!(
+                m,
+                ChatMessage::Text { role, content } if role == "system" && content.contains("Interrupted")
+            )),
+            "denying ends the turn: {:?}",
+            app.messages
+        );
+        let crate::api::MessageContent::Blocks(blocks) = &engine.messages()[2].content else {
+            panic!("expected tool results");
+        };
+        let crate::api::ContentBlock::ToolResult { content, .. } = &blocks[0] else {
+            panic!("expected ToolResult");
+        };
+        assert!(content.contains("denied"), "tool denied: {content}");
+    }
+
+    #[tokio::test]
+    async fn permission_typed_message_becomes_steering() {
+        let mut engine = scripted_engine(
+            vec![tool_use(
+                "tu_1",
+                "Bash",
+                serde_json::json!({"command": "echo never-runs"}),
+            )],
+            None,
+            PermissionMode::Default,
+        );
+
+        let (app, _terminal) =
+            run_turn(&mut engine, vec![ch('f'), ch('i'), ch('x'), enter()]).await;
+
+        // The typed message reached the model as a user message
+        let steer_delivered = engine.messages().iter().any(|m| {
+            matches!(&m.content, crate::api::MessageContent::Text(t) if t == "fix")
+                && m.role == "user"
+        });
+        assert!(
+            steer_delivered,
+            "typed message injected: {:?}",
+            engine.messages()
+        );
+        // And the UI shows it as a user bubble
+        assert!(app.messages.iter().any(|m| matches!(
+            m,
+            ChatMessage::Text { role, content } if role == "user" && content == "fix"
+        )));
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_cancels_a_running_tool() {
+        let mut engine = scripted_engine(
+            vec![tool_use(
+                "tu_1",
+                "Bash",
+                serde_json::json!({"command": "sleep 5"}),
+            )],
+            None,
+            PermissionMode::Bypass,
+        );
+
+        let start = std::time::Instant::now();
+        let (app, _terminal) = run_turn(&mut engine, vec![ctrl_c()]).await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "Ctrl+C should cut the tool short (took {:?})",
+            start.elapsed()
+        );
+        assert!(app.messages.iter().any(|m| matches!(
+            m,
+            ChatMessage::Text { role, content } if role == "system" && content.contains("Interrupted")
+        )));
+    }
+
+    #[tokio::test]
+    async fn typing_mid_tool_steers_and_preempts() {
+        let mut engine = scripted_engine(
+            vec![tool_use(
+                "tu_1",
+                "Bash",
+                serde_json::json!({"command": "sleep 5"}),
+            )],
+            None,
+            PermissionMode::Bypass,
+        );
+
+        let start = std::time::Instant::now();
+        let (_app, _terminal) = run_turn(&mut engine, vec![ch('n'), ch('o'), enter()]).await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "steering should preempt the tool (took {:?})",
+            start.elapsed()
+        );
+
+        let steer_delivered = engine.messages().iter().any(|m| {
+            matches!(&m.content, crate::api::MessageContent::Text(t) if t == "no")
+                && m.role == "user"
+        });
+        assert!(
+            steer_delivered,
+            "steering delivered: {:?}",
+            engine.messages()
+        );
     }
 }
 
