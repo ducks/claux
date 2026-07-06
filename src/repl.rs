@@ -98,14 +98,12 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
                         Ok(output) => println!("{output}"),
                         Err(e) => eprintln!("\x1b[31mError: {e}\x1b[0m"),
                     }
+                    // Commands like /compact rewrite engine history
+                    let _ = session::save_messages(&session_path, engine.messages());
                 }
             }
             continue;
         }
-
-        // Save user message
-        let user_msg = crate::api::Message::user(trimmed);
-        let _ = session::append_message(&session_path, &user_msg);
 
         print!("\n\x1b[1;32m❯\x1b[0m ");
         stdout().flush()?;
@@ -230,9 +228,11 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
             eprintln!("\n\x1b[31mError: {e}\x1b[0m\n");
         }
 
-        // Save assistant response
-        if let Some(last) = engine.messages().last() {
-            let _ = session::append_message(&session_path, last);
+        // Snapshot the full conversation, tool rounds included. Previously
+        // only the final assistant message was saved, so resumed sessions
+        // lost everything the turn actually did.
+        if let Err(e) = session::save_messages(&session_path, engine.messages()) {
+            tracing::warn!("Failed to save session: {e}");
         }
 
         if exit_app {
