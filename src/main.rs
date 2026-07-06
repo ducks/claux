@@ -158,16 +158,13 @@ async fn main() -> Result<()> {
         None,
     )?;
 
-    // Resume a previous session if requested
+    // Resume a previous session if requested. The matched id is handed to
+    // the REPL so it continues that session instead of forking a new one.
+    let mut resumed_id: Option<String> = None;
     if let Some(ref session_id) = args.resume {
-        let sessions = session::list_sessions()?;
-        let found = sessions
-            .iter()
-            .find(|(sid, _)| sid == session_id || sid.starts_with(session_id));
-
-        match found {
-            Some((_, path)) => {
-                let (meta, messages) = session::load_session(path)?;
+        match session::find_session(session_id)? {
+            Some((sid, path)) => {
+                let (meta, messages) = session::load_session(&path)?;
                 engine.set_messages(messages);
                 eprintln!(
                     "Resumed session {} ({}, {} messages)",
@@ -175,6 +172,7 @@ async fn main() -> Result<()> {
                     meta.model,
                     engine.message_count()
                 );
+                resumed_id = Some(sid);
             }
             None => {
                 eprintln!("Session not found: {session_id}. Starting new session.");
@@ -185,7 +183,7 @@ async fn main() -> Result<()> {
     if args.tui {
         tui::run(engine, &config, &plugin_registry).await
     } else {
-        repl::run(engine, &config, &plugin_registry).await
+        repl::run(engine, &config, &plugin_registry, resumed_id).await
     }
 }
 

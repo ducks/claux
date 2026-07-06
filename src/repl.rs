@@ -19,7 +19,12 @@ use crate::utils::diff::colorize_diff;
 /// reader racing for stdin. Lines typed while a turn is running are queued
 /// as steering messages and delivered to the model between tool rounds;
 /// lines typed after the turn ends become the next prompt.
-pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) -> Result<()> {
+pub async fn run(
+    mut engine: Engine,
+    config: &Config,
+    plugins: &PluginRegistry,
+    resumed: Option<String>,
+) -> Result<()> {
     // Build system prompt
     let system_prompt = context::build_system_prompt_for_model(
         engine.model(),
@@ -30,8 +35,13 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
     .await?;
     engine.set_system_prompt(system_prompt);
 
-    // Create session
-    let (_session_id, session_path) = session::create_session(engine.model())?;
+    // Continue the resumed session, or create a fresh one. Resuming used
+    // to create a new session anyway, so every resumed conversation forked
+    // into a duplicate and the original never grew.
+    let mut session_path = match resumed {
+        Some(id) => std::path::PathBuf::from(format!("sqlite://{id}")),
+        None => session::create_session(engine.model())?.1,
+    };
 
     // Persistent stdin reader. Exits on EOF (Ctrl+D) or when the receiver
     // is dropped; the closed channel is the REPL's exit signal.
@@ -54,6 +64,15 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
     println!("Model: \x1b[33m{}\x1b[0m", engine.model());
     println!("Type /help for commands, Ctrl+D (or double Ctrl+C) to exit.");
     println!("\x1b[2mWhile claux is working, type a message and press Enter to steer it.\x1b[0m\n");
+
+    // A resumed session drops you back into the conversation, not at a
+    // blank prompt: replay the tail so you can see where you left off.
+    if engine.message_count() > 0 {
+        print!(
+            "{}",
+            replay_transcript(engine.messages(), engine.model(), 12)
+        );
+    }
 
     // Double-press guard: a single Ctrl+C warns instead of killing the app.
     // Registering the tokio handler also disables the default SIGINT kill.
@@ -93,6 +112,27 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
                 }
                 CommandResult::Text(text) => println!("{text}"),
                 CommandResult::Exit => break,
+                // /resume with an id: switch which session this REPL is
+                // writing to, so the resumed conversation continues in
+                // place instead of copying itself into the current session.
+                CommandResult::Async(commands::AsyncCommand::Resume(Some(ref prefix))) => {
+                    match session::find_session(prefix)? {
+                        Some((sid, path)) => {
+                            let (_meta, messages) = session::load_session(&path)?;
+                            engine.set_messages(messages);
+                            session_path = path;
+                            println!(
+                                "Resumed session \x1b[33m{sid}\x1b[0m ({} messages)",
+                                engine.message_count()
+                            );
+                            print!(
+                                "{}",
+                                replay_transcript(engine.messages(), engine.model(), 12)
+                            );
+                        }
+                        None => println!("Session not found: {prefix}"),
+                    }
+                }
                 CommandResult::Async(async_cmd) => {
                     match commands::execute_async(async_cmd, &mut engine).await {
                         Ok(output) => println!("{output}"),
@@ -273,6 +313,49 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
     Ok(())
 }
 
+/// Render the tail of a conversation for display after a resume: user
+/// prompts, assistant text, and tool names, with tool result payloads
+/// omitted (they're context for the model, noise for the human).
+fn replay_transcript(messages: &[crate::api::Message], model: &str, keep: usize) -> String {
+    use crate::api::types::{ContentBlock, MessageContent};
+
+    let mut out = String::new();
+    let start = messages.len().saturating_sub(keep);
+    if start > 0 {
+        out.push_str(&format!(
+            "  \x1b[2m… {start} earlier messages not shown (full history is in context)\x1b[0m\n"
+        ));
+    }
+
+    for msg in &messages[start..] {
+        match (msg.role.as_str(), &msg.content) {
+            ("user", MessageContent::Text(t)) => {
+                out.push_str(&format!("\x1b[1;34m>\x1b[0m {t}\n"));
+            }
+            ("assistant", MessageContent::Text(t)) => {
+                out.push_str(&format!("\x1b[2m● {model}\x1b[0m {t}\n"));
+            }
+            ("assistant", MessageContent::Blocks(blocks)) => {
+                for block in blocks {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            out.push_str(&format!("\x1b[2m● {model}\x1b[0m {text}\n"));
+                        }
+                        ContentBlock::ToolUse { name, .. } => {
+                            out.push_str(&format!("  \x1b[2m[{name}] ✓\x1b[0m\n"));
+                        }
+                        ContentBlock::ToolResult { .. } => {}
+                    }
+                }
+            }
+            // Tool-result messages: skipped, see doc comment
+            _ => {}
+        }
+    }
+    out.push('\n');
+    out
+}
+
 /// Print the permission question for a tool. The answer is read from the
 /// stdin channel by the caller.
 fn print_permission_prompt(tool_name: &str, summary: &str) {
@@ -368,5 +451,66 @@ mod tests {
             parse_permission_response("Write", "write: /tmp/x", "a\n"),
             PermissionResponse::AlwaysAllow
         );
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut in_escape = false;
+        for c in s.chars() {
+            match (in_escape, c) {
+                (false, '\x1b') => in_escape = true,
+                (false, _) => out.push(c),
+                (true, 'm') => in_escape = false,
+                (true, _) => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn replay_shows_prompts_responses_and_tools() {
+        use crate::api::types::{ContentBlock, Message};
+
+        let messages = vec![
+            Message::user("run the tests"),
+            Message::assistant_blocks(vec![
+                ContentBlock::Text {
+                    text: "Running them now.".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "tu_1".to_string(),
+                    name: "Bash".to_string(),
+                    input: serde_json::json!({"command": "cargo test"}),
+                },
+            ]),
+            Message::tool_results(vec![ContentBlock::ToolResult {
+                tool_use_id: "tu_1".to_string(),
+                content: "huge noisy output".to_string(),
+                is_error: None,
+            }]),
+            Message::assistant_text("All green."),
+        ];
+
+        let out = strip_ansi(&replay_transcript(&messages, "qwen", 12));
+        assert!(out.contains("> run the tests"));
+        assert!(out.contains("Running them now."));
+        assert!(out.contains("[Bash]"));
+        assert!(out.contains("All green."));
+        assert!(
+            !out.contains("huge noisy output"),
+            "tool result payloads are omitted"
+        );
+        assert!(!out.contains("earlier messages"), "no truncation header");
+    }
+
+    #[test]
+    fn replay_truncates_to_the_tail() {
+        use crate::api::types::Message;
+
+        let messages: Vec<Message> = (0..30).map(|i| Message::user(&format!("m{i}"))).collect();
+        let out = strip_ansi(&replay_transcript(&messages, "qwen", 12));
+        assert!(out.contains("… 18 earlier messages not shown"));
+        assert!(!out.contains("> m17\n"), "older messages hidden");
+        assert!(out.contains("> m29"), "latest message shown");
     }
 }

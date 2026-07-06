@@ -76,6 +76,13 @@ pub fn load_session(path: &std::path::Path) -> Result<(SessionMeta, Vec<Message>
     Ok((meta, messages))
 }
 
+/// Find a session by exact id or unique-enough prefix, most recent first.
+pub fn find_session(prefix: &str) -> Result<Option<(String, PathBuf)>> {
+    Ok(list_sessions()?
+        .into_iter()
+        .find(|(sid, _)| sid == prefix || sid.starts_with(prefix)))
+}
+
 /// List available sessions, most recent first.
 pub fn list_sessions() -> Result<Vec<(String, PathBuf)>> {
     let db = get_db()?;
