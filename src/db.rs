@@ -199,12 +199,47 @@ impl Db {
         Ok(())
     }
 
+    /// Replace a session's messages wholesale, in one transaction.
+    ///
+    /// Persistence snapshots the engine's full message list after each turn
+    /// rather than appending: compaction rewrites history and steering
+    /// inserts messages mid-turn, so append-only saves drift from the
+    /// engine's actual state.
+    pub fn replace_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        tx.execute("DELETE FROM messages WHERE session_id = ?1", [session_id])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO messages (session_id, role, content, created_at)
+                 VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)",
+            )?;
+            for message in messages {
+                let content_json = serde_json::to_string(&message.content)?;
+                stmt.execute([session_id, &message.role, &content_json])?;
+            }
+        }
+        tx.execute(
+            "UPDATE sessions SET last_active = CURRENT_TIMESTAMP,
+             message_count = ?1
+             WHERE id = ?2",
+            (messages.len() as i64, session_id),
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Get all messages for a session.
+    ///
+    /// Ordered by insertion (id), not created_at: CURRENT_TIMESTAMP has
+    /// one-second granularity, so a tool round inserting several messages
+    /// in the same second would load back in unspecified order.
     pub fn get_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY id ASC")?;
 
         let messages = stmt.query_map([session_id], |row| {
             let role: String = row.get(0)?;
@@ -222,8 +257,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let limit_str = limit.to_string();
         let mut stmt = conn.prepare(
-            "SELECT role, content FROM messages WHERE session_id = ?1 
-             ORDER BY created_at DESC LIMIT ?2",
+            "SELECT role, content FROM messages WHERE session_id = ?1
+             ORDER BY id DESC LIMIT ?2",
         )?;
 
         let messages = stmt.query_map((session_id, limit_str.as_str()), |row| {
@@ -351,6 +386,68 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].role, "assistant");
+    }
+
+    fn tool_turn() -> Vec<Message> {
+        use crate::api::types::{ContentBlock, MessageContent};
+        vec![
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Text("run the tests".to_string()),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "tu_1".to_string(),
+                    name: "Bash".to_string(),
+                    input: serde_json::json!({"command": "cargo test"}),
+                }]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "tu_1".to_string(),
+                    content: "ok".to_string(),
+                    is_error: None,
+                }]),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Text("All green.".to_string()),
+            },
+        ]
+    }
+
+    #[test]
+    fn test_replace_messages_roundtrips_tool_rounds_in_order() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Db::open(&temp_dir.path().join("test.db")).unwrap();
+        db.create_session("s", "m", None, None).unwrap();
+
+        let turn = tool_turn();
+        db.replace_messages("s", &turn).unwrap();
+
+        // All messages inserted within the same second must load back in
+        // insertion order (regression: ORDER BY created_at ties).
+        let loaded = db.get_messages("s").unwrap();
+        assert_eq!(loaded.len(), 4);
+        let roles: Vec<&str> = loaded.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
+        assert_eq!(
+            serde_json::to_string(&loaded[1].content).unwrap(),
+            serde_json::to_string(&turn[1].content).unwrap(),
+            "tool_use blocks must survive the round trip"
+        );
+
+        // Replacing is a snapshot, not an append
+        let compacted = vec![Message {
+            role: "user".to_string(),
+            content: crate::api::types::MessageContent::Text("summary".to_string()),
+        }];
+        db.replace_messages("s", &compacted).unwrap();
+        let loaded = db.get_messages("s").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(db.get_session("s").unwrap().unwrap().message_count, 1);
     }
 
     #[test]

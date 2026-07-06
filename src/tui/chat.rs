@@ -235,9 +235,11 @@ pub async fn run(
     theme: Theme,
     _plugins: &PluginRegistry,
 ) -> Result<Action> {
-    // Clear engine state and load this session's messages
+    // Clear engine state and load this session's messages. repair_history
+    // makes old or crash-interrupted saves API-valid (tool_use/tool_result
+    // pairing) before the engine sends them anywhere.
     engine.messages_mut().clear();
-    let existing_messages = db.get_messages(session_id)?;
+    let existing_messages = crate::session::repair_history(db.get_messages(session_id)?);
     for msg in &existing_messages {
         engine.messages_mut().push(msg.clone());
     }
@@ -318,10 +320,14 @@ pub async fn run(
                                              Use /theme <name> to switch.");
                             }
                         },
-                        _ => match commands::execute_async(async_cmd, engine).await {
-                            Ok(output) => app.add_message("system", &output),
-                            Err(e) => app.add_message("error", &format!("Error: {e}")),
-                        },
+                        _ => {
+                            match commands::execute_async(async_cmd, engine).await {
+                                Ok(output) => app.add_message("system", &output),
+                                Err(e) => app.add_message("error", &format!("Error: {e}")),
+                            }
+                            // Commands like /compact rewrite engine history
+                            let _ = db.replace_messages(session_id, engine.messages());
+                        }
                     },
                 }
                 app.scroll = 0;
@@ -338,22 +344,21 @@ pub async fn run(
             app.scroll = 0;
             app.manual_scroll = false;
 
-            let user_msg = crate::api::Message::user(&trimmed);
-            let _ = db.append_message(session_id, &user_msg);
-
             app.status = format!("{} | thinking...", app.model);
 
             let submit_result = drive_streaming(engine, &trimmed, &mut app, terminal).await;
 
-            match submit_result {
-                Ok(()) => {
-                    if let Some(last) = engine.messages().last() {
-                        let _ = db.append_message(session_id, last);
-                    }
-                }
-                Err(e) => {
-                    app.add_message("error", &format!("Error: {e}"));
-                }
+            if let Err(e) = submit_result {
+                app.add_message("error", &format!("Error: {e}"));
+            }
+
+            // Snapshot the full conversation, tool rounds included, even on
+            // error: the engine may have made progress worth keeping.
+            // Previously only the user message and the final assistant
+            // message were saved, so resumed sessions lost everything the
+            // turn actually did.
+            if let Err(e) = db.replace_messages(session_id, engine.messages()) {
+                tracing::warn!("Failed to save session: {e}");
             }
 
             app.mode = Mode::Input;
