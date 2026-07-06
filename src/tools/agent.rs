@@ -106,30 +106,29 @@ impl Tool for AgentTool {
         );
         engine.set_system_prompt(agent_prompt);
 
-        // Race engine.submit against cancellation so a long-running sub-agent
-        // can be interrupted. Note: this aborts the submit future but the
-        // sub-agent's tools don't yet receive their own cancel token — that
-        // requires plumbing cancellation through Engine::submit.
-        tokio::select! {
-            result = engine.submit(&params.prompt) => match result {
-                Ok(response) => {
-                    let cost_summary = engine.cost.format_summary();
-                    let mut content = response;
-                    if !cost_summary.is_empty() {
-                        content.push_str(&format!("\n\n[Agent {cost_summary}]"));
-                    }
-                    Ok(ToolOutput {
-                        content,
-                        is_error: false,
-                    })
+        // The cancellation token flows into the sub-agent's own turn loop,
+        // so interrupting the parent cleanly interrupts the sub-agent's
+        // in-flight tools too.
+        match engine.submit(&params.prompt, cancel.clone()).await {
+            Ok(response) => {
+                if cancel.is_cancelled() {
+                    return Ok(ToolOutput {
+                        content: "Sub-agent interrupted by user.".to_string(),
+                        is_error: true,
+                    });
                 }
-                Err(e) => Ok(ToolOutput {
-                    content: format!("Agent error: {e}"),
-                    is_error: true,
-                }),
-            },
-            _ = cancel.cancelled() => Ok(ToolOutput {
-                content: "Sub-agent interrupted by user.".to_string(),
+                let cost_summary = engine.cost.format_summary();
+                let mut content = response;
+                if !cost_summary.is_empty() {
+                    content.push_str(&format!("\n\n[Agent {cost_summary}]"));
+                }
+                Ok(ToolOutput {
+                    content,
+                    is_error: false,
+                })
+            }
+            Err(e) => Ok(ToolOutput {
+                content: format!("Agent error: {e}"),
                 is_error: true,
             }),
         }
