@@ -5,10 +5,10 @@ A terminal-based AI coding assistant written in Rust. Streams responses, execute
 ## Features
 
 - **Streaming chat** with tool execution (Read, Write, Edit, Glob, Grep, Bash, WebFetch, Agent)
-- **Interactive permissions** — prompts before writes, `y/n/a` (always allow per-session)
-- **Mid-turn steering** — type while claux is running tools and press Enter; the running tool is cancelled, remaining queued tools are skipped, and your message reaches the model immediately (Ctrl+C in the TUI interrupts the whole turn)
-- **Double Ctrl+C to exit** — a single Ctrl+C warns instead of killing the app; press it twice within 2s to quit (Ctrl+D still exits immediately)
-- **Session persistence** — SQLite-backed with search, resume with `/resume` or `--resume`
+- **Interactive permissions** — prompts before writes, `y/n/a`; type a message at the prompt instead to deny the tool and steer the model with it
+- **Mid-turn steering** — type while claux is running tools and press Enter; the running tool is cancelled, remaining queued tools are skipped, and your message reaches the model immediately
+- **Interrupt anywhere** — Ctrl+C during a turn cancels it cleanly (in-flight tool calls are paired with interrupted results, so the conversation stays valid); press Ctrl+C twice within 2s to quit the app (Ctrl+D still exits immediately)
+- **Session persistence** — SQLite-backed with search; full transcripts including tool calls and results, so `/resume` and `--resume` restore exactly what the model saw. Histories from older versions are repaired on load
 - **Compaction** — `/compact` summarizes conversation to free context
 - **Model switching** — `/model <name>` mid-conversation
 - **Sub-agents** — Agent tool spawns scoped sub-conversations. Caveat: sub-agents currently run without permission prompts, so approving the Agent tool authorizes everything it does; permission inheritance is planned
