@@ -33,9 +33,12 @@ pub struct Engine {
 /// Events sent from the engine to the UI during streaming.
 pub enum StreamEvent {
     Text(String),
-    /// Engine status line (compaction, steering delivery). Display-only:
-    /// never part of the assistant's response text.
+    /// Engine status line (compaction). Display-only: never part of the
+    /// assistant's response text.
     Notice(String),
+    /// A steering message was delivered into the conversation. UIs render
+    /// it as the user message it now is.
+    SteeringSent(String),
     ToolStart {
         name: String,
         id: String,
@@ -47,9 +50,11 @@ pub enum StreamEvent {
         is_error: bool,
     },
     /// Permission prompt — UI must respond via the oneshot sender.
+    /// `input` is the raw tool input so UIs can render rich details.
     PermissionRequest {
         tool_name: String,
         summary: String,
+        input: serde_json::Value,
         respond: oneshot::Sender<PermissionResponse>,
     },
     /// Permission prompt with diff preview
@@ -57,8 +62,12 @@ pub enum StreamEvent {
         tool_name: String,
         summary: String,
         diff: String,
+        input: serde_json::Value,
         respond: oneshot::Sender<PermissionResponse>,
     },
+    /// The turn was cancelled; dangling tool_uses were paired with
+    /// synthetic interrupted results and the turn ended cleanly.
+    Interrupted,
     Error(String),
     Done,
 }
@@ -120,15 +129,18 @@ impl Engine {
         "Skipped: superseded by a new user message before this tool ran.";
 
     /// Execute a tool, cancelling it if a steering message arrives while it
-    /// runs. Mirrors Claude Code's submit-interrupt: a mid-batch user
-    /// message shouldn't wait out a doomed cargo test. The watcher polls
-    /// the queue at 50ms, the same cadence the TUI polls the keyboard.
+    /// runs or the turn itself is cancelled. Mirrors Claude Code's
+    /// submit-interrupt: a mid-batch user message shouldn't wait out a
+    /// doomed cargo test. The watcher polls the queue at 50ms, the same
+    /// cadence the TUI polls the keyboard; turn cancellation propagates
+    /// through the child token immediately.
     async fn execute_tool_steerable(
         &self,
         name: &str,
         input: serde_json::Value,
+        cancel: &tokio_util::sync::CancellationToken,
     ) -> crate::tools::ToolOutput {
-        let token = tokio_util::sync::CancellationToken::new();
+        let token = cancel.child_token();
         let steering = self.steering.clone();
         let watch_token = token.clone();
         let watcher = tokio::spawn(async move {
@@ -370,11 +382,21 @@ impl Engine {
         err.contains("max_output_tokens") || err.contains("max_tokens_exceeded")
     }
 
+    /// Content used when pairing a tool_use whose execution was cut off by
+    /// turn cancellation.
+    pub const INTERRUPTED_BY_USER: &'static str = "Interrupted by user.";
+
     /// Submit a user message and run the full turn loop, returning the
     /// final assistant text. Non-interactive: tools that would ask for
     /// confirmation are denied. This is a thin collector over the same
     /// run_turn that powers submit_streaming, so the two can't drift.
-    pub async fn submit(&mut self, user_input: &str) -> Result<String> {
+    /// Cancelling `cancel` ends the turn cleanly (tool_uses paired with
+    /// interrupted results).
+    pub async fn submit(
+        &mut self,
+        user_input: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String> {
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
 
         let collector = tokio::spawn(async move {
@@ -387,33 +409,35 @@ impl Engine {
             text
         });
 
-        let result = self.run_turn(user_input, tx, false).await;
+        let result = self.run_turn(user_input, tx, false, cancel).await;
         let text = collector.await.unwrap_or_default();
         result?;
         Ok(text)
     }
 
-    /// Submit with streaming callbacks (for the REPL). Interactive: tools
-    /// that need confirmation emit PermissionRequest events and wait.
+    /// Submit with streaming callbacks (for the REPL and TUI). Interactive:
+    /// tools that need confirmation emit PermissionRequest events and wait.
     pub async fn submit_streaming(
         &mut self,
         user_input: &str,
         tx: mpsc::Sender<StreamEvent>,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
-        self.run_turn(user_input, tx, true).await
+        self.run_turn(user_input, tx, true, cancel).await
     }
 
     /// The turn loop: chat -> tools -> chat -> ... until the assistant
     /// stops requesting tools. Handles steering injection, recoverable API
     /// errors (prompt-too-long -> compact, max-output-tokens -> escalate),
-    /// and tool execution. `interactive` decides what happens when a tool
-    /// needs user confirmation: emit a PermissionRequest event and wait,
-    /// or deny with a pointer at permission_mode config.
+    /// tool execution, and cancellation. `interactive` decides what happens
+    /// when a tool needs user confirmation: emit a PermissionRequest event
+    /// and wait, or deny with a pointer at permission_mode config.
     async fn run_turn(
         &mut self,
         user_input: &str,
         tx: mpsc::Sender<StreamEvent>,
         interactive: bool,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
         let compacted = self.maybe_auto_compact().await?;
         if compacted {
@@ -432,9 +456,12 @@ impl Engine {
             // Deliver any steering messages queued since the last API call,
             // and tell the UI they're now in the conversation.
             for text in self.inject_steering() {
-                let _ = tx
-                    .send(StreamEvent::Notice(format!("steering sent: {text}")))
-                    .await;
+                let _ = tx.send(StreamEvent::SteeringSent(text)).await;
+            }
+
+            if cancel.is_cancelled() {
+                let _ = tx.send(StreamEvent::Interrupted).await;
+                return Ok(());
             }
 
             let tool_defs = self.tools.definitions();
@@ -470,8 +497,19 @@ impl Engine {
             let mut text_buf = String::new();
             let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
             let mut had_error = false;
+            let mut stream_interrupted = false;
 
-            while let Some(event) = rx.recv().await {
+            loop {
+                let event = tokio::select! {
+                    event = rx.recv() => match event {
+                        Some(event) => event,
+                        None => break,
+                    },
+                    _ = cancel.cancelled() => {
+                        stream_interrupted = true;
+                        break;
+                    }
+                };
                 match event {
                     ApiEvent::Text(t) => {
                         let _ = tx.send(StreamEvent::Text(t.clone())).await;
@@ -537,13 +575,46 @@ impl Engine {
                 self.messages.push(Message::assistant_blocks(blocks));
             }
 
+            // Cancelled mid-stream: pair every received tool_use with a
+            // synthetic interrupted result so the conversation stays
+            // API-valid, then end the turn.
+            if stream_interrupted {
+                if !tool_uses.is_empty() {
+                    let mut result_blocks = Vec::with_capacity(tool_uses.len());
+                    for (id, name, _) in &tool_uses {
+                        let _ = tx
+                            .send(StreamEvent::ToolResult {
+                                name: name.clone(),
+                                content: Self::INTERRUPTED_BY_USER.to_string(),
+                                is_error: true,
+                            })
+                            .await;
+                        result_blocks.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: Self::INTERRUPTED_BY_USER.to_string(),
+                            is_error: Some(true),
+                        });
+                    }
+                    self.messages.push(Message::tool_results(result_blocks));
+                }
+                let _ = tx.send(StreamEvent::Interrupted).await;
+                return Ok(());
+            }
+
             if tool_uses.is_empty() {
                 let _ = tx.send(StreamEvent::Done).await;
                 break;
             }
 
-            let result_blocks = self.execute_tool_batch(&tool_uses, &tx, interactive).await;
+            let (result_blocks, interrupted) = self
+                .execute_tool_batch(&tool_uses, &tx, interactive, &cancel)
+                .await;
             self.messages.push(Message::tool_results(result_blocks));
+
+            if interrupted {
+                let _ = tx.send(StreamEvent::Interrupted).await;
+                return Ok(());
+            }
         }
 
         Ok(())
@@ -562,7 +633,8 @@ impl Engine {
         tool_uses: &[(String, String, serde_json::Value)],
         tx: &mpsc::Sender<StreamEvent>,
         interactive: bool,
-    ) -> Vec<ContentBlock> {
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> (Vec<ContentBlock>, bool) {
         let mut outputs: Vec<Option<crate::tools::ToolOutput>> =
             (0..tool_uses.len()).map(|_| None).collect();
 
@@ -583,15 +655,23 @@ impl Engine {
             .map(|(idx, _)| idx)
             .collect();
 
+        let mut interrupted = false;
+
         // Phase 1: run the parallel group concurrently. Tool impls take
         // &self, so concurrent immutable borrows are safe.
-        if !self.steering_pending() && !parallel.is_empty() {
+        if !self.steering_pending() && !cancel.is_cancelled() && !parallel.is_empty() {
             let this: &Self = &*self;
             let futures: Vec<_> = parallel
                 .iter()
                 .map(|&idx| {
                     let (_, name, input) = &tool_uses[idx];
-                    async move { (idx, this.execute_tool_steerable(name, input.clone()).await) }
+                    async move {
+                        (
+                            idx,
+                            this.execute_tool_steerable(name, input.clone(), cancel)
+                                .await,
+                        )
+                    }
                 })
                 .collect();
             for (idx, output) in futures_util::future::join_all(futures).await {
@@ -602,6 +682,17 @@ impl Engine {
         // Phase 2: everything not yet run, in order.
         for (idx, (_, name, input)) in tool_uses.iter().enumerate() {
             if outputs[idx].is_some() {
+                continue;
+            }
+
+            // Turn cancelled: pair the remaining tools with interrupted
+            // results and end the turn after this batch.
+            if cancel.is_cancelled() {
+                interrupted = true;
+                outputs[idx] = Some(crate::tools::ToolOutput {
+                    content: Self::INTERRUPTED_BY_USER.to_string(),
+                    is_error: true,
+                });
                 continue;
             }
 
@@ -620,7 +711,10 @@ impl Engine {
             let perm = self.permissions.check(name, input, is_read_only);
 
             let output = match perm {
-                PermissionResult::Allow => self.execute_tool_steerable(name, input.clone()).await,
+                PermissionResult::Allow => {
+                    self.execute_tool_steerable(name, input.clone(), cancel)
+                        .await
+                }
                 PermissionResult::Deny(reason) => crate::tools::ToolOutput {
                     content: format!("Permission denied: {reason}"),
                     is_error: true,
@@ -637,11 +731,16 @@ impl Engine {
                             is_error: true,
                         }
                     } else {
-                        self.ask_permission(name, input, message, diff, tx).await
+                        self.ask_permission(name, input, message, diff, tx, cancel)
+                            .await
                     }
                 }
             };
             outputs[idx] = Some(output);
+        }
+
+        if cancel.is_cancelled() {
+            interrupted = true;
         }
 
         // Phase 3: truncate, emit events, and build blocks in order.
@@ -668,7 +767,7 @@ impl Engine {
             });
         }
 
-        result_blocks
+        (result_blocks, interrupted)
     }
 
     /// Ask the UI for permission and run (or deny) the tool accordingly.
@@ -679,6 +778,7 @@ impl Engine {
         message: String,
         diff: Option<String>,
         tx: &mpsc::Sender<StreamEvent>,
+        cancel: &tokio_util::sync::CancellationToken,
     ) -> crate::tools::ToolOutput {
         let (resp_tx, resp_rx) = oneshot::channel();
 
@@ -687,12 +787,14 @@ impl Engine {
                 tool_name: name.to_string(),
                 summary: message,
                 diff: d,
+                input: input.clone(),
                 respond: resp_tx,
             }
         } else {
             StreamEvent::PermissionRequest {
                 tool_name: name.to_string(),
                 summary: message,
+                input: input.clone(),
                 respond: resp_tx,
             }
         };
@@ -700,14 +802,19 @@ impl Engine {
         let _ = tx.send(event).await;
 
         match resp_rx.await {
-            Ok(PermissionResponse::Allow) => self.execute_tool_steerable(name, input.clone()).await,
+            Ok(PermissionResponse::Allow) => {
+                self.execute_tool_steerable(name, input.clone(), cancel)
+                    .await
+            }
             Ok(PermissionResponse::AlwaysAllow) => {
                 self.permissions.always_allow(name);
-                self.execute_tool_steerable(name, input.clone()).await
+                self.execute_tool_steerable(name, input.clone(), cancel)
+                    .await
             }
             Ok(PermissionResponse::AlwaysAllowCommand(ref cmd)) => {
                 self.permissions.always_allow_command(cmd);
-                self.execute_tool_steerable(name, input.clone()).await
+                self.execute_tool_steerable(name, input.clone(), cancel)
+                    .await
             }
             // DenyAndCancel queues the typed message as steering; the
             // steering_pending check skips the rest of the batch.
@@ -801,8 +908,13 @@ mod tests {
         let start = Instant::now();
         let (batch_tx, mut batch_rx) = mpsc::channel(64);
         let drain = tokio::spawn(async move { while batch_rx.recv().await.is_some() {} });
-        let blocks = engine
-            .execute_tool_batch(&tool_uses, &batch_tx, false)
+        let (blocks, _interrupted) = engine
+            .execute_tool_batch(
+                &tool_uses,
+                &batch_tx,
+                false,
+                &tokio_util::sync::CancellationToken::new(),
+            )
             .await;
         drop(batch_tx);
         drain.await.unwrap();
@@ -866,8 +978,13 @@ mod tests {
 
         let (batch_tx, mut batch_rx) = mpsc::channel(64);
         let drain = tokio::spawn(async move { while batch_rx.recv().await.is_some() {} });
-        let blocks = engine
-            .execute_tool_batch(&tool_uses, &batch_tx, false)
+        let (blocks, _interrupted) = engine
+            .execute_tool_batch(
+                &tool_uses,
+                &batch_tx,
+                false,
+                &tokio_util::sync::CancellationToken::new(),
+            )
             .await;
         drop(batch_tx);
         drain.await.unwrap();
@@ -965,7 +1082,10 @@ mod tests {
     async fn run_streaming(engine: &mut Engine, prompt: &str) {
         let (tx, mut rx) = mpsc::channel(64);
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        engine.submit_streaming(prompt, tx).await.unwrap();
+        engine
+            .submit_streaming(prompt, tx, tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
         drain.await.unwrap();
     }
 
@@ -1081,6 +1201,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cancellation_ends_turn_with_paired_results() {
+        // Cancelling mid-tool must cut the running tool short, pair every
+        // tool_use with a result, emit Interrupted, and return Ok.
+        let mut engine = steering_engine(
+            vec![(
+                "tu_1".to_string(),
+                "Bash".to_string(),
+                serde_json::json!({"command": "sleep 5"}),
+            )],
+            None,
+        );
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            canceller.cancel();
+        });
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let events = tokio::spawn(async move {
+            let mut interrupted = false;
+            while let Some(ev) = rx.recv().await {
+                if matches!(ev, StreamEvent::Interrupted) {
+                    interrupted = true;
+                }
+            }
+            interrupted
+        });
+
+        let start = std::time::Instant::now();
+        engine.submit_streaming("run it", tx, cancel).await.unwrap();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "cancellation should not wait out the tool (took {:?})",
+            start.elapsed()
+        );
+        assert!(events.await.unwrap(), "Interrupted event must be emitted");
+
+        // Every tool_use is paired: the last message holds the results
+        let msgs = engine.messages();
+        let crate::api::MessageContent::Blocks(blocks) = &msgs.last().unwrap().content else {
+            panic!("expected tool results last, got {msgs:?}");
+        };
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::ToolResult {
+                is_error: Some(true),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn test_submit_returns_text_without_notices() {
         // submit() is a collector over the unified turn loop. Steering
         // delivery generates a Notice event; the returned text must be the
@@ -1094,7 +1268,10 @@ mod tests {
             Some("check auth too".to_string()),
         );
 
-        let text = engine.submit("go").await.unwrap();
+        let text = engine
+            .submit("go", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(text, "working on it", "notices must not leak into text");
         // The steering message still made it into the conversation
         let last = engine.messages().last().unwrap();
@@ -1128,7 +1305,10 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        engine.submit("run it").await.unwrap();
+        engine
+            .submit("run it", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
         assert!(
             start.elapsed() < std::time::Duration::from_secs(3),
             "steering should cancel the running tool via submit() too (took {:?})",
@@ -1166,8 +1346,13 @@ mod tests {
 
         let (batch_tx, mut batch_rx) = mpsc::channel(64);
         let drain = tokio::spawn(async move { while batch_rx.recv().await.is_some() {} });
-        let blocks = engine
-            .execute_tool_batch(&tool_uses, &batch_tx, false)
+        let (blocks, _interrupted) = engine
+            .execute_tool_batch(
+                &tool_uses,
+                &batch_tx,
+                false,
+                &tokio_util::sync::CancellationToken::new(),
+            )
             .await;
         drop(batch_tx);
         drain.await.unwrap();
@@ -1218,8 +1403,13 @@ mod tests {
 
         let (batch_tx, mut batch_rx) = mpsc::channel(64);
         let drain = tokio::spawn(async move { while batch_rx.recv().await.is_some() {} });
-        let blocks = engine
-            .execute_tool_batch(&tool_uses, &batch_tx, false)
+        let (blocks, _interrupted) = engine
+            .execute_tool_batch(
+                &tool_uses,
+                &batch_tx,
+                false,
+                &tokio_util::sync::CancellationToken::new(),
+            )
             .await;
         drop(batch_tx);
         drain.await.unwrap();

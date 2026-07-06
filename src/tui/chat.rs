@@ -6,14 +6,13 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::Stdout;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::commands::{self, CommandResult};
 use crate::db::Db;
 use crate::permissions::PermissionResponse;
 use crate::plugin::PluginRegistry;
-use crate::query::{Engine, SteeringQueue};
+use crate::query::{Engine, SteeringQueue, StreamEvent};
 use crate::theme::{Theme, ThemeName};
 
 use super::screen::Action;
@@ -135,6 +134,15 @@ impl ChatApp {
     pub fn update_last_tool_status(&mut self, new_status: ToolStatus) {
         self.messages_rev += 1;
         if let Some(ChatMessage::Tool { status, .. }) = self.messages.last_mut() {
+            *status = new_status;
+        }
+    }
+
+    /// Update a specific tool message's status by index. Tool results can
+    /// arrive for bubbles other than the last (parallel read-only tools).
+    pub fn set_tool_status_at(&mut self, idx: usize, new_status: ToolStatus) {
+        self.messages_rev += 1;
+        if let Some(ChatMessage::Tool { status, .. }) = self.messages.get_mut(idx) {
             *status = new_status;
         }
     }
@@ -392,69 +400,116 @@ pub async fn run(
     }
 }
 
-/// Drive the streaming query, handling both stream events and terminal events.
+/// Drive one turn through the engine's event protocol.
+///
+/// The TUI no longer duplicates the turn loop: engine::run_turn owns the
+/// conversation (assistant blocks, tool execution, steering, interrupt
+/// pairing), and this function is a select over the submit future, the
+/// event stream, and a 50ms draw/key tick. Permission prompts arrive as
+/// events carrying the tool input and a oneshot responder.
 async fn drive_streaming(
     engine: &mut Engine,
     input: &str,
     app: &mut ChatApp,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> Result<()> {
-    engine.messages_mut().push(crate::api::Message::user(input));
-
-    // Deliver steering left over from a previous turn (typed after that
-    // turn's last drain point).
-    for text in engine.inject_steering() {
-        app.add_message("user", &text);
-    }
-
     let steering = engine.steering_queue();
     let steer_buf = app.steer_buf.clone();
+    let model_name = engine.model().to_string();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(256);
 
-    let tool_defs = engine.tool_definitions();
-    let mut api_rx = engine.start_stream(&tool_defs).await?;
+    let mut submit_result: Option<Result<()>> = None;
+    {
+        let submit_fut = engine.submit_streaming(input, tx, cancel.clone());
+        tokio::pin!(submit_fut);
 
-    let mut text_buf = String::new();
-    let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
-    let cancelled = Arc::new(AtomicBool::new(false));
+        // Tool bubbles awaiting results, oldest first: indices into
+        // app.messages, matched FIFO with ToolResult events (the engine
+        // emits results in tool_use order).
+        let mut running_tools: std::collections::VecDeque<usize> =
+            std::collections::VecDeque::new();
 
-    loop {
-        // A persistent interval, not a fresh sleep per select iteration: a
-        // sleep future recreated each loop never fires while stream chunks
-        // arrive faster than its duration, which would starve redraws and
-        // key polling exactly when the model streams quickly.
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         loop {
             tokio::select! {
-                Some(event) = api_rx.recv() => {
+                res = &mut submit_fut, if submit_result.is_none() => {
+                    submit_result = Some(res);
+                }
+                event = rx.recv() => {
+                    let Some(event) = event else {
+                        break; // tx dropped: turn over, events drained
+                    };
                     match event {
-                        crate::api::ApiEvent::Text(t) => {
-                            // No draw here: chunks can arrive far faster
-                            // than frames are worth painting. The 50ms
-                            // tick below redraws, coalescing however many
-                            // chunks arrived since the last frame.
+                        StreamEvent::Text(t) => {
+                            // Drawn by the tick, which coalesces chunks
                             app.stream_buffer.push_str(&t);
-                            text_buf.push_str(&t);
-                            if app.thinking {
-                                app.thinking = false;
+                            app.thinking = false;
+                        }
+                        StreamEvent::Notice(n) => {
+                            flush_stream_buffer(app);
+                            app.add_message("system", &n);
+                        }
+                        StreamEvent::SteeringSent(t) => {
+                            flush_stream_buffer(app);
+                            app.add_message("user", &t);
+                        }
+                        StreamEvent::ToolStart { name, summary, .. } => {
+                            flush_stream_buffer(app);
+                            app.add_tool(&name, &summary, ToolStatus::Running);
+                            running_tools.push_back(app.messages.len() - 1);
+                            terminal.draw(|f| ui::draw_chat(f, app))?;
+                        }
+                        StreamEvent::ToolResult { is_error, .. } => {
+                            if let Some(idx) = running_tools.pop_front() {
+                                app.set_tool_status_at(
+                                    idx,
+                                    if is_error { ToolStatus::Error } else { ToolStatus::Success },
+                                );
+                            }
+                            terminal.draw(|f| ui::draw_chat(f, app))?;
+                        }
+                        StreamEvent::PermissionRequest { tool_name, summary, input, respond }
+                        | StreamEvent::PermissionRequestWithDiff { tool_name, summary, input, respond, .. } => {
+                            let response = prompt_permission_tui(
+                                app,
+                                terminal,
+                                &model_name,
+                                &tool_name,
+                                &summary,
+                                &input,
+                                &steering,
+                            )?;
+                            // Denying outright ends the turn (the engine
+                            // pairs the rest of the batch as interrupted);
+                            // DenyAndCancel instead queued steering, which
+                            // the engine delivers immediately.
+                            let end_turn = matches!(response, PermissionResponse::Deny);
+                            let _ = respond.send(response);
+                            if end_turn {
+                                cancel.cancel();
                             }
                         }
-                        crate::api::ApiEvent::ToolUse { id, name, input } => {
-                            tool_uses.push((id, name, input));
+                        StreamEvent::Interrupted => {
+                            flush_stream_buffer(app);
+                            while let Some(idx) = running_tools.pop_front() {
+                                app.set_tool_status_at(idx, ToolStatus::Error);
+                            }
+                            app.add_message("system", "Interrupted by user.");
                         }
-                        crate::api::ApiEvent::Usage(usage) => {
-                            engine.cost.add_usage(&usage);
+                        StreamEvent::Error(_) => {
+                            // Surfaced through submit_result by the caller
                         }
-                        crate::api::ApiEvent::Done => break,
-                        crate::api::ApiEvent::Error(e) => {
-                            return Err(anyhow::anyhow!("API error: {e}"));
+                        StreamEvent::Done => {
+                            flush_stream_buffer(app);
                         }
                     }
                 }
                 _ = tick.tick() => {
                     if poll_stream_key(&steer_buf, &steering)? {
-                        cancelled.store(true, Ordering::Relaxed);
-                        break;
+                        cancel.cancel();
                     }
                     // The tick is the only draw during streaming: it
                     // coalesces all chunks since the last frame, animates
@@ -463,323 +518,85 @@ async fn drive_streaming(
                 }
             }
         }
-
-        // Record assistant message
-        let mut blocks = Vec::new();
-        if !text_buf.is_empty() {
-            blocks.push(crate::api::ContentBlock::Text {
-                text: text_buf.clone(),
-            });
-        }
-        for (id, name, input) in &tool_uses {
-            blocks.push(crate::api::ContentBlock::ToolUse {
-                id: id.clone(),
-                name: name.clone(),
-                input: input.clone(),
-            });
-        }
-        if !blocks.is_empty() {
-            engine
-                .messages_mut()
-                .push(crate::api::Message::assistant_blocks(blocks));
-        }
-
-        // If the stream was cancelled, every tool_use that came in is orphan.
-        // Pair them with synthetic interrupted tool_results so the next turn
-        // doesn't see unanswered tool calls and try to continue the chain.
-        if cancelled.load(Ordering::Relaxed) {
-            if !tool_uses.is_empty() {
-                engine
-                    .messages_mut()
-                    .push(crate::api::Message::tool_results(
-                        synthesize_interrupt_results(&tool_uses),
-                    ));
-            }
-            if !app.stream_buffer.is_empty() {
-                let content = app.stream_buffer.clone();
-                app.stream_buffer.clear();
-                app.add_message("assistant", &content);
-            }
-            app.add_message("system", "Interrupted by user.");
-            return Ok(());
-        }
-
-        if tool_uses.is_empty() {
-            if !app.stream_buffer.is_empty() {
-                let content = app.stream_buffer.clone();
-                app.stream_buffer.clear();
-                app.add_message("assistant", &content);
-            }
-            break;
-        }
-
-        // Execute tools
-        let mut result_blocks = Vec::new();
-        let mut interrupted_at: Option<usize> = None;
-        let mut steered_at: Option<usize> = None;
-        for (idx, (id, name, input)) in tool_uses.iter().enumerate() {
-            // Cancellation/steering check between tools.
-            if poll_stream_key(&steer_buf, &steering)? {
-                cancelled.store(true, Ordering::Relaxed);
-            }
-            if cancelled.load(Ordering::Relaxed) {
-                interrupted_at = Some(idx);
-                break;
-            }
-            // A pending steering message supersedes the rest of the batch;
-            // skip it so the model reads the correction immediately.
-            if !steering.lock().expect("steering queue poisoned").is_empty() {
-                steered_at = Some(idx);
-                break;
-            }
-            let summary = engine.summarize_tool(name, input);
-            // Flush any pending streamed text before showing tool
-            if !app.stream_buffer.is_empty() {
-                let content = app.stream_buffer.clone();
-                app.stream_buffer.clear();
-                app.add_message("assistant", &content);
-            }
-            app.add_tool(name, &summary, ToolStatus::Running);
-            terminal.draw(|f| ui::draw_chat(f, app))?;
-
-            let is_read_only = engine.is_tool_read_only(name);
-            let perm = engine.check_permission(name, input, is_read_only);
-
-            let tool_output = match perm {
-                crate::permissions::PermissionResult::Allow => {
-                    execute_tool_with_cancel(
-                        engine,
-                        name,
-                        input.clone(),
-                        cancelled.clone(),
-                        steer_buf.clone(),
-                    )
-                    .await
-                }
-                crate::permissions::PermissionResult::Deny(reason) => crate::tools::ToolOutput {
-                    content: format!("Permission denied: {reason}"),
-                    is_error: true,
-                },
-                crate::permissions::PermissionResult::Ask {
-                    message: summary, ..
-                } => {
-                    let details = format_permission_details(name, input);
-                    app.permission_prompt = Some(summary.clone());
-                    app.permission_details = Some(details);
-                    app.mode = Mode::Permission;
-                    terminal.draw(|f| ui::draw_chat(f, app))?;
-
-                    let mut perm_input = String::new();
-
-                    let response = loop {
-                        if event::poll(std::time::Duration::from_millis(50))? {
-                            if let Event::Key(key) = event::read()? {
-                                match key.code {
-                                    KeyCode::Char('y') | KeyCode::Enter
-                                        if perm_input.is_empty() =>
-                                    {
-                                        break PermissionResponse::Allow;
-                                    }
-                                    KeyCode::Char('a') if perm_input.is_empty() => {
-                                        break PermissionResponse::AlwaysAllow;
-                                    }
-                                    KeyCode::Char('n') if perm_input.is_empty() => {
-                                        break PermissionResponse::Deny;
-                                    }
-                                    KeyCode::Esc if perm_input.is_empty() => {
-                                        break PermissionResponse::Deny;
-                                    }
-                                    KeyCode::Enter if !perm_input.is_empty() => {
-                                        // User typed a message: deny current tool
-                                        // and inject the message as steering.
-                                        steering
-                                            .lock()
-                                            .expect("steering queue poisoned")
-                                            .push_back(perm_input.clone());
-                                        app.add_message("user", &perm_input);
-                                        break PermissionResponse::DenyAndCancel;
-                                    }
-                                    KeyCode::Backspace if !perm_input.is_empty() => {
-                                        perm_input.pop();
-                                    }
-                                    KeyCode::Char(c) => {
-                                        perm_input.push(c);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        // Redraw so the typed text stays visible
-                        app.status =
-                            format!("{} | deny and message: {}", engine.model(), perm_input);
-                        terminal.draw(|f| ui::draw_chat(f, app))?;
-                    };
-
-                    app.permission_prompt = None;
-                    app.permission_details = None;
-                    app.mode = Mode::Streaming;
-                    app.status = format!("{} | {}", engine.model(), engine.cost.format_summary());
-
-                    match response {
-                        PermissionResponse::Allow => {
-                            execute_tool_with_cancel(
-                                engine,
-                                name,
-                                input.clone(),
-                                cancelled.clone(),
-                                steer_buf.clone(),
-                            )
-                            .await
-                        }
-                        PermissionResponse::AlwaysAllow => {
-                            engine.always_allow_tool(name);
-                            execute_tool_with_cancel(
-                                engine,
-                                name,
-                                input.clone(),
-                                cancelled.clone(),
-                                steer_buf.clone(),
-                            )
-                            .await
-                        }
-                        PermissionResponse::AlwaysAllowCommand(cmd) => {
-                            engine.always_allow_tool(name);
-                            engine.always_allow_command(&cmd);
-                            execute_tool_with_cancel(
-                                engine,
-                                name,
-                                input.clone(),
-                                cancelled.clone(),
-                                steer_buf.clone(),
-                            )
-                            .await
-                        }
-                        PermissionResponse::Deny => {
-                            cancelled.store(true, Ordering::Relaxed);
-                            crate::tools::ToolOutput {
-                                content: "Permission denied by user.".to_string(),
-                                is_error: true,
-                            }
-                        }
-                        PermissionResponse::DenyAndCancel => {
-                            cancelled.store(true, Ordering::Relaxed);
-                            crate::tools::ToolOutput {
-                                content: "Permission denied by user.".to_string(),
-                                is_error: true,
-                            }
-                        }
-                    }
-                }
-            };
-
-            // The tool itself may have noticed cancellation and returned an
-            // error. The for-loop's top-of-iter check picks it up, but if
-            // the user cancelled *during* this tool, we want to honor it
-            // immediately rather than starting the next tool.
-            if cancelled.load(Ordering::Relaxed) {
-                // Push this tool's result (likely "Interrupted by user") and
-                // then mark interruption so the post-loop fixup synthesizes
-                // results for the rest.
-                let (content, _was_truncated) =
-                    crate::compact::truncate_tool_output(&tool_output.content);
-                if tool_output.is_error {
-                    app.update_last_tool_status(ToolStatus::Error);
-                } else {
-                    app.update_last_tool_status(ToolStatus::Success);
-                }
-                terminal.draw(|f| ui::draw_chat(f, app))?;
-                result_blocks.push(crate::api::ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content,
-                    is_error: if tool_output.is_error {
-                        Some(true)
-                    } else {
-                        None
-                    },
-                });
-                interrupted_at = Some(idx + 1);
-                break;
-            }
-
-            let (content, _was_truncated) =
-                crate::compact::truncate_tool_output(&tool_output.content);
-
-            if tool_output.is_error {
-                app.update_last_tool_status(ToolStatus::Error);
-            } else {
-                app.update_last_tool_status(ToolStatus::Success);
-            }
-            terminal.draw(|f| ui::draw_chat(f, app))?;
-
-            result_blocks.push(crate::api::ContentBlock::ToolResult {
-                tool_use_id: id.clone(),
-                content,
-                is_error: if tool_output.is_error {
-                    Some(true)
-                } else {
-                    None
-                },
-            });
-        }
-
-        // If we broke out due to cancellation, synthesize interrupted results
-        // for the unstarted tool_uses so the assistant message has paired
-        // tool_use/tool_result blocks. Otherwise the next turn sees orphans.
-        if let Some(idx) = interrupted_at {
-            for (id, _name, _input) in &tool_uses[idx..] {
-                result_blocks.push(crate::api::ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: "Interrupted by user.".to_string(),
-                    is_error: Some(true),
-                });
-            }
-            engine
-                .messages_mut()
-                .push(crate::api::Message::tool_results(result_blocks));
-            app.add_message("system", "Interrupted by user.");
-            return Ok(());
-        }
-
-        // A steering message superseded the rest of the batch: pair the
-        // unstarted tool_uses with synthetic results and continue the turn.
-        // No "interrupted" note is added; the injected user message below
-        // explains the skip to the model, matching Claude Code's
-        // submit-interrupt behavior.
-        if let Some(idx) = steered_at {
-            let skipped = tool_uses.len() - idx;
-            for (id, name, _input) in &tool_uses[idx..] {
-                app.add_tool(name, "skipped (steering)", ToolStatus::Error);
-                result_blocks.push(crate::api::ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: Engine::SKIPPED_FOR_STEERING.to_string(),
-                    is_error: Some(true),
-                });
-            }
-            app.add_message(
-                "system",
-                &format!("Skipped {skipped} queued tool(s) to apply your message."),
-            );
-        }
-
-        engine
-            .messages_mut()
-            .push(crate::api::Message::tool_results(result_blocks));
-
-        // Deliver steering typed while tools were running, so the next API
-        // call sees it right after the tool results.
-        for text in engine.inject_steering() {
-            app.add_message("user", &text);
-        }
-        terminal.draw(|f| ui::draw_chat(f, app))?;
-
-        text_buf.clear();
-        tool_uses.clear();
-
-        let tool_defs = engine.tool_definitions();
-        api_rx = engine.start_stream(&tool_defs).await?;
     }
 
-    Ok(())
+    submit_result.unwrap_or(Ok(()))
+}
+
+/// Move any streamed-but-unflushed assistant text into a message bubble.
+fn flush_stream_buffer(app: &mut ChatApp) {
+    if !app.stream_buffer.is_empty() {
+        let content = app.stream_buffer.clone();
+        app.stream_buffer.clear();
+        app.add_message("assistant", &content);
+    }
+}
+
+/// Full-screen permission prompt. Returns the user's decision; typing a
+/// message and pressing Enter queues it as steering and denies the tool
+/// (the engine then skips the rest of the batch and delivers the message).
+fn prompt_permission_tui(
+    app: &mut ChatApp,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    model_name: &str,
+    tool_name: &str,
+    summary: &str,
+    input: &serde_json::Value,
+    steering: &SteeringQueue,
+) -> Result<PermissionResponse> {
+    app.permission_prompt = Some(summary.to_string());
+    app.permission_details = Some(format_permission_details(tool_name, input));
+    app.mode = Mode::Permission;
+    terminal.draw(|f| ui::draw_chat(f, app))?;
+
+    let mut perm_input = String::new();
+
+    let response = loop {
+        if event::poll(std::time::Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Enter if perm_input.is_empty() => {
+                        break PermissionResponse::Allow;
+                    }
+                    KeyCode::Char('a') if perm_input.is_empty() => {
+                        break PermissionResponse::AlwaysAllow;
+                    }
+                    KeyCode::Char('n') if perm_input.is_empty() => {
+                        break PermissionResponse::Deny;
+                    }
+                    KeyCode::Esc if perm_input.is_empty() => {
+                        break PermissionResponse::Deny;
+                    }
+                    KeyCode::Enter if !perm_input.is_empty() => {
+                        // User typed a message: deny this tool and inject
+                        // the message as steering. The engine delivers it
+                        // right after the skipped batch.
+                        steering
+                            .lock()
+                            .expect("steering queue poisoned")
+                            .push_back(perm_input.clone());
+                        break PermissionResponse::DenyAndCancel;
+                    }
+                    KeyCode::Backspace if !perm_input.is_empty() => {
+                        perm_input.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        perm_input.push(c);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Redraw so the typed text stays visible
+        app.status = format!("{model_name} | deny and message: {perm_input}");
+        terminal.draw(|f| ui::draw_chat(f, app))?;
+    };
+
+    app.permission_prompt = None;
+    app.permission_details = None;
+    app.mode = Mode::Streaming;
+    app.status = model_name.to_string();
+    Ok(response)
 }
 
 /// Non-blocking key poll while a turn is running. Ctrl+C cancels (returns
@@ -815,65 +632,6 @@ fn poll_stream_key(steer_buf: &Arc<Mutex<String>>, steering: &SteeringQueue) -> 
         }
     }
     Ok(false)
-}
-
-/// Run a tool while watching the keyboard. Each invocation gets its own
-/// fresh CancellationToken so cancellation of one tool doesn't leak into
-/// later tool calls in the same chain. Ctrl+C fires the token and the tool
-/// is expected to notice it and return promptly; other keys feed the
-/// steering buffer so the user can type while a long tool runs.
-/// `outer_cancelled` is signalled to the caller so it can decide to break
-/// out of any surrounding loops.
-async fn execute_tool_with_cancel(
-    engine: &mut crate::query::Engine,
-    name: &str,
-    input: serde_json::Value,
-    outer_cancelled: Arc<AtomicBool>,
-    steer_buf: Arc<Mutex<String>>,
-) -> crate::tools::ToolOutput {
-    let token = tokio_util::sync::CancellationToken::new();
-    let watcher_token = token.clone();
-    let watcher_flag = outer_cancelled.clone();
-    let steering = engine.steering_queue();
-    let watcher = tokio::spawn(async move {
-        loop {
-            if watcher_token.is_cancelled() {
-                return;
-            }
-            if poll_stream_key(&steer_buf, &steering).unwrap_or(false) {
-                watcher_flag.store(true, Ordering::Relaxed);
-                watcher_token.cancel();
-                return;
-            }
-            // A steering message cancels the running tool but not the turn:
-            // outer_cancelled stays false, so the batch loop continues,
-            // sees the pending message, and skips the rest of the batch.
-            if !steering.lock().expect("steering queue poisoned").is_empty() {
-                watcher_token.cancel();
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    });
-
-    let result = engine.execute_tool(name, input, token.clone()).await;
-    token.cancel(); // wake the watcher so it exits
-    let _ = watcher.await;
-    result
-}
-
-/// Build "Interrupted by user" tool_result blocks for tool_uses that never ran.
-fn synthesize_interrupt_results(
-    tool_uses: &[(String, String, serde_json::Value)],
-) -> Vec<crate::api::ContentBlock> {
-    tool_uses
-        .iter()
-        .map(|(id, _name, _input)| crate::api::ContentBlock::ToolResult {
-            tool_use_id: id.clone(),
-            content: "Interrupted by user.".to_string(),
-            is_error: Some(true),
-        })
-        .collect()
 }
 
 fn format_permission_details(tool_name: &str, input: &serde_json::Value) -> Vec<String> {

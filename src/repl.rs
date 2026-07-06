@@ -121,8 +121,9 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
         // while the turn runs; permission prompts consume the next line.
         let mut submit_result: Option<Result<()>> = None;
         let mut exit_app = false;
+        let turn_cancel = tokio_util::sync::CancellationToken::new();
         {
-            let submit_fut = engine.submit_streaming(trimmed, tx);
+            let submit_fut = engine.submit_streaming(trimmed, tx, turn_cancel.clone());
             tokio::pin!(submit_fut);
 
             let mut in_tool = false;
@@ -138,7 +139,10 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
                             exit_app = true;
                             break;
                         }
-                        println!("\n  \x1b[2m(press Ctrl+C again to exit claux; type a message + Enter to steer it instead)\x1b[0m");
+                        // First press interrupts the turn cleanly; the
+                        // engine pairs dangling tool calls and returns.
+                        turn_cancel.cancel();
+                        println!("\n  \x1b[2m(interrupting... press Ctrl+C again quickly to exit claux)\x1b[0m");
                     }
                     event = rx.recv() => {
                         let Some(event) = event else {
@@ -151,6 +155,20 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
                                     in_tool = false;
                                 }
                                 println!("\n  \x1b[2m[{n}]\x1b[0m");
+                            }
+                            StreamEvent::SteeringSent(t) => {
+                                if in_tool {
+                                    println!();
+                                    in_tool = false;
+                                }
+                                println!("\n  \x1b[2m↳ steering sent: {t}\x1b[0m");
+                            }
+                            StreamEvent::Interrupted => {
+                                if in_tool {
+                                    println!();
+                                    in_tool = false;
+                                }
+                                println!("\n  \x1b[33m⏹ interrupted\x1b[0m\n");
                             }
                             StreamEvent::Text(t) => {
                                 if in_tool {
@@ -184,6 +202,7 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
                                 tool_name,
                                 summary,
                                 respond,
+                                ..
                             } => {
                                 if in_tool {
                                     println!();
@@ -199,6 +218,7 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
                                 summary,
                                 diff,
                                 respond,
+                                ..
                             } => {
                                 if in_tool {
                                     println!();

@@ -124,7 +124,9 @@ async fn main() -> Result<()> {
         .await?;
         engine.set_system_prompt(system_prompt);
 
-        let response = engine.submit(prompt).await?;
+        let response = engine
+            .submit(prompt, tokio_util::sync::CancellationToken::new())
+            .await?;
         print!("{response}");
         return Ok(());
     }
