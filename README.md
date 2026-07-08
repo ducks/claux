@@ -11,7 +11,7 @@ A terminal-based AI coding assistant written in Rust. Streams responses, execute
 - **Session persistence** — SQLite-backed with search; full transcripts including tool calls and results, so `/resume` and `--resume` restore exactly what the model saw. Histories from older versions are repaired on load
 - **Compaction** — `/compact` summarizes conversation to free context
 - **Model switching** — `/model <name>` mid-conversation
-- **Sub-agents** — Agent tool spawns scoped sub-conversations. Caveat: sub-agents currently run without permission prompts, so approving the Agent tool authorizes everything it does; permission inheritance is planned
+- **Sub-agents** — Agent tool spawns scoped sub-conversations. Sub-agents inherit the parent session's permission mode, so a sub-agent can't act with more authority than you granted the session. Because sub-agents run non-interactively, any tool the mode would prompt for is denied rather than auto-run (Plan denies all writes; Bypass allows all)
 - **Auto-compact** — triggers when conversation gets large
 - **Cost tracking** — per-model token usage and USD estimates
 - **Prompt caching** — automatic Anthropic cache breakpoints on the system prompt and conversation, cutting input cost and latency on long sessions

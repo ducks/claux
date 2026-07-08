@@ -15,13 +15,23 @@ pub type ProviderFactory = Box<dyn Fn() -> Box<dyn Provider> + Send + Sync>;
 pub struct AgentTool {
     make_provider: ProviderFactory,
     model: String,
+    /// Permission mode inherited from the parent session. A sub-agent runs
+    /// non-interactively (no prompt to surface), so anything the parent's
+    /// mode would prompt for is denied rather than auto-run — but Plan's
+    /// deny-all-writes and Bypass's allow-all are honored exactly.
+    permission_mode: PermissionMode,
 }
 
 impl AgentTool {
-    pub fn new(make_provider: ProviderFactory, model: String) -> Self {
+    pub fn new(
+        make_provider: ProviderFactory,
+        model: String,
+        permission_mode: PermissionMode,
+    ) -> Self {
         Self {
             make_provider,
             model,
+            permission_mode,
         }
     }
 }
@@ -91,7 +101,14 @@ impl Tool for AgentTool {
 
         let provider = (self.make_provider)();
         let tools = ToolRegistry::without_agent();
-        let permissions = PermissionChecker::new(PermissionMode::Bypass);
+        // Inherit the parent's permission mode. Previously hardcoded to
+        // Bypass, which let a sub-agent run Bash/Write/Edit with no prompts
+        // regardless of the mode the user chose - approving the Agent tool
+        // once silently authorized everything it did. The sub-agent has no
+        // interactive prompt, so run_turn (non-interactive) denies any tool
+        // the mode would Ask about; Bypass still allows all, Plan still
+        // denies all writes.
+        let permissions = PermissionChecker::new(self.permission_mode);
 
         let mut engine = Engine::new(provider, tools, permissions, &self.model);
         engine.set_auto_compact_threshold(0.8); // Default for sub-agents
@@ -132,5 +149,99 @@ impl Tool for AgentTool {
                 is_error: true,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{ApiEvent, Message, ToolDefinition};
+    use tokio::sync::mpsc;
+
+    /// Provider that, on the sub-agent's first turn, requests a Write to a
+    /// concrete path, then ends the turn. Lets us prove the sub-agent's
+    /// inherited permission mode actually gates the write.
+    struct PathWriteProvider {
+        path: String,
+    }
+
+    #[async_trait]
+    impl Provider for PathWriteProvider {
+        fn name(&self) -> &str {
+            "path-write"
+        }
+        fn model(&self) -> &str {
+            "test"
+        }
+        fn set_model(&mut self, _model: &str) {}
+        async fn stream(
+            &self,
+            messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+        ) -> Result<mpsc::Receiver<ApiEvent>> {
+            let (tx, rx) = mpsc::channel(10);
+            if messages.len() <= 1 {
+                let _ = tx
+                    .send(ApiEvent::ToolUse {
+                        id: "tu_1".into(),
+                        name: "Write".into(),
+                        input: json!({
+                            "file_path": self.path,
+                            "content": "written by sub-agent",
+                        }),
+                    })
+                    .await;
+            }
+            let _ = tx.send(ApiEvent::Done).await;
+            Ok(rx)
+        }
+    }
+
+    async fn run_subagent_write(mode: PermissionMode, path: &std::path::Path) {
+        let path_str = path.to_str().unwrap().to_string();
+        let factory: ProviderFactory = Box::new(move || {
+            Box::new(PathWriteProvider {
+                path: path_str.clone(),
+            })
+        });
+        let tool = AgentTool::new(factory, "test".into(), mode);
+        tool.execute(
+            json!({ "prompt": "write the file" }),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("execute never returns Err");
+    }
+
+    #[tokio::test]
+    async fn subagent_plan_mode_denies_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("should-not-exist.txt");
+
+        run_subagent_write(PermissionMode::Plan, &target).await;
+
+        assert!(
+            !target.exists(),
+            "Plan mode must deny the sub-agent's write; the file was created"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_bypass_mode_allows_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("written.txt");
+
+        run_subagent_write(PermissionMode::Bypass, &target).await;
+
+        assert!(
+            target.exists(),
+            "Bypass mode should let the sub-agent write; the file is missing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "written by sub-agent"
+        );
     }
 }
