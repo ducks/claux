@@ -49,8 +49,14 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Create a registry with Agent tool using a provider factory.
-    pub fn new_with_agent_factory(factory: agent::ProviderFactory, model: String) -> Self {
+    /// Create a registry with Agent tool using a provider factory. The
+    /// `permission_mode` is inherited by sub-agents the Agent tool spawns,
+    /// so a sub-agent can't run with more authority than the parent session.
+    pub fn new_with_agent_factory(
+        factory: agent::ProviderFactory,
+        model: String,
+        permission_mode: crate::permissions::PermissionMode,
+    ) -> Self {
         let todo_state = todo::new_todo_state();
         Self {
             tools: vec![
@@ -61,7 +67,7 @@ impl ToolRegistry {
                 Box::new(grep::GrepTool),
                 Box::new(bash::BashTool),
                 Box::new(web_fetch::WebFetchTool::new()),
-                Box::new(agent::AgentTool::new(factory, model)),
+                Box::new(agent::AgentTool::new(factory, model, permission_mode)),
                 Box::new(todo::TodoWriteTool::new(todo_state)),
             ],
         }
@@ -188,7 +194,11 @@ mod tests {
                 "model",
             ))
         });
-        let reg = ToolRegistry::new_with_agent_factory(factory, "model".into());
+        let reg = ToolRegistry::new_with_agent_factory(
+            factory,
+            "model".into(),
+            crate::permissions::PermissionMode::Default,
+        );
         let defs = reg.definitions();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"Agent"));

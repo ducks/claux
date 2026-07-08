@@ -107,8 +107,11 @@ async fn main() -> Result<()> {
 
     // One-shot mode: --print / -p
     if let Some(ref prompt) = args.prompt {
-        let mut tool_registry =
-            tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
+        let mut tool_registry = tools::ToolRegistry::new_with_agent_factory(
+            agent_factory,
+            model.clone(),
+            config.permission_mode,
+        );
         if !mcp_tools.is_empty() {
             let oneshot_mcp = tools::mcp::connect_mcp_servers(&mcp_servers).await;
             tool_registry.add_tools(oneshot_mcp);
@@ -134,8 +137,11 @@ async fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    let mut tool_registry =
-        tools::ToolRegistry::new_with_agent_factory(agent_factory, model.clone());
+    let mut tool_registry = tools::ToolRegistry::new_with_agent_factory(
+        agent_factory,
+        model.clone(),
+        config.permission_mode,
+    );
     tool_registry.add_tools(mcp_tools);
     let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
     let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
