@@ -99,9 +99,12 @@ impl Provider for AnthropicProvider {
             anyhow::bail!("API error ({status}): {error_text}");
         }
 
+        let error_tx = tx.clone();
         tokio::spawn(async move {
             if let Err(e) = stream::read_sse_stream(response, tx).await {
-                tracing::error!("SSE stream error: {}", e);
+                let message = format!("SSE stream error: {e}");
+                tracing::error!("{message}");
+                let _ = error_tx.send(ApiEvent::Error(message)).await;
             }
         });
 

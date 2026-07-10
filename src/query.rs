@@ -368,14 +368,21 @@ impl Engine {
             .await?;
 
         let mut summary = String::new();
+        let mut completed = false;
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Text(t) => summary.push_str(&t),
                 ApiEvent::Usage(usage) => self.cost.add_usage(&usage),
-                ApiEvent::Done => break,
+                ApiEvent::Done => {
+                    completed = true;
+                    break;
+                }
                 ApiEvent::Error(e) => return Err(anyhow::anyhow!("Compact error: {e}")),
                 _ => {}
             }
+        }
+        if !completed {
+            anyhow::bail!("Compact error: API stream ended without completion");
         }
 
         let old_count = self.messages.len();
@@ -525,7 +532,11 @@ impl Engine {
                 let event = tokio::select! {
                     event = rx.recv() => match event {
                         Some(event) => event,
-                        None => break,
+                        None => {
+                            let error = "API stream ended without completion".to_string();
+                            let _ = tx.send(StreamEvent::Error(error.clone())).await;
+                            return Err(anyhow::anyhow!(error));
+                        }
                     },
                     _ = cancel.cancelled() => {
                         stream_interrupted = true;
@@ -888,6 +899,36 @@ mod tests {
         }
     }
 
+    struct TruncatedProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for TruncatedProvider {
+        fn name(&self) -> &str {
+            "truncated"
+        }
+
+        fn model(&self) -> &str {
+            "test-model"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+        ) -> Result<mpsc::Receiver<ApiEvent>> {
+            let (tx, rx) = mpsc::channel(10);
+            let _ = tx
+                .send(ApiEvent::Text("partial response".to_string()))
+                .await;
+            drop(tx);
+            Ok(rx)
+        }
+    }
+
     #[tokio::test]
     async fn test_parallel_tool_execution() {
         // Create a mock engine with read-only tools
@@ -1234,6 +1275,49 @@ mod tests {
             crate::api::MessageContent::Text(t) => assert_eq!(t, "check auth too"),
             other => panic!("expected steering message last, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_submit_rejects_stream_closed_without_done() {
+        let mut engine = Engine::for_tests(
+            Box::new(TruncatedProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+
+        let error = engine
+            .submit("go", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("without completion"));
+        assert_eq!(
+            engine.messages().len(),
+            1,
+            "partial assistant content must not be committed to history"
+        );
+        assert_eq!(engine.messages()[0].role, "user");
+    }
+
+    #[tokio::test]
+    async fn test_compact_rejects_stream_closed_without_done() {
+        let mut engine = Engine::for_tests(
+            Box::new(TruncatedProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        engine
+            .messages_mut()
+            .push(Message::user("important context"));
+
+        let error = engine.compact().await.unwrap_err();
+
+        assert!(error.to_string().contains("without completion"));
+        assert_eq!(
+            engine.messages().len(),
+            1,
+            "failed compaction must preserve the original history"
+        );
     }
 
     #[tokio::test]

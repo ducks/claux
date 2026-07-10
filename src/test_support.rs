@@ -88,3 +88,27 @@ pub fn tool_use(
 ) -> (String, String, serde_json::Value) {
     (id.to_string(), name.to_string(), input)
 }
+
+/// Serve one HTTP response over loopback and return it as a reqwest response.
+/// API stream parser tests use this to exercise clean EOF behavior.
+pub async fn sse_response(body: &str) -> reqwest::Response {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let body = body.to_string();
+
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = socket.read(&mut request).await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    reqwest::get(format!("http://{address}")).await.unwrap()
+}

@@ -174,7 +174,25 @@ pub async fn read_sse_stream(
         }
     }
 
-    // Stream ended without message_stop
-    let _ = tx.send(ApiEvent::Done).await;
-    Ok(())
+    anyhow::bail!("stream ended before message_stop")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_eof_before_message_stop() {
+        let response = crate::test_support::sse_response(
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        let error = read_sse_stream(response, tx).await.unwrap_err();
+
+        assert!(error.to_string().contains("before message_stop"));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "partial"));
+        assert!(rx.recv().await.is_none());
+    }
 }

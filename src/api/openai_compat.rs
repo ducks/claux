@@ -186,9 +186,12 @@ impl Provider for OpenAICompatProvider {
             anyhow::bail!("API error ({status}): {error_text}");
         }
 
+        let error_tx = tx.clone();
         tokio::spawn(async move {
             if let Err(e) = read_openai_sse(response, tx).await {
-                tracing::error!("OpenAI SSE stream error: {}", e);
+                let message = format!("OpenAI SSE stream error: {e}");
+                tracing::error!("{message}");
+                let _ = error_tx.send(ApiEvent::Error(message)).await;
             }
         });
 
@@ -209,6 +212,7 @@ async fn read_openai_sse(response: reqwest::Response, tx: mpsc::Sender<ApiEvent>
 
     let mut input_tokens: u32 = 0;
     let mut output_tokens: u32 = 0;
+    let mut saw_finish_reason = false;
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
@@ -295,6 +299,7 @@ async fn read_openai_sse(response: reqwest::Response, tx: mpsc::Sender<ApiEvent>
 
                 // Check finish reason
                 if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
+                    saw_finish_reason = true;
                     if reason == "tool_calls" {
                         // Emit accumulated tool calls
                         let mut calls: Vec<(u32, (String, String, String))> =
@@ -312,8 +317,12 @@ async fn read_openai_sse(response: reqwest::Response, tx: mpsc::Sender<ApiEvent>
         }
     }
 
-    // Stream ended
-    // Emit any remaining tool calls
+    if !saw_finish_reason {
+        anyhow::bail!("stream ended before a finish reason or [DONE] marker");
+    }
+
+    // Some compatible providers close cleanly after finish_reason instead of
+    // sending [DONE]. Preserve that behavior, but only after a terminal event.
     if !tool_calls.is_empty() {
         let mut calls: Vec<(u32, (String, String, String))> = tool_calls.drain().collect();
         calls.sort_by_key(|(idx, _)| *idx);
@@ -324,6 +333,49 @@ async fn read_openai_sse(response: reqwest::Response, tx: mpsc::Sender<ApiEvent>
         }
     }
 
+    let _ = tx
+        .send(ApiEvent::Usage(Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        }))
+        .await;
     let _ = tx.send(ApiEvent::Done).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_eof_before_finish_reason() {
+        let response = crate::test_support::sse_response(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        let error = read_openai_sse(response, tx).await.unwrap_err();
+
+        assert!(error.to_string().contains("before a finish reason"));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "partial"));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn accepts_clean_eof_after_finish_reason() {
+        let response = crate::test_support::sse_response(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"complete\"},\"finish_reason\":\"stop\"}]}\n\n",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_openai_sse(response, tx).await.unwrap();
+
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "complete"));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Usage(_))));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
+    }
 }
