@@ -127,6 +127,10 @@ Per-project: `.claux.toml` in the project root (overrides global).
 | `bypass` | auto | auto | auto |
 | `plan` | auto | denied | denied |
 
+In `accept-edits` mode, Agent, MCP, and other non-read-only tools still require
+explicit approval. Approving the Agent tool authorizes its sub-agent to run its
+tools without additional prompts.
+
 ## License
 
 MIT

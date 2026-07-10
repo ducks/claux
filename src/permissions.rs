@@ -116,7 +116,13 @@ impl PermissionChecker {
                         diff: None,
                     }
                 } else {
-                    PermissionResult::Allow
+                    // AcceptEdits grants implicit approval only to file edits.
+                    // Agent, MCP, and future mutating tools retain an explicit
+                    // permission boundary.
+                    PermissionResult::Ask {
+                        message: tool_name.to_string(),
+                        diff: None,
+                    }
                 }
             }
 
@@ -286,6 +292,28 @@ mod tests {
         let input = json!({"command": "rm -rf /"});
         assert!(matches!(
             checker.check("Bash", &input, false),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_asks_for_agent() {
+        let checker = PermissionChecker::new(PermissionMode::AcceptEdits);
+        let input = json!({"prompt": "run a shell command"});
+
+        assert!(matches!(
+            checker.check("Agent", &input, false),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_asks_for_mcp_tools() {
+        let checker = PermissionChecker::new(PermissionMode::AcceptEdits);
+        let input = json!({"repository": "example/project"});
+
+        assert!(matches!(
+            checker.check("github__delete_repository", &input, false),
             PermissionResult::Ask { .. }
         ));
     }
