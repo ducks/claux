@@ -5,22 +5,12 @@ use serde_json::{json, Value};
 
 use super::{Tool, ToolOutput};
 
-pub struct WebFetchTool {
-    http: reqwest::Client,
-}
+mod html;
+mod policy;
 
-impl WebFetchTool {
-    pub fn new() -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::limited(5))
-                .user_agent("claux/1.0")
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-        }
-    }
-}
+use html::strip_html;
+
+pub struct WebFetchTool;
 
 #[derive(Deserialize)]
 struct Params {
@@ -31,6 +21,64 @@ struct Params {
 
 /// Max response size in characters (default 100k).
 const DEFAULT_MAX_LENGTH: usize = 100_000;
+const HARD_MAX_LENGTH: usize = 1_000_000;
+const MAX_REDIRECTS: usize = 5;
+
+impl WebFetchTool {
+    pub fn new() -> Self {
+        Self
+    }
+
+    async fn fetch(
+        &self,
+        mut url: reqwest::Url,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<reqwest::Response, String> {
+        for redirect_count in 0..=MAX_REDIRECTS {
+            let addresses = tokio::select! {
+                result = policy::validate_destination(&url) => result?,
+                _ = cancel.cancelled() => return Err("Interrupted by user.".to_string()),
+            };
+            let host = url
+                .host_str()
+                .ok_or_else(|| "URL must include a host".to_string())?;
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .resolve_to_addrs(host, &addresses)
+                .user_agent("claux/1.0")
+                .build()
+                .map_err(|e| format!("Failed to configure HTTP client: {e}"))?;
+
+            let response = tokio::select! {
+                result = client.get(url.clone()).send() => {
+                    result.map_err(|e| format!("Failed to fetch URL: {e}"))?
+                }
+                _ = cancel.cancelled() => return Err("Interrupted by user.".to_string()),
+            };
+
+            if !response.status().is_redirection() {
+                return Ok(response);
+            }
+            if redirect_count == MAX_REDIRECTS {
+                return Err(format!("Too many redirects (maximum {MAX_REDIRECTS})"));
+            }
+
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .ok_or_else(|| "Redirect response did not include a Location header".to_string())?
+                .to_str()
+                .map_err(|_| "Redirect Location header is not valid text".to_string())?;
+            url = url
+                .join(location)
+                .map_err(|e| format!("Invalid redirect destination: {e}"))?;
+        }
+
+        unreachable!("redirect loop always returns")
+    }
+}
 
 #[async_trait]
 impl Tool for WebFetchTool {
@@ -53,7 +101,9 @@ impl Tool for WebFetchTool {
                 },
                 "max_length": {
                     "type": "integer",
-                    "description": "Maximum response length in characters (default 100000)"
+                    "description": "Maximum response length in characters (default 100000)",
+                    "minimum": 1,
+                    "maximum": HARD_MAX_LENGTH
                 }
             },
             "required": ["url"]
@@ -74,31 +124,27 @@ impl Tool for WebFetchTool {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
-        let max_length = params.max_length.unwrap_or(DEFAULT_MAX_LENGTH);
+        let max_length = params
+            .max_length
+            .unwrap_or(DEFAULT_MAX_LENGTH)
+            .clamp(1, HARD_MAX_LENGTH);
 
-        // Validate URL
-        if !params.url.starts_with("http://") && !params.url.starts_with("https://") {
-            return Ok(ToolOutput {
-                content: "URL must start with http:// or https://".to_string(),
-                is_error: true,
-            });
-        }
-
-        let response = tokio::select! {
-            r = self.http.get(&params.url).send() => match r {
-                Ok(r) => r,
-                Err(e) => {
-                    return Ok(ToolOutput {
-                        content: format!("Failed to fetch URL: {e}"),
-                        is_error: true,
-                    });
-                }
-            },
-            _ = cancel.cancelled() => {
+        let url = match reqwest::Url::parse(&params.url) {
+            Ok(url) => url,
+            Err(e) => {
                 return Ok(ToolOutput {
-                    content: "Interrupted by user.".to_string(),
+                    content: format!("Invalid URL: {e}"),
                     is_error: true,
-                });
+                })
+            }
+        };
+        let response = match self.fetch(url, &cancel).await {
+            Ok(response) => response,
+            Err(error) => {
+                return Ok(ToolOutput {
+                    content: error,
+                    is_error: true,
+                })
             }
         };
 
@@ -121,42 +167,27 @@ impl Tool for WebFetchTool {
             .unwrap_or("")
             .to_string();
 
-        // Get response body
-        let body = tokio::select! {
-            r = response.text() => match r {
-                Ok(text) => text,
-                Err(e) => {
-                    return Ok(ToolOutput {
-                        content: format!("Failed to read response body: {e}"),
-                        is_error: true,
-                    });
-                }
-            },
-            _ = cancel.cancelled() => {
+        let byte_limit = max_length.saturating_mul(4).min(HARD_MAX_LENGTH * 4);
+        let (body, body_truncated) = match read_bounded_body(response, byte_limit, &cancel).await {
+            Ok(body) => body,
+            Err(error) => {
                 return Ok(ToolOutput {
-                    content: "Interrupted by user.".to_string(),
+                    content: error,
                     is_error: true,
-                });
+                })
             }
         };
 
-        // If HTML, do a basic strip of tags to get readable text
         let text = if content_type.contains("text/html") {
             strip_html(&body)
         } else {
             body
         };
 
-        // Truncate if needed
-        let text = if text.len() > max_length {
-            format!(
-                "{}\n\n... (truncated, {} chars total)",
-                &text[..max_length],
-                text.len()
-            )
-        } else {
-            text
-        };
+        let (mut text, text_truncated) = truncate_chars(text, max_length);
+        if body_truncated || text_truncated {
+            text.push_str("\n\n... (truncated)");
+        }
 
         Ok(ToolOutput {
             content: text,
@@ -165,120 +196,44 @@ impl Tool for WebFetchTool {
     }
 }
 
-/// Basic HTML tag stripping. Not a full parser — just removes tags and
-/// decodes common entities to make HTML content readable.
-fn strip_html(html: &str) -> String {
-    let mut result = String::with_capacity(html.len());
-    let mut in_tag = false;
-    let mut in_script = false;
-    let mut in_style = false;
-    let mut last_was_whitespace = false;
+async fn read_bounded_body(
+    response: reqwest::Response,
+    byte_limit: usize,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(String, bool), String> {
+    use futures_util::StreamExt as _;
 
-    let lower = html.to_lowercase();
-    let chars: Vec<char> = html.chars().collect();
-    let lower_chars: Vec<char> = lower.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::with_capacity(byte_limit.min(64 * 1024));
+    let mut truncated = false;
 
-    while i < len {
-        if !in_tag && chars[i] == '<' {
-            // Check for script/style open/close
-            let remaining: String = lower_chars[i..].iter().take(20).collect();
-            if remaining.starts_with("<script") {
-                in_script = true;
-            } else if remaining.starts_with("</script") {
-                in_script = false;
-            } else if remaining.starts_with("<style") {
-                in_style = true;
-            } else if remaining.starts_with("</style") {
-                in_style = false;
-            }
-            in_tag = true;
-            i += 1;
-            continue;
-        }
-
-        if in_tag {
-            if chars[i] == '>' {
-                in_tag = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        if in_script || in_style {
-            i += 1;
-            continue;
-        }
-
-        // Decode common HTML entities
-        if chars[i] == '&' {
-            let remaining: String = chars[i..].iter().take(10).collect();
-            if remaining.starts_with("&amp;") {
-                result.push('&');
-                i += 5;
-                last_was_whitespace = false;
-                continue;
-            } else if remaining.starts_with("&lt;") {
-                result.push('<');
-                i += 4;
-                last_was_whitespace = false;
-                continue;
-            } else if remaining.starts_with("&gt;") {
-                result.push('>');
-                i += 4;
-                last_was_whitespace = false;
-                continue;
-            } else if remaining.starts_with("&quot;") {
-                result.push('"');
-                i += 6;
-                last_was_whitespace = false;
-                continue;
-            } else if remaining.starts_with("&#39;") || remaining.starts_with("&apos;") {
-                result.push('\'');
-                i += if remaining.starts_with("&#39;") { 5 } else { 6 };
-                last_was_whitespace = false;
-                continue;
-            } else if remaining.starts_with("&nbsp;") {
-                result.push(' ');
-                i += 6;
-                last_was_whitespace = true;
-                continue;
-            }
-        }
-
-        // Collapse whitespace
-        if chars[i].is_whitespace() {
-            if !last_was_whitespace {
-                result.push(' ');
-                last_was_whitespace = true;
-            }
+    loop {
+        let chunk = tokio::select! {
+            chunk = stream.next() => chunk,
+            _ = cancel.cancelled() => return Err("Interrupted by user.".to_string()),
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk.map_err(|e| format!("Failed to read response body: {e}"))?;
+        let remaining = byte_limit.saturating_sub(bytes.len());
+        if chunk.len() > remaining {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
         } else {
-            result.push(chars[i]);
-            last_was_whitespace = false;
-        }
-
-        i += 1;
-    }
-
-    // Clean up excessive blank lines
-    let mut cleaned = String::new();
-    let mut blank_count = 0;
-    for line in result.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            blank_count += 1;
-            if blank_count <= 2 {
-                cleaned.push('\n');
-            }
-        } else {
-            blank_count = 0;
-            cleaned.push_str(trimmed);
-            cleaned.push('\n');
+            bytes.extend_from_slice(&chunk);
         }
     }
 
-    cleaned.trim().to_string()
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
+}
+
+fn truncate_chars(text: String, max_length: usize) -> (String, bool) {
+    let Some((byte_index, _)) = text.char_indices().nth(max_length) else {
+        return (text, false);
+    };
+    (text[..byte_index].to_string(), true)
 }
 
 #[cfg(test)]
@@ -287,34 +242,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[test]
-    fn strip_html_basic() {
-        let html = "<p>Hello <b>world</b></p>";
-        assert_eq!(strip_html(html), "Hello world");
-    }
-
-    #[test]
-    fn strip_html_entities() {
-        let html = "&amp; &lt; &gt; &quot;";
-        assert_eq!(strip_html(html), "& < > \"");
-    }
-
-    #[test]
-    fn strip_html_script_removed() {
-        let html = "before<script>var x = 1;</script>after";
-        assert_eq!(strip_html(html), "beforeafter");
-    }
-
-    #[test]
-    fn strip_html_style_removed() {
-        let html = "before<style>.foo { color: red; }</style>after";
-        assert_eq!(strip_html(html), "beforeafter");
-    }
-
-    #[test]
-    fn strip_html_whitespace_collapsed() {
-        let html = "hello    \n\n\n   world";
-        let result = strip_html(html);
-        assert!(!result.contains("    "));
+    fn truncates_unicode_at_character_boundary() {
+        let (text, truncated) = truncate_chars("éclair".to_string(), 1);
+        assert_eq!(text, "é");
+        assert!(truncated);
     }
 
     #[tokio::test]
