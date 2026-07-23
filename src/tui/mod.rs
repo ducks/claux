@@ -8,15 +8,10 @@ pub mod chat;
 pub mod home;
 pub mod markdown;
 mod screen;
+mod terminal;
 mod ui;
 
 use anyhow::Result;
-use crossterm::{
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ratatui::{backend::CrosstermBackend, Terminal};
-use std::io::stdout;
 
 use crate::config::{Config, HookTrigger};
 use crate::context;
@@ -26,6 +21,7 @@ use crate::query::Engine;
 use crate::theme::Theme;
 
 use screen::Action;
+use terminal::TerminalGuard;
 
 /// Run the TUI application.
 pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) -> Result<()> {
@@ -46,35 +42,40 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
         .join("sessions.db");
     let db = Db::open(&db_path)?;
 
-    // Set up terminal
-    enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal_guard = TerminalGuard::enter()?;
 
     let theme = Theme::dark();
     let model = engine.model().to_string();
 
-    // Screen loop: home -> chat -> home -> ...
-    let mut next_action = Action::Home;
-
-    loop {
-        match next_action {
-            Action::Home => {
-                let mut home_screen = home::HomeScreen::new(Db::open(&db_path)?, theme, &model);
-                next_action = home_screen.run(&mut terminal)?;
+    let app_result: Result<()> = async {
+        // Screen loop: home -> chat -> home -> ...
+        let mut next_action = Action::Home;
+        loop {
+            match next_action {
+                Action::Home => {
+                    let mut home_screen = home::HomeScreen::new(Db::open(&db_path)?, theme, &model);
+                    next_action = home_screen.run(terminal_guard.terminal_mut())?;
+                }
+                Action::Chat { session_id } => {
+                    next_action = chat::run(
+                        &mut engine,
+                        &session_id,
+                        &db,
+                        terminal_guard.terminal_mut(),
+                        theme,
+                        plugins,
+                    )
+                    .await?;
+                }
+                Action::Quit => return Ok(()),
             }
-            Action::Chat { session_id } => {
-                next_action =
-                    chat::run(&mut engine, &session_id, &db, &mut terminal, theme, plugins).await?;
-            }
-            Action::Quit => break,
         }
     }
+    .await;
 
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen)?;
+    let restore_result = terminal_guard.restore();
+    app_result?;
+    restore_result?;
 
     println!("{}", engine.cost.format_summary());
     Ok(())
