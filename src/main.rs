@@ -1,6 +1,7 @@
 #![allow(dead_code, clippy::if_same_then_else)]
 
 mod api;
+mod bootstrap;
 mod cli;
 mod commands;
 mod compact;
@@ -41,7 +42,15 @@ async fn main() -> Result<()> {
         .init();
 
     // Load config (global + project)
-    let config = config::Config::load()?;
+    let mut config = config::Config::load(args.trust_project)?;
+    if let Some(ref mode) = args.permission_mode {
+        config.permission_mode = serde_json::from_value(serde_json::Value::String(mode.clone()))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Invalid permission mode {mode:?}; expected default, accept-edits, bypass, or plan"
+                )
+            })?;
+    }
 
     // Build plugin registry
     let mut plugin_registry = plugin::PluginRegistry::new();
@@ -86,24 +95,8 @@ async fn main() -> Result<()> {
             .expect("failed to build agent provider")
     });
 
-    // Load MCP servers from config.toml + .mcp.json
-    let mut mcp_servers = config.mcp_servers.clone();
-    let mcp_json_servers = config::load_mcp_json();
-    if !mcp_json_servers.is_empty() {
-        tracing::info!(
-            "Loaded {} MCP server(s) from .mcp.json",
-            mcp_json_servers.len()
-        );
-        mcp_servers.extend(mcp_json_servers);
-    }
-
-    // Connect to MCP servers
-    let mcp_tools = if !mcp_servers.is_empty() {
-        tracing::info!("Connecting to {} MCP server(s)...", mcp_servers.len());
-        tools::mcp::connect_mcp_servers(&mcp_servers).await
-    } else {
-        Vec::new()
-    };
+    // Connect once; the tools are moved into whichever frontend is selected.
+    let mcp_tools = bootstrap::connect_mcp_tools(&config).await;
 
     // One-shot mode: --print / -p
     if let Some(ref prompt) = args.prompt {
@@ -112,10 +105,7 @@ async fn main() -> Result<()> {
             model.clone(),
             config.permission_mode,
         );
-        if !mcp_tools.is_empty() {
-            let oneshot_mcp = tools::mcp::connect_mcp_servers(&mcp_servers).await;
-            tool_registry.add_tools(oneshot_mcp);
-        }
+        tool_registry.add_tools(mcp_tools);
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
         let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
         engine.set_auto_compact_threshold(config.auto_compact_threshold);

@@ -16,9 +16,13 @@ pub struct Cli {
     #[arg(long)]
     pub resume: Option<String>,
 
-    /// Permission mode (default, accept-edits, bypass)
-    #[arg(long, default_value = "default")]
-    pub permission_mode: String,
+    /// Permission mode (default, accept-edits, bypass, plan)
+    #[arg(long)]
+    pub permission_mode: Option<String>,
+
+    /// Trust project-local configuration and MCP servers for this invocation
+    #[arg(long)]
+    pub trust_project: bool,
 
     /// Verbose output
     #[arg(short, long)]
