@@ -86,8 +86,18 @@ impl Tool for ReadTool {
         let lines: Vec<&str> = content.lines().collect();
 
         let start = params.offset.unwrap_or(1).saturating_sub(1);
+        if start >= lines.len() {
+            return Ok(ToolOutput {
+                content: format!(
+                    "Offset {} is beyond end of file ({} lines)",
+                    params.offset.unwrap_or(1),
+                    lines.len()
+                ),
+                is_error: true,
+            });
+        }
         let end = if let Some(limit) = params.limit {
-            (start + limit).min(lines.len())
+            start.saturating_add(limit).min(lines.len())
         } else {
             lines.len().min(start + 2000) // default limit
         };
@@ -181,6 +191,23 @@ mod tests {
 
         assert!(result.is_error);
         assert!(result.content.contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn offset_beyond_end_returns_error_instead_of_panicking() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "only line").unwrap();
+
+        let result = ReadTool
+            .execute(
+                json!({"file_path": tmp.path(), "offset": 99}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("beyond end of file"));
     }
 
     #[test]
