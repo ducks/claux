@@ -1,5 +1,6 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::types::Usage;
 
@@ -30,6 +31,7 @@ pub enum ApiEvent {
 pub async fn read_sse_stream(
     response: reqwest::Response,
     tx: mpsc::Sender<ApiEvent>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     use futures_util::StreamExt as _;
 
@@ -45,7 +47,14 @@ pub async fn read_sse_stream(
     let mut cache_read_tokens: u32 = 0;
     let mut cache_creation_tokens: u32 = 0;
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk_result) = chunk_result else {
+            break;
+        };
         let chunk = chunk_result?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -189,7 +198,9 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let error = read_sse_stream(response, tx).await.unwrap_err();
+        let error = read_sse_stream(response, tx, CancellationToken::new())
+            .await
+            .unwrap_err();
 
         assert!(error.to_string().contains("before message_stop"));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "partial"));

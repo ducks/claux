@@ -6,6 +6,6 @@ pub(crate) mod types;
 
 pub use anthropic::AnthropicProvider;
 pub use openai_compat::OpenAICompatProvider;
-pub use provider::Provider;
+pub use provider::{Provider, ProviderStream};
 pub use stream::ApiEvent;
 pub use types::*;

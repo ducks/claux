@@ -2,8 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
-use super::provider::Provider;
+use super::provider::{Provider, ProviderStream};
 use super::stream::{self, ApiEvent};
 use super::types::{Message, ToolDefinition};
 use crate::config::AuthMethod;
@@ -48,7 +49,8 @@ impl Provider for AnthropicProvider {
         system: &str,
         tools: &[ToolDefinition],
         max_tokens: u32,
-    ) -> Result<mpsc::Receiver<ApiEvent>> {
+        cancel: CancellationToken,
+    ) -> Result<ProviderStream> {
         let (tx, rx) = mpsc::channel(256);
 
         // Split system prompt into an array of text blocks:
@@ -91,7 +93,14 @@ impl Provider for AnthropicProvider {
                 .header("anthropic-beta", "oauth-2025-04-20"),
         };
 
-        let response = request.json(&body).send().await?;
+        let response = tokio::select! {
+            _ = cancel.cancelled() => anyhow::bail!("API request cancelled"),
+            result = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                request.json(&body).send(),
+            ) => result
+                .map_err(|_| anyhow::anyhow!("API request timed out waiting for response headers"))??,
+        };
 
         if !response.status().is_success() {
             let status = response.status();
@@ -99,16 +108,18 @@ impl Provider for AnthropicProvider {
             anyhow::bail!("API error ({status}): {error_text}");
         }
 
+        let stream_cancel = cancel.child_token();
+        let reader_cancel = stream_cancel.clone();
         let error_tx = tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = stream::read_sse_stream(response, tx).await {
+            if let Err(e) = stream::read_sse_stream(response, tx, reader_cancel).await {
                 let message = format!("SSE stream error: {e}");
                 tracing::error!("{message}");
                 let _ = error_tx.send(ApiEvent::Error(message)).await;
             }
         });
 
-        Ok(rx)
+        Ok(ProviderStream::new(rx, stream_cancel))
     }
 }
 

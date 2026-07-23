@@ -5,7 +5,7 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::api::{ApiEvent, Message, Provider, ToolDefinition};
+use crate::api::{ApiEvent, Message, Provider, ProviderStream, ToolDefinition};
 use crate::permissions::PermissionMode;
 use crate::query::{Engine, SteeringQueue};
 
@@ -38,7 +38,8 @@ impl Provider for ScriptedProvider {
         _system: &str,
         _tools: &[ToolDefinition],
         _max_tokens: u32,
-    ) -> Result<mpsc::Receiver<ApiEvent>> {
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ProviderStream> {
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (tx, rx) = mpsc::channel(10);
         if call == 0 {
@@ -59,7 +60,7 @@ impl Provider for ScriptedProvider {
             }
         }
         let _ = tx.send(ApiEvent::Done).await;
-        Ok(rx)
+        Ok(ProviderStream::new(rx, cancel.child_token()))
     }
 }
 

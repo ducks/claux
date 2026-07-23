@@ -2,8 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
-use super::provider::Provider;
+use super::provider::{Provider, ProviderStream};
 use super::stream::ApiEvent;
 use super::types::{Message, MessageContent, ToolDefinition, Usage};
 
@@ -145,7 +146,8 @@ impl Provider for OpenAICompatProvider {
         system: &str,
         tools: &[ToolDefinition],
         max_tokens: u32,
-    ) -> Result<mpsc::Receiver<ApiEvent>> {
+        cancel: CancellationToken,
+    ) -> Result<ProviderStream> {
         let (tx, rx) = mpsc::channel(256);
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -178,7 +180,14 @@ impl Provider for OpenAICompatProvider {
             request = request.header("Authorization", format!("Bearer {}", self.api_key));
         }
 
-        let response = request.json(&body).send().await?;
+        let response = tokio::select! {
+            _ = cancel.cancelled() => anyhow::bail!("API request cancelled"),
+            result = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                request.json(&body).send(),
+            ) => result
+                .map_err(|_| anyhow::anyhow!("API request timed out waiting for response headers"))??,
+        };
 
         if !response.status().is_success() {
             let status = response.status();
@@ -186,21 +195,27 @@ impl Provider for OpenAICompatProvider {
             anyhow::bail!("API error ({status}): {error_text}");
         }
 
+        let stream_cancel = cancel.child_token();
+        let reader_cancel = stream_cancel.clone();
         let error_tx = tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = read_openai_sse(response, tx).await {
+            if let Err(e) = read_openai_sse(response, tx, reader_cancel).await {
                 let message = format!("OpenAI SSE stream error: {e}");
                 tracing::error!("{message}");
                 let _ = error_tx.send(ApiEvent::Error(message)).await;
             }
         });
 
-        Ok(rx)
+        Ok(ProviderStream::new(rx, stream_cancel))
     }
 }
 
 /// Parse OpenAI-format SSE stream into ApiEvents.
-async fn read_openai_sse(response: reqwest::Response, tx: mpsc::Sender<ApiEvent>) -> Result<()> {
+async fn read_openai_sse(
+    response: reqwest::Response,
+    tx: mpsc::Sender<ApiEvent>,
+    cancel: CancellationToken,
+) -> Result<()> {
     use futures_util::StreamExt as _;
 
     let mut stream = response.bytes_stream();
@@ -214,7 +229,14 @@ async fn read_openai_sse(response: reqwest::Response, tx: mpsc::Sender<ApiEvent>
     let mut output_tokens: u32 = 0;
     let mut saw_finish_reason = false;
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk_result) = chunk_result else {
+            break;
+        };
         let chunk = chunk_result?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -357,7 +379,9 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let error = read_openai_sse(response, tx).await.unwrap_err();
+        let error = read_openai_sse(response, tx, CancellationToken::new())
+            .await
+            .unwrap_err();
 
         assert!(error.to_string().contains("before a finish reason"));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "partial"));
@@ -372,7 +396,9 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        read_openai_sse(response, tx).await.unwrap();
+        read_openai_sse(response, tx, CancellationToken::new())
+            .await
+            .unwrap();
 
         assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "complete"));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Usage(_))));

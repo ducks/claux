@@ -180,7 +180,8 @@ mod tests {
             _system: &str,
             _tools: &[ToolDefinition],
             _max_tokens: u32,
-        ) -> Result<mpsc::Receiver<ApiEvent>> {
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<crate::api::ProviderStream> {
             let (tx, rx) = mpsc::channel(10);
             if messages.len() <= 1 {
                 let _ = tx
@@ -195,7 +196,7 @@ mod tests {
                     .await;
             }
             let _ = tx.send(ApiEvent::Done).await;
-            Ok(rx)
+            Ok(crate::api::ProviderStream::new(rx, cancel.child_token()))
         }
     }
 
