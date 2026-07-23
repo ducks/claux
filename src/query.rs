@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::api::{ApiEvent, ContentBlock, Message, Provider};
+use crate::api::{ApiEvent, ContentBlock, Message, Provider, ProviderStream};
 use crate::compact::{self};
 use crate::cost::CostTracker;
 use crate::permissions::{PermissionChecker, PermissionResponse, PermissionResult};
@@ -230,13 +230,15 @@ impl Engine {
     pub async fn start_stream(
         &self,
         tool_defs: &[crate::api::ToolDefinition],
-    ) -> Result<mpsc::Receiver<ApiEvent>> {
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ProviderStream> {
         self.provider
             .stream(
                 &self.messages,
                 &self.system_prompt,
                 tool_defs,
                 self.max_tokens,
+                cancel,
             )
             .await
     }
@@ -364,7 +366,13 @@ impl Engine {
 
         let mut rx = self
             .provider
-            .stream(&summary_messages, &self.system_prompt, &[], self.max_tokens)
+            .stream(
+                &summary_messages,
+                &self.system_prompt,
+                &[],
+                self.max_tokens,
+                tokio_util::sync::CancellationToken::new(),
+            )
             .await?;
 
         let mut summary = String::new();
@@ -501,12 +509,17 @@ impl Engine {
                     &self.system_prompt,
                     &tool_defs,
                     self.max_tokens,
+                    cancel.clone(),
                 )
                 .await;
 
             let mut rx = match stream_result {
                 Ok(rx) => rx,
                 Err(e) => {
+                    if cancel.is_cancelled() {
+                        let _ = tx.send(StreamEvent::Interrupted).await;
+                        return Ok(());
+                    }
                     let err_str = e.to_string();
                     if Self::is_prompt_too_long(&err_str) && recovery_attempts < MAX_RECOVERY {
                         recovery_attempts += 1;
@@ -891,11 +904,12 @@ mod tests {
             _system: &str,
             _tools: &[ToolDefinition],
             _max_tokens: u32,
-        ) -> Result<mpsc::Receiver<ApiEvent>> {
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
             let (tx, rx) = mpsc::channel(10);
             // Return empty stream for testing
             drop(tx);
-            Ok(rx)
+            Ok(ProviderStream::new(rx, cancel.child_token()))
         }
     }
 
@@ -919,13 +933,14 @@ mod tests {
             _system: &str,
             _tools: &[ToolDefinition],
             _max_tokens: u32,
-        ) -> Result<mpsc::Receiver<ApiEvent>> {
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
             let (tx, rx) = mpsc::channel(10);
             let _ = tx
                 .send(ApiEvent::Text("partial response".to_string()))
                 .await;
             drop(tx);
-            Ok(rx)
+            Ok(ProviderStream::new(rx, cancel.child_token()))
         }
     }
 
