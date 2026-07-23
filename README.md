@@ -114,6 +114,11 @@ Global: `~/.config/claux/config.toml`
 ```toml
 model = "claude-sonnet-5"
 permission_mode = "default"  # default | accept-edits | bypass | plan
+
+# Project-local .claux.toml files may tighten this mode without trust, but
+# cannot loosen it unless their directory is listed here or --trust-project
+# is passed for the invocation. Project-local .mcp.json uses the same boundary.
+trusted_projects = ["/absolute/path/to/a/trusted/project"]
 ```
 
 Per-project: `.claux.toml` in the project root (overrides global).

@@ -4,6 +4,10 @@ use std::path::PathBuf;
 
 use crate::permissions::PermissionMode;
 
+mod trust;
+
+pub use trust::ProjectTrust;
+
 /// How we authenticate with the API.
 #[derive(Debug, Clone)]
 pub enum AuthMethod {
@@ -62,6 +66,15 @@ pub struct Config {
     /// MCP server configuration
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+
+    /// Project directories whose local configuration and MCP servers are
+    /// explicitly trusted. This field is read only from the global config.
+    #[serde(default)]
+    pub trusted_projects: Vec<PathBuf>,
+
+    /// Resolved trust for the current working directory. Runtime-only.
+    #[serde(skip)]
+    pub project_trust: Option<ProjectTrust>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,10 +116,12 @@ impl McpJsonServerEntry {
 }
 
 /// Load MCP servers from .mcp.json in the current directory (CC format).
-pub fn load_mcp_json() -> Vec<McpServerConfig> {
-    let path = std::env::current_dir()
-        .map(|p| p.join(".mcp.json"))
-        .unwrap_or_default();
+pub fn load_mcp_json(trust: &ProjectTrust) -> Vec<McpServerConfig> {
+    if !trust.is_trusted() {
+        return Vec::new();
+    }
+
+    let path = trust.project_file(".mcp.json");
 
     if !path.exists() {
         return Vec::new();
@@ -188,6 +203,8 @@ impl Default for Config {
             openai_provider_name: None,
             plugins: Vec::new(),
             mcp_servers: Vec::new(),
+            trusted_projects: Vec::new(),
+            project_trust: None,
         }
     }
 }
@@ -198,9 +215,8 @@ impl Config {
         self.openai_base_url.is_none()
     }
 
-    pub fn load() -> Result<Self> {
+    pub fn load(force_project_trust: bool) -> Result<Self> {
         let global_path = Self::global_path();
-        let project_path = Self::project_path();
 
         let mut config = if global_path.exists() {
             let text = std::fs::read_to_string(&global_path)?;
@@ -209,24 +225,16 @@ impl Config {
             Self::default()
         };
 
-        // Layer project config on top
-        if let Some(ref path) = project_path {
-            if path.exists() {
-                let text = std::fs::read_to_string(path)?;
-                let project: toml::Value = toml::from_str(&text)?;
+        let trust = ProjectTrust::resolve(force_project_trust, &config.trusted_projects);
 
-                if let Some(model) = project.get("model").and_then(|v| v.as_str()) {
-                    config.model = model.to_string();
-                }
-                if let Some(mode) = project.get("permission_mode").and_then(|v| v.as_str()) {
-                    if let Ok(m) =
-                        serde_json::from_value(serde_json::Value::String(mode.to_string()))
-                    {
-                        config.permission_mode = m;
-                    }
-                }
-            }
+        // Layer project config on top
+        let project_path = trust.project_file(".claux.toml");
+        if project_path.exists() {
+            let text = std::fs::read_to_string(project_path)?;
+            let project: toml::Value = toml::from_str(&text)?;
+            apply_project_overrides(&mut config, &project, trust.is_trusted());
         }
+        config.project_trust = Some(trust);
 
         Ok(config)
     }
@@ -344,10 +352,89 @@ impl Config {
             .join("claux")
             .join("config.toml")
     }
+}
 
-    fn project_path() -> Option<PathBuf> {
-        let cwd = std::env::current_dir().ok()?;
-        let path = cwd.join(".claux.toml");
-        Some(path)
+fn apply_project_overrides(config: &mut Config, project: &toml::Value, trusted: bool) {
+    if let Some(model) = project.get("model").and_then(|v| v.as_str()) {
+        config.model = model.to_string();
+    }
+    if let Some(mode) = project.get("permission_mode").and_then(|v| v.as_str()) {
+        if let Ok(requested) =
+            serde_json::from_value::<PermissionMode>(serde_json::Value::String(mode.to_string()))
+        {
+            if trust::permits_permission_override(config.permission_mode, requested, trusted) {
+                config.permission_mode = requested;
+            } else {
+                tracing::warn!(
+                    "Ignoring project permission_mode={mode:?}: it would loosen the global policy; \
+                     pass --trust-project or add this directory to trusted_projects"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn untrusted_project_permission_can_only_tighten() {
+        let mut config = Config {
+            permission_mode: PermissionMode::Default,
+            ..Config::default()
+        };
+        let project: toml::Value =
+            toml::from_str("permission_mode = \"bypass\"\nmodel = \"project-model\"").unwrap();
+
+        apply_project_overrides(&mut config, &project, false);
+
+        assert_eq!(config.permission_mode, PermissionMode::Default);
+        assert_eq!(config.model, "project-model");
+
+        let project: toml::Value = toml::from_str("permission_mode = \"plan\"").unwrap();
+        apply_project_overrides(&mut config, &project, false);
+        assert_eq!(config.permission_mode, PermissionMode::Plan);
+    }
+
+    #[test]
+    fn trusted_project_permission_may_loosen() {
+        let mut config = Config {
+            permission_mode: PermissionMode::Plan,
+            ..Config::default()
+        };
+        let project: toml::Value = toml::from_str("permission_mode = \"bypass\"").unwrap();
+
+        apply_project_overrides(&mut config, &project, true);
+
+        assert_eq!(config.permission_mode, PermissionMode::Bypass);
+    }
+
+    #[test]
+    fn untrusted_project_does_not_load_mcp_json() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(".mcp.json"),
+            r#"{"mcpServers":{"evil":{"command":"false"}}}"#,
+        )
+        .unwrap();
+        let trust = ProjectTrust::for_test(temp.path().to_path_buf(), false);
+
+        assert!(load_mcp_json(&trust).is_empty());
+    }
+
+    #[test]
+    fn trusted_project_loads_mcp_json() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(".mcp.json"),
+            r#"{"mcpServers":{"safe":{"command":"true"}}}"#,
+        )
+        .unwrap();
+        let trust = ProjectTrust::for_test(temp.path().to_path_buf(), true);
+
+        let servers = load_mcp_json(&trust);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "safe");
     }
 }
