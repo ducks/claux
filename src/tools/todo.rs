@@ -96,6 +96,10 @@ impl Tool for TodoWriteTool {
         true // doesn't modify files
     }
 
+    fn reset_session(&self) {
+        self.state.lock().unwrap().clear();
+    }
+
     fn summarize(&self, input: &Value) -> String {
         let count = input
             .get("todos")
@@ -225,6 +229,26 @@ mod tests {
 
         let todos = state.lock().unwrap();
         assert_eq!(todos.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn reset_session_clears_todos() {
+        let (tool, state) = make_tool();
+        tool.execute(
+            serde_json::json!({
+                "todos": [
+                    { "content": "Run tests", "status": "pending", "activeForm": "Running tests" }
+                ]
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.lock().unwrap().len(), 1);
+
+        tool.reset_session();
+
+        assert!(state.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
