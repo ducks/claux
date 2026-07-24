@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::provider::{Provider, ProviderStream};
-use super::stream::ApiEvent;
+use super::stream::{ApiEvent, Utf8LineDecoder};
 use super::types::{Message, MessageContent, ToolDefinition, Usage};
 
 /// OpenAI-compatible API provider.
@@ -249,7 +249,7 @@ async fn read_openai_sse(
     use futures_util::StreamExt as _;
 
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut lines = Utf8LineDecoder::default();
 
     // Tool call accumulation
     let mut tool_calls = PendingToolCalls::new(); // index -> (id, name, arguments)
@@ -267,12 +267,7 @@ async fn read_openai_sse(
             break;
         };
         let chunk = chunk_result?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-
+        for line in lines.push(&chunk)? {
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -392,6 +387,7 @@ async fn read_openai_sse(
         }
     }
 
+    lines.finish()?;
     if !saw_finish_reason {
         anyhow::bail!("stream ended before a finish reason or [DONE] marker");
     }

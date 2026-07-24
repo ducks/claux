@@ -27,6 +27,48 @@ pub enum ApiEvent {
     Error(String),
 }
 
+/// Incrementally split an SSE byte stream into UTF-8 lines.
+///
+/// HTTP chunks may end in the middle of a multibyte character, so decoding
+/// each chunk independently would replace valid text with U+FFFD.
+#[derive(Default)]
+pub(super) struct Utf8LineDecoder {
+    buffer: Vec<u8>,
+}
+
+impl Utf8LineDecoder {
+    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>> {
+        self.buffer.extend_from_slice(chunk);
+
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for (index, byte) in self.buffer.iter().enumerate() {
+            if *byte != b'\n' {
+                continue;
+            }
+
+            let mut raw_line = &self.buffer[start..index];
+            if raw_line.last() == Some(&b'\r') {
+                raw_line = &raw_line[..raw_line.len() - 1];
+            }
+            lines.push(std::str::from_utf8(raw_line)?.to_string());
+            start = index + 1;
+        }
+
+        if start > 0 {
+            self.buffer.drain(..start);
+        }
+        Ok(lines)
+    }
+
+    pub fn finish(&self) -> Result<()> {
+        // A partial final line is left for the protocol parser to reject,
+        // but invalid or truncated UTF-8 should be reported explicitly.
+        std::str::from_utf8(&self.buffer)?;
+        Ok(())
+    }
+}
+
 /// Read an SSE response and send parsed events to the channel.
 pub async fn read_sse_stream(
     response: reqwest::Response,
@@ -36,7 +78,7 @@ pub async fn read_sse_stream(
     use futures_util::StreamExt as _;
 
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut lines = Utf8LineDecoder::default();
 
     // Tool use accumulation state
     let mut current_tool_id = String::new();
@@ -56,13 +98,7 @@ pub async fn read_sse_stream(
             break;
         };
         let chunk = chunk_result?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        // Process complete lines
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-
+        for line in lines.push(&chunk)? {
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -183,12 +219,33 @@ pub async fn read_sse_stream(
         }
     }
 
+    lines.finish()?;
     anyhow::bail!("stream ended before message_stop")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoder_preserves_utf8_split_across_chunks() {
+        let data = "data: café\n";
+        let split = data.find('é').unwrap() + 1;
+        let mut decoder = Utf8LineDecoder::default();
+
+        assert!(decoder.push(&data.as_bytes()[..split]).unwrap().is_empty());
+        assert_eq!(
+            decoder.push(&data.as_bytes()[split..]).unwrap(),
+            vec!["data: café"]
+        );
+        decoder.finish().unwrap();
+    }
+
+    #[test]
+    fn decoder_rejects_invalid_utf8() {
+        let mut decoder = Utf8LineDecoder::default();
+        assert!(decoder.push(b"data: \xff\n").is_err());
+    }
 
     #[tokio::test]
     async fn rejects_eof_before_message_stop() {
