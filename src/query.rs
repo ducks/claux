@@ -869,7 +869,13 @@ impl Engine {
                     .await
             }
             Ok(PermissionResponse::AlwaysAllow) => {
-                self.permissions.always_allow(name);
+                match PermissionResponse::always_allow_for(name, input) {
+                    PermissionResponse::AlwaysAllow => self.permissions.always_allow(name),
+                    PermissionResponse::AlwaysAllowCommand(command) => {
+                        self.permissions.always_allow_command(&command);
+                    }
+                    _ => {}
+                }
                 self.execute_tool_steerable(name, input.clone(), cancel)
                     .await
             }

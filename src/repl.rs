@@ -241,8 +241,8 @@ pub async fn run(
                             StreamEvent::PermissionRequest {
                                 tool_name,
                                 summary,
+                                input,
                                 respond,
-                                ..
                             } => {
                                 if in_tool {
                                     println!();
@@ -251,15 +251,16 @@ pub async fn run(
                                 fire_permission_hook(plugins);
                                 print_permission_prompt(&tool_name, &summary);
                                 let line = stdin_rx.recv().await.unwrap_or_default();
-                                let _ =
-                                    respond.send(parse_permission_response(&tool_name, &summary, &line));
+                                let _ = respond.send(parse_permission_response(
+                                    &tool_name, &input, &line,
+                                ));
                             }
                             StreamEvent::PermissionRequestWithDiff {
                                 tool_name,
                                 summary,
                                 diff,
+                                input,
                                 respond,
-                                ..
                             } => {
                                 if in_tool {
                                     println!();
@@ -268,8 +269,9 @@ pub async fn run(
                                 fire_permission_hook(plugins);
                                 print_permission_prompt_with_diff(&tool_name, &summary, &diff);
                                 let line = stdin_rx.recv().await.unwrap_or_default();
-                                let _ =
-                                    respond.send(parse_permission_response(&tool_name, &summary, &line));
+                                let _ = respond.send(parse_permission_response(
+                                    &tool_name, &input, &line,
+                                ));
                             }
                             StreamEvent::Error(e) => {
                                 eprintln!("\n\x1b[31mError: {e}\x1b[0m");
@@ -415,21 +417,16 @@ fn print_permission_prompt_with_diff(tool_name: &str, summary: &str, diff: &str)
 }
 
 /// Interpret a line of input as an answer to a permission prompt.
-fn parse_permission_response(tool_name: &str, summary: &str, line: &str) -> PermissionResponse {
+fn parse_permission_response(
+    tool_name: &str,
+    input: &serde_json::Value,
+    line: &str,
+) -> PermissionResponse {
     let trimmed = line.trim().to_lowercase();
-
-    // For Bash, "always" is command-specific: extract the command from the
-    // summary (format: "bash: <command>")
-    if tool_name == "Bash" && (trimmed == "a" || trimmed == "always") {
-        if let Some(cmd) = summary.strip_prefix("bash: ") {
-            return PermissionResponse::AlwaysAllowCommand(cmd.trim().to_string());
-        }
-        return PermissionResponse::AlwaysAllowCommand(summary.to_string());
-    }
 
     match trimmed.as_str() {
         "y" | "yes" | "" => PermissionResponse::Allow,
-        "a" | "always" => PermissionResponse::AlwaysAllow,
+        "a" | "always" => PermissionResponse::always_allow_for(tool_name, input),
         _ => PermissionResponse::Deny,
     }
 }
@@ -442,7 +439,11 @@ mod tests {
     fn permission_yes_variants() {
         for line in ["y\n", "yes\n", "\n", "Y\n"] {
             assert_eq!(
-                parse_permission_response("Write", "write: /tmp/x", line),
+                parse_permission_response(
+                    "Write",
+                    &serde_json::json!({"file_path": "/tmp/x"}),
+                    line
+                ),
                 PermissionResponse::Allow
             );
         }
@@ -451,11 +452,15 @@ mod tests {
     #[test]
     fn permission_deny_on_anything_else() {
         assert_eq!(
-            parse_permission_response("Write", "write: /tmp/x", "n\n"),
+            parse_permission_response("Write", &serde_json::json!({"file_path": "/tmp/x"}), "n\n"),
             PermissionResponse::Deny
         );
         assert_eq!(
-            parse_permission_response("Write", "write: /tmp/x", "wait, not that file\n"),
+            parse_permission_response(
+                "Write",
+                &serde_json::json!({"file_path": "/tmp/x"}),
+                "wait, not that file\n"
+            ),
             PermissionResponse::Deny
         );
     }
@@ -463,15 +468,24 @@ mod tests {
     #[test]
     fn permission_always_is_command_specific_for_bash() {
         assert_eq!(
-            parse_permission_response("Bash", "bash: cargo test", "a\n"),
+            parse_permission_response("Bash", &serde_json::json!({"command": "cargo test"}), "a\n"),
             PermissionResponse::AlwaysAllowCommand("cargo test".to_string())
+        );
+    }
+
+    #[test]
+    fn permission_always_preserves_long_bash_command() {
+        let command = format!("echo {}", "x".repeat(200));
+        assert_eq!(
+            parse_permission_response("Bash", &serde_json::json!({"command": command}), "a\n"),
+            PermissionResponse::AlwaysAllowCommand(command)
         );
     }
 
     #[test]
     fn permission_always_for_non_bash() {
         assert_eq!(
-            parse_permission_response("Write", "write: /tmp/x", "a\n"),
+            parse_permission_response("Write", &serde_json::json!({"file_path": "/tmp/x"}), "a\n"),
             PermissionResponse::AlwaysAllow
         );
     }
