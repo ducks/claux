@@ -41,13 +41,22 @@ fn get_db() -> Result<Db> {
 
 /// Create a new session and return its ID and a dummy path for compatibility.
 pub fn create_session(model: &str) -> Result<(String, PathBuf)> {
-    let id = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let id = new_session_id();
     let db = get_db()?;
     db.create_session(&id, model, None, None)?;
 
     // Return a dummy path for API compatibility
     let dummy_path = PathBuf::from(format!("sqlite://{id}"));
     Ok((id, dummy_path))
+}
+
+/// Generate a readable, collision-resistant session identifier.
+pub(crate) fn new_session_id() -> String {
+    format!(
+        "{}-{}",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 /// Persist the full message list for a session, replacing what was stored.
@@ -262,6 +271,13 @@ mod tests {
             std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    #[test]
+    fn session_ids_do_not_collide_within_the_same_second() {
+        let ids: std::collections::HashSet<String> = (0..1_000).map(|_| new_session_id()).collect();
+        assert_eq!(ids.len(), 1_000);
+        assert!(ids.iter().all(|id| id.len() == 48));
     }
 
     fn tool_use_msg(id: &str) -> Message {
