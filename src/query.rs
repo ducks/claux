@@ -343,15 +343,15 @@ impl Engine {
 
         let old_count = self.messages.len();
         let old_tokens = compact::estimate_tokens(&self.messages);
+        let mut summary_source = None;
 
         // Try snip first (cheaper, no API call)
         if let Some(snipped) = compact::snip_old_messages(&self.messages, 10) {
             let new_tokens = compact::estimate_tokens(&snipped);
-            self.messages = snipped;
             tracing::info!(
                 "Snip compaction: {} msgs → {}, ~{} → ~{} tokens",
                 old_count,
-                self.messages.len(),
+                snipped.len(),
                 old_tokens,
                 new_tokens
             );
@@ -359,25 +359,32 @@ impl Engine {
             // If snip freed enough, we're done
             let ctx_window = compact::context_window_for_model(&self.model);
             if new_tokens < ctx_window * 70 / 100 {
+                let new_count = snipped.len();
+                self.messages = snipped;
                 return Ok(format!(
                     "Snipped {} old messages (~{} tokens freed)",
-                    old_count - self.messages.len() + 1, // +1 for snip marker
+                    old_count - new_count + 1, // +1 for snip marker
                     old_tokens - new_tokens
                 ));
             }
+
+            summary_source = Some(snipped);
         }
 
-        // Full summarization
-        self.summarize_conversation().await
+        // Full summarization. Keep the current history untouched until the
+        // provider completes so a failed compact cannot discard context.
+        let summary_source = summary_source.unwrap_or_else(|| self.messages.clone());
+        self.summarize_conversation(summary_source).await
     }
 
     /// Full API-based conversation summary.
-    async fn summarize_conversation(&mut self) -> Result<String> {
+    async fn summarize_conversation(&mut self, messages: Vec<Message>) -> Result<String> {
         let summary_prompt = "Summarize the conversation so far in a concise paragraph. \
             Focus on what was discussed, what decisions were made, what files were modified, \
             and any outstanding tasks. Be specific about file paths and changes.";
 
-        let mut summary_messages = self.messages.clone();
+        let old_count = messages.len();
+        let mut summary_messages = messages;
         summary_messages.push(Message::user(summary_prompt));
 
         let mut rx = self
@@ -408,8 +415,6 @@ impl Engine {
         if !completed {
             anyhow::bail!("Compact error: API stream ended without completion");
         }
-
-        let old_count = self.messages.len();
 
         self.messages = vec![
             Message::user("Here is a summary of our conversation so far:"),
@@ -1453,6 +1458,31 @@ mod tests {
             engine.messages().len(),
             1,
             "failed compaction must preserve the original history"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_summary_preserves_history_after_snipping_candidate() {
+        let mut engine = Engine::for_tests(
+            Box::new(TruncatedProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        let large_message = "context ".repeat(10_000);
+        for index in 0..13 {
+            engine
+                .messages_mut()
+                .push(Message::user(&format!("{index}: {large_message}")));
+        }
+        let original = serde_json::to_value(engine.messages()).unwrap();
+
+        let error = engine.compact().await.unwrap_err();
+
+        assert!(error.to_string().contains("without completion"));
+        assert_eq!(
+            serde_json::to_value(engine.messages()).unwrap(),
+            original,
+            "failed summarization must not commit the snipped candidate"
         );
     }
 
