@@ -36,10 +36,7 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
     engine.set_system_prompt(system_prompt);
 
     // Open database
-    let db_path = dirs::data_local_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?
-        .join("claux")
-        .join("sessions.db");
+    let db_path = crate::session::db_path()?;
     let db = Db::open(&db_path)?;
 
     let mut terminal_guard = TerminalGuard::enter()?;
