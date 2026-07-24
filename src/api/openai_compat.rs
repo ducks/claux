@@ -293,9 +293,8 @@ async fn read_openai_sse(
                 return Ok(());
             }
 
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
-                continue;
-            };
+            let event = serde_json::from_str::<serde_json::Value>(data)
+                .map_err(|error| anyhow::anyhow!("invalid JSON in OpenAI SSE event: {error}"))?;
 
             // Check for usage in the chunk
             if let Some(usage) = event.get("usage") {
@@ -492,6 +491,19 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("invalid arguments"));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_event_json_fails_the_stream() {
+        let response = crate::test_support::sse_response("data: {not json}\n\n").await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        let error = read_openai_sse(response, tx, CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid JSON"));
         assert!(rx.recv().await.is_none());
     }
 }

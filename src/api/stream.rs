@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -84,6 +84,7 @@ pub async fn read_sse_stream(
     let mut current_tool_id = String::new();
     let mut current_tool_name = String::new();
     let mut current_tool_input = String::new();
+    let mut current_tool_initial_input = None;
     let mut input_tokens: u32 = 0;
     let mut output_tokens: u32 = 0;
     let mut cache_read_tokens: u32 = 0;
@@ -121,9 +122,8 @@ pub async fn read_sse_stream(
                 return Ok(());
             }
 
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
-                continue;
-            };
+            let event = serde_json::from_str::<serde_json::Value>(data)
+                .context("invalid JSON in Anthropic SSE event")?;
 
             let event_type = event["type"].as_str().unwrap_or("");
 
@@ -154,6 +154,7 @@ pub async fn read_sse_stream(
                             current_tool_id = cb["id"].as_str().unwrap_or("").to_string();
                             current_tool_name = cb["name"].as_str().unwrap_or("").to_string();
                             current_tool_input.clear();
+                            current_tool_initial_input = cb.get("input").cloned();
                         }
                     }
                 }
@@ -176,21 +177,30 @@ pub async fn read_sse_stream(
                     }
                 }
 
-                "content_block_stop"
-                    if !current_tool_name.is_empty() && !current_tool_input.is_empty() =>
-                {
-                    if let Ok(input) = serde_json::from_str(&current_tool_input) {
-                        let _ = tx
-                            .send(ApiEvent::ToolUse {
-                                id: current_tool_id.clone(),
-                                name: current_tool_name.clone(),
-                                input,
-                            })
-                            .await;
-                    }
+                "content_block_stop" if !current_tool_name.is_empty() => {
+                    let input = if current_tool_input.is_empty() {
+                        current_tool_initial_input
+                            .take()
+                            .unwrap_or_else(|| serde_json::json!({}))
+                    } else {
+                        serde_json::from_str(&current_tool_input).with_context(|| {
+                            format!(
+                                "invalid arguments for Anthropic tool call {} ({})",
+                                current_tool_name, current_tool_id
+                            )
+                        })?
+                    };
+                    let _ = tx
+                        .send(ApiEvent::ToolUse {
+                            id: current_tool_id.clone(),
+                            name: current_tool_name.clone(),
+                            input,
+                        })
+                        .await;
                     current_tool_name.clear();
                     current_tool_input.clear();
                     current_tool_id.clear();
+                    current_tool_initial_input = None;
                 }
 
                 "message_stop" => {
@@ -262,5 +272,64 @@ mod tests {
         assert!(error.to_string().contains("before message_stop"));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "partial"));
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_event_json_fails_the_stream() {
+        let response = crate::test_support::sse_response("data: {not json}\n\n").await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        let error = read_sse_stream(response, tx, CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid JSON"));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_arguments_fail_the_stream() {
+        let response = crate::test_support::sse_response(
+            concat!(
+                "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"Read\",\"input\":{}}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\"}}\n\n",
+                "data: {\"type\":\"content_block_stop\"}\n\n",
+                "data: {\"type\":\"message_stop\"}\n\n"
+            ),
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        let error = read_sse_stream(response, tx, CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid arguments"));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_object_tool_arguments_are_emitted() {
+        let response = crate::test_support::sse_response(
+            concat!(
+                "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"Status\",\"input\":{}}}\n\n",
+                "data: {\"type\":\"content_block_stop\"}\n\n",
+                "data: {\"type\":\"message_stop\"}\n\n"
+            ),
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_sse_stream(response, tx, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(ApiEvent::ToolUse { id, name, input })
+                if id == "tool-1" && name == "Status" && input == serde_json::json!({})
+        ));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Usage(_))));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
     }
 }
