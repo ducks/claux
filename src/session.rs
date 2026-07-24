@@ -4,18 +4,33 @@
 //! metadata tracking, and querying capabilities.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::api::types::Message;
 use crate::db::{Db, SessionInfo};
 
 /// Get the database path.
-fn db_path() -> Result<PathBuf> {
+pub(crate) fn db_path() -> Result<PathBuf> {
     let base =
         dirs::data_local_dir().ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?;
     let dir = base.join("claux");
-    std::fs::create_dir_all(&dir)?;
+    prepare_storage_dir(&dir)?;
     Ok(dir.join("sessions.db"))
+}
+
+fn prepare_storage_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(dir)?.permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(dir, permissions)?;
+    }
+
+    Ok(())
 }
 
 /// Get the database instance (lazy initialization).
@@ -230,6 +245,24 @@ pub fn repair_history(messages: Vec<Message>) -> Vec<Message> {
 mod tests {
     use super::*;
     use crate::api::types::{ContentBlock, MessageContent};
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_directory_is_private_and_repairs_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("claux");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        prepare_storage_dir(&dir).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
 
     fn tool_use_msg(id: &str) -> Message {
         Message::assistant_blocks(vec![ContentBlock::ToolUse {

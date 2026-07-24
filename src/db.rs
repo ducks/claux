@@ -31,6 +31,15 @@ impl Db {
         )
         .context("Failed to open database")?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(path)?.permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(path, permissions)?;
+        }
+
         // Enable WAL mode for better concurrent performance (ignore result)
         let _ = conn.execute("PRAGMA journal_mode = WAL", []);
 
@@ -344,6 +353,21 @@ pub struct SessionInfo {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn database_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let _db = Db::open(&db_path).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     #[test]
     fn test_create_and_get_session() {
