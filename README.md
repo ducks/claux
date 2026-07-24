@@ -45,6 +45,26 @@ cargo install --path .
 
 Requires Rust 1.88+. A `shell.nix` is included.
 
+## First run
+
+Create a starter configuration for Anthropic, OpenAI, or Ollama, then verify
+authentication, required executables, configured hooks/MCP servers, project
+trust, and provider connectivity:
+
+```bash
+claux config init --provider anthropic
+claux doctor
+
+# Other examples
+claux config init --provider openai --model gpt-5.6-sol
+claux config init --provider ollama --model llama3
+claux doctor --offline  # configuration checks without a network request
+```
+
+The generated file contains environment-variable names, never API keys. Claux
+creates it with private permissions and refuses to overwrite an existing file
+unless `--force` is explicit.
+
 ## Auth
 
 claux resolves authentication in order:

@@ -10,6 +10,7 @@ mod config;
 mod context;
 mod cost;
 mod db;
+mod onboarding;
 mod permissions;
 mod plugin;
 mod query;
@@ -42,6 +43,33 @@ async fn main() -> Result<()> {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+
+    if let Some(command) = &args.command {
+        match command {
+            cli::CliCommand::Config {
+                command:
+                    cli::ConfigCommand::Init {
+                        provider,
+                        model,
+                        force,
+                    },
+            } => {
+                let path = onboarding::init_config(*provider, model.as_deref(), *force)?;
+                println!("Created {}", path.display());
+                println!("Run `claux doctor` to verify the setup.");
+                return Ok(());
+            }
+            cli::CliCommand::Doctor { offline } => {
+                let config = config::Config::load(args.trust_project)?;
+                let report = onboarding::doctor(&config, *offline).await;
+                print!("{}", report.text);
+                if !report.healthy {
+                    anyhow::bail!("doctor found configuration errors");
+                }
+                return Ok(());
+            }
+        }
+    }
 
     // Load config (global + project)
     let mut config = config::Config::load(args.trust_project)?;
@@ -213,11 +241,12 @@ fn build_provider(config: &config::Config, model: &str) -> Result<Box<dyn api::P
     }
 
     // Default: Anthropic
-    let auth = config
-        .resolve_auth()
-        .ok_or_else(|| anyhow::anyhow!(
-            "No authentication found. Set ANTHROPIC_API_KEY, configure ~/.config/claux/config.toml, or run `claude login`."
-        ))?;
+    let auth = config.resolve_auth().ok_or_else(|| {
+        anyhow::anyhow!(
+            "No authentication found. Set ANTHROPIC_API_KEY, run `claude login`, or run \
+             `claux config init` followed by `claux doctor`."
+        )
+    })?;
 
     Ok(Box::new(api::AnthropicProvider::new(auth, model)))
 }
