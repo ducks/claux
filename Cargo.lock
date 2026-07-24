@@ -291,6 +291,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tuishot",
+ "unicode-width 0.2.0",
  "uuid",
  "walkdir",
 ]

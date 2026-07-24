@@ -185,23 +185,22 @@ impl ChatApp {
                 // Submit handled by caller
             }
             (_, KeyCode::Backspace) if self.cursor > 0 => {
-                self.cursor -= 1;
-                self.input.remove(self.cursor);
+                super::input::backspace(&mut self.input, &mut self.cursor);
             }
-            (_, KeyCode::Delete) if self.cursor < self.input.len() => {
-                self.input.remove(self.cursor);
+            (_, KeyCode::Delete) if self.cursor < super::input::char_count(&self.input) => {
+                super::input::delete(&mut self.input, self.cursor);
             }
             (_, KeyCode::Left) if self.cursor > 0 => {
                 self.cursor -= 1;
             }
-            (_, KeyCode::Right) if self.cursor < self.input.len() => {
+            (_, KeyCode::Right) if self.cursor < super::input::char_count(&self.input) => {
                 self.cursor += 1;
             }
             (_, KeyCode::Home) | (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
                 self.cursor = 0;
             }
             (_, KeyCode::End) | (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
-                self.cursor = self.input.len();
+                self.cursor = super::input::char_count(&self.input);
             }
             (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
                 self.input.clear();
@@ -218,8 +217,7 @@ impl ChatApp {
                 }
             }
             (_, KeyCode::Char(c)) => {
-                self.input.insert(self.cursor, c);
-                self.cursor += 1;
+                super::input::insert(&mut self.input, &mut self.cursor, c);
             }
             _ => {}
         }
@@ -797,6 +795,24 @@ mod tests {
         let mut app = test_app();
         app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(app.should_exit);
+    }
+
+    #[test]
+    fn input_editing_handles_multibyte_characters() {
+        let mut app = test_app();
+        for character in ['a', 'é', '界'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!(app.input, "aé界");
+        assert_eq!(app.cursor, 3);
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.input, "a界");
+        assert_eq!(app.cursor, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(app.input, "a");
     }
 
     #[test]
