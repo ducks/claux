@@ -1,19 +1,27 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use rmcp::{
-    model::{CallToolRequestParams, ClientInfo, Implementation, RawContent},
-    service::RunningService,
+    model::{
+        CallToolRequest, CallToolRequestParams, ClientInfo, ClientRequest, Implementation,
+        RawContent, ServerResult,
+    },
+    service::{PeerRequestOptions, RunningService},
     transport::{ConfigureCommandExt, TokioChildProcess},
     RoleClient, ServiceExt,
 };
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::process::Command;
 
 use super::{Tool, ToolOutput};
 use crate::config::McpServerConfig;
 
 type McpClient = RunningService<RoleClient, ClientInfo>;
+
+const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+const MCP_CANCEL_NOTIFY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A tool backed by an MCP server.
 /// Wraps one tool from an MCP server's tools/list response.
@@ -91,18 +99,65 @@ impl Tool for McpTool {
             params = params.with_arguments(args);
         }
 
-        let result = tokio::select! {
-            r = self.client.call_tool(params) => r,
-            _ = cancel.cancelled() => {
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
+        let mut handle = match self
+            .client
+            .send_cancellable_request(request, PeerRequestOptions::no_options())
+            .await
+        {
+            Ok(handle) => handle,
+            Err(error) => {
                 return Ok(ToolOutput {
-                    content: "Interrupted by user.".to_string(),
+                    content: format!("MCP error: {error}"),
                     is_error: true,
                 });
             }
         };
 
-        match result {
-            Ok(call_result) => {
+        let response = tokio::select! {
+            response = &mut handle.rx => response,
+            _ = cancel.cancelled() => {
+                let suffix = match tokio::time::timeout(
+                    MCP_CANCEL_NOTIFY_TIMEOUT,
+                    handle.cancel(Some("cancelled by user".to_string())),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        "Cancellation was sent to the server; side effects may already have occurred."
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        "The cancellation notification could not be delivered; the remote operation may still be running."
+                    }
+                };
+                return Ok(ToolOutput {
+                    content: format!("MCP request cancelled by user. {suffix}"),
+                    is_error: true,
+                });
+            }
+            _ = tokio::time::sleep(MCP_CALL_TIMEOUT) => {
+                let suffix = match tokio::time::timeout(
+                    MCP_CANCEL_NOTIFY_TIMEOUT,
+                    handle.cancel(Some("request timed out".to_string())),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        "Cancellation was sent to the server; side effects may already have occurred."
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        "The cancellation notification could not be delivered; the remote operation may still be running."
+                    }
+                };
+                return Ok(ToolOutput {
+                    content: format!("MCP request timed out after {MCP_CALL_TIMEOUT:?}. {suffix}"),
+                    is_error: true,
+                });
+            }
+        };
+
+        match response {
+            Ok(Ok(ServerResult::CallToolResult(call_result))) => {
                 let text = call_result
                     .content
                     .iter()
@@ -118,8 +173,16 @@ impl Tool for McpTool {
                     is_error: call_result.is_error.unwrap_or(false),
                 })
             }
-            Err(e) => Ok(ToolOutput {
-                content: format!("MCP error: {e}"),
+            Ok(Ok(_)) => Ok(ToolOutput {
+                content: "MCP error: server returned an unexpected response".to_string(),
+                is_error: true,
+            }),
+            Ok(Err(error)) => Ok(ToolOutput {
+                content: format!("MCP error: {error}"),
+                is_error: true,
+            }),
+            Err(_) => Ok(ToolOutput {
+                content: "MCP error: connection closed before the tool returned".to_string(),
                 is_error: true,
             }),
         }
@@ -128,10 +191,27 @@ impl Tool for McpTool {
 
 /// Connect to all configured MCP servers and return their tools.
 pub async fn connect_mcp_servers(configs: &[McpServerConfig]) -> Vec<Box<dyn Tool>> {
+    connect_mcp_servers_with_timeout(configs, MCP_CONNECT_TIMEOUT).await
+}
+
+async fn connect_mcp_servers_with_timeout(
+    configs: &[McpServerConfig],
+    timeout: Duration,
+) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
-    for config in configs {
-        match connect_server(config).await {
+    let connections = configs.iter().map(|config| async move {
+        let result = tokio::time::timeout(timeout, connect_server(config))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("Timed out after {timeout:?} while starting or discovering tools")
+            })
+            .and_then(|result| result);
+        (config, result)
+    });
+
+    for (config, result) in futures_util::future::join_all(connections).await {
+        match result {
             Ok(server_tools) => {
                 tracing::info!(
                     "MCP server '{}': {} tools discovered",
@@ -204,4 +284,33 @@ async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> 
         .collect();
 
     Ok(tools)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn server_connections_are_concurrent_and_bounded() {
+        let configs: Vec<McpServerConfig> = (0..10)
+            .map(|index| McpServerConfig {
+                name: format!("server-{index}"),
+                command: "sleep".to_string(),
+                args: vec!["5".to_string()],
+                env: Default::default(),
+            })
+            .collect();
+        let timeout = Duration::from_millis(50);
+        let started = tokio::time::Instant::now();
+
+        let tools = connect_mcp_servers_with_timeout(&configs, timeout).await;
+
+        assert!(tools.is_empty());
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "server timeouts should overlap, took {:?}",
+            started.elapsed()
+        );
+    }
 }
