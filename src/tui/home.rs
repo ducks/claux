@@ -27,6 +27,11 @@ enum Mode {
     NewSession,
     /// Typing a name for a new project
     NewProject,
+    /// Waiting for explicit confirmation before deleting a session
+    ConfirmDelete {
+        session_id: String,
+        display_name: String,
+    },
 }
 
 /// An item in the tree view -- either a project header or a session.
@@ -150,7 +155,7 @@ impl HomeScreen {
 
             if event::poll(std::time::Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
-                    match self.mode {
+                    match self.mode.clone() {
                         Mode::Browse => {
                             if let Some(action) = self.handle_browse_key(key)? {
                                 return Ok(action);
@@ -160,6 +165,9 @@ impl HomeScreen {
                             if let Some(action) = self.handle_prompt_key(key)? {
                                 return Ok(action);
                             }
+                        }
+                        Mode::ConfirmDelete { .. } => {
+                            self.handle_delete_confirmation(key)?;
                         }
                     }
                 }
@@ -220,8 +228,14 @@ impl HomeScreen {
 
             (_, KeyCode::Char('d')) => {
                 if let Some(TreeItem::Session(session)) = self.tree.get(self.selected).cloned() {
-                    self.db.delete_session(&session.id)?;
-                    self.reload()?;
+                    let display_name = session
+                        .name
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| session.id.clone());
+                    self.mode = Mode::ConfirmDelete {
+                        session_id: session.id,
+                        display_name,
+                    };
                 }
             }
 
@@ -229,6 +243,26 @@ impl HomeScreen {
         }
 
         Ok(None)
+    }
+
+    fn handle_delete_confirmation(&mut self, key: KeyEvent) -> Result<()> {
+        let Mode::ConfirmDelete { session_id, .. } = self.mode.clone() else {
+            return Ok(());
+        };
+
+        match key.code {
+            KeyCode::Char('y') => {
+                self.db.delete_session(&session_id)?;
+                self.mode = Mode::Browse;
+                self.reload()?;
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.mode = Mode::Browse;
+            }
+            _ => {}
+        }
+
+        Ok(())
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<Option<Action>> {
@@ -415,7 +449,7 @@ impl HomeScreen {
         f.render_widget(tree_widget, chunks[1]);
 
         // Input / help area
-        match self.mode {
+        match &self.mode {
             Mode::NewSession => {
                 let prompt = format!("Session name (Enter for timestamp): {}", self.input);
                 let input_widget = Paragraph::new(prompt)
@@ -443,6 +477,24 @@ impl HomeScreen {
                 f.render_widget(input_widget, chunks[2]);
                 let cursor_width = super::input::display_width_before(&self.input, self.cursor);
                 f.set_cursor_position((chunks[2].x + 15 + cursor_width as u16, chunks[2].y + 1));
+            }
+            Mode::ConfirmDelete { display_name, .. } => {
+                let prompt = Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!(" Delete \"{display_name}\"? "),
+                        Style::default()
+                            .fg(self.theme.error)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("(y)es / (n)o", Style::default().fg(self.theme.dim)),
+                ]))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(self.theme.error))
+                        .title(" Confirm Delete "),
+                );
+                f.render_widget(prompt, chunks[2]);
             }
             Mode::Browse => {
                 let help = Paragraph::new(Line::from(vec![
@@ -472,6 +524,60 @@ impl HomeScreen {
             Style::default().fg(self.theme.dim),
         )]));
         f.render_widget(status, chunks[3]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn screen_with_session() -> (HomeScreen, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Db::open(&temp.path().join("test.db")).unwrap();
+        db.create_session(
+            "session-1",
+            "model",
+            Some("Important work"),
+            Some("project"),
+        )
+        .unwrap();
+        let mut screen = HomeScreen::new(db, Theme::dark(), "model");
+        screen.selected = screen
+            .tree
+            .iter()
+            .position(|item| matches!(item, TreeItem::Session(_)))
+            .unwrap();
+        (screen, temp)
+    }
+
+    fn key(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn delete_requires_explicit_confirmation() {
+        let (mut screen, _temp) = screen_with_session();
+
+        screen.handle_browse_key(key('d')).unwrap();
+
+        assert!(matches!(screen.mode, Mode::ConfirmDelete { .. }));
+        assert!(screen.db.get_session("session-1").unwrap().is_some());
+
+        screen.handle_delete_confirmation(key('y')).unwrap();
+
+        assert_eq!(screen.mode, Mode::Browse);
+        assert!(screen.db.get_session("session-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_confirmation_can_be_cancelled() {
+        let (mut screen, _temp) = screen_with_session();
+        screen.handle_browse_key(key('d')).unwrap();
+
+        screen.handle_delete_confirmation(key('n')).unwrap();
+
+        assert_eq!(screen.mode, Mode::Browse);
+        assert!(screen.db.get_session("session-1").unwrap().is_some());
     }
 }
 
