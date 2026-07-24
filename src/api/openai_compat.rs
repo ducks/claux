@@ -124,6 +124,30 @@ impl OpenAICompatProvider {
             })
             .collect()
     }
+
+    fn request_body(
+        &self,
+        messages: &[Message],
+        system: &str,
+        tools: &[ToolDefinition],
+        max_tokens: u32,
+    ) -> serde_json::Value {
+        let mut body = json!({
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": Self::convert_messages(messages, system),
+            "stream": true,
+            "stream_options": {
+                "include_usage": true
+            }
+        });
+
+        if !tools.is_empty() {
+            body["tools"] = json!(Self::convert_tools(tools));
+        }
+
+        body
+    }
 }
 
 #[async_trait]
@@ -151,18 +175,7 @@ impl Provider for OpenAICompatProvider {
         let (tx, rx) = mpsc::channel(256);
 
         let url = format!("{}/chat/completions", self.base_url);
-        let openai_messages = Self::convert_messages(messages, system);
-
-        let mut body = json!({
-            "model": self.model,
-            "max_tokens": max_tokens,
-            "messages": openai_messages,
-            "stream": true,
-        });
-
-        if !tools.is_empty() {
-            body["tools"] = json!(Self::convert_tools(tools));
-        }
+        let body = self.request_body(messages, system, tools, max_tokens);
 
         tracing::debug!("OpenAI request: {} model={}", url, self.model);
         tracing::debug!(
@@ -210,6 +223,23 @@ impl Provider for OpenAICompatProvider {
     }
 }
 
+type PendingToolCalls = std::collections::HashMap<u32, (String, String, String)>;
+
+fn drain_tool_calls(tool_calls: &mut PendingToolCalls) -> Result<Vec<ApiEvent>> {
+    use anyhow::Context as _;
+
+    let mut calls: Vec<(u32, (String, String, String))> = tool_calls.drain().collect();
+    calls.sort_by_key(|(index, _)| *index);
+    calls
+        .into_iter()
+        .map(|(_, (id, name, arguments))| {
+            let input = serde_json::from_str(&arguments)
+                .with_context(|| format!("invalid arguments for tool call {name} ({id})"))?;
+            Ok(ApiEvent::ToolUse { id, name, input })
+        })
+        .collect()
+}
+
 /// Parse OpenAI-format SSE stream into ApiEvents.
 async fn read_openai_sse(
     response: reqwest::Response,
@@ -222,8 +252,7 @@ async fn read_openai_sse(
     let mut buffer = String::new();
 
     // Tool call accumulation
-    let mut tool_calls: std::collections::HashMap<u32, (String, String, String)> =
-        std::collections::HashMap::new(); // index -> (id, name, arguments)
+    let mut tool_calls = PendingToolCalls::new(); // index -> (id, name, arguments)
 
     let mut input_tokens: u32 = 0;
     let mut output_tokens: u32 = 0;
@@ -254,6 +283,9 @@ async fn read_openai_sse(
             };
 
             if data == "[DONE]" {
+                for event in drain_tool_calls(&mut tool_calls)? {
+                    let _ = tx.send(event).await;
+                }
                 let _ = tx
                     .send(ApiEvent::Usage(Usage {
                         input_tokens,
@@ -322,16 +354,37 @@ async fn read_openai_sse(
                 // Check finish reason
                 if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
                     saw_finish_reason = true;
-                    if reason == "tool_calls" {
-                        // Emit accumulated tool calls
-                        let mut calls: Vec<(u32, (String, String, String))> =
-                            tool_calls.drain().collect();
-                        calls.sort_by_key(|(idx, _)| *idx);
-
-                        for (_, (id, name, args)) in calls {
-                            if let Ok(input) = serde_json::from_str(&args) {
-                                let _ = tx.send(ApiEvent::ToolUse { id, name, input }).await;
+                    match reason {
+                        "tool_calls" => {
+                            for event in drain_tool_calls(&mut tool_calls)? {
+                                let _ = tx.send(event).await;
                             }
+                        }
+                        "stop" => {}
+                        "length" => {
+                            let _ = tx
+                                .send(ApiEvent::Error(
+                                    "max_output_tokens: response reached its output token limit"
+                                        .to_string(),
+                                ))
+                                .await;
+                            return Ok(());
+                        }
+                        "content_filter" => {
+                            let _ = tx
+                                .send(ApiEvent::Error(
+                                    "response blocked by provider content filter".to_string(),
+                                ))
+                                .await;
+                            return Ok(());
+                        }
+                        other => {
+                            let _ = tx
+                                .send(ApiEvent::Error(format!(
+                                    "unsupported OpenAI finish reason: {other}"
+                                )))
+                                .await;
+                            return Ok(());
                         }
                     }
                 }
@@ -345,14 +398,8 @@ async fn read_openai_sse(
 
     // Some compatible providers close cleanly after finish_reason instead of
     // sending [DONE]. Preserve that behavior, but only after a terminal event.
-    if !tool_calls.is_empty() {
-        let mut calls: Vec<(u32, (String, String, String))> = tool_calls.drain().collect();
-        calls.sort_by_key(|(idx, _)| *idx);
-        for (_, (id, name, args)) in calls {
-            if let Ok(input) = serde_json::from_str(&args) {
-                let _ = tx.send(ApiEvent::ToolUse { id, name, input }).await;
-            }
-        }
+    for event in drain_tool_calls(&mut tool_calls)? {
+        let _ = tx.send(event).await;
     }
 
     let _ = tx
@@ -370,6 +417,15 @@ async fn read_openai_sse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requests_streamed_usage() {
+        let provider =
+            OpenAICompatProvider::new("https://api.openai.com/v1", "key", "model", "openai");
+        let body = provider.request_body(&[Message::user("hello")], "system", &[], 1_000);
+
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
 
     #[tokio::test]
     async fn rejects_eof_before_finish_reason() {
@@ -403,5 +459,43 @@ mod tests {
         assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "complete"));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Usage(_))));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
+    }
+
+    #[tokio::test]
+    async fn output_length_is_an_error_not_successful_completion() {
+        let response = crate::test_support::sse_response(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\n",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_openai_sse(response, tx, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "partial"));
+        assert!(
+            matches!(rx.recv().await, Some(ApiEvent::Error(error)) if error.contains("max_output_tokens"))
+        );
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_arguments_fail_the_stream() {
+        let response = crate::test_support::sse_response(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\"}}]},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+            ),
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        let error = read_openai_sse(response, tx, CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid arguments"));
+        assert!(rx.recv().await.is_none());
     }
 }
