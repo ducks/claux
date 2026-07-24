@@ -207,6 +207,8 @@ impl Engine {
 
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.provider.reset_session();
+        self.permissions.reset_session();
+        self.tools.reset_session();
         self.cost.reset_usage();
         self.steering
             .lock()
@@ -1023,6 +1025,8 @@ mod tests {
             .lock()
             .unwrap()
             .push_back("stale steering".to_string());
+        engine.permissions.always_allow("Write");
+        engine.permissions.always_allow_command("cargo test");
 
         engine.set_messages(vec![Message::user("loaded session")]);
 
@@ -1031,6 +1035,20 @@ mod tests {
         assert!(engine.steering_queue().lock().unwrap().is_empty());
         assert_eq!(engine.cost.input_tokens, 0);
         assert_eq!(engine.cost.output_tokens, 0);
+        assert!(matches!(
+            engine.permissions.check(
+                "Write",
+                &serde_json::json!({"file_path": "/tmp/test"}),
+                false
+            ),
+            PermissionResult::Ask { .. }
+        ));
+        assert!(matches!(
+            engine
+                .permissions
+                .check("Bash", &serde_json::json!({"command": "cargo test"}), false),
+            PermissionResult::Ask { .. }
+        ));
 
         engine.cost.add_usage(&crate::api::types::Usage {
             input_tokens: 1_000_000,

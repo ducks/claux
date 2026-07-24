@@ -31,6 +31,9 @@ pub trait Tool: Send + Sync {
     fn input_schema(&self) -> Value;
     fn is_read_only(&self) -> bool;
 
+    /// Clear state that must not carry into another conversation.
+    fn reset_session(&self) {}
+
     /// Short human-readable summary of what this invocation does.
     /// Shown to the user while the tool runs.
     fn summarize(&self, _input: &Value) -> String {
@@ -98,6 +101,13 @@ impl ToolRegistry {
     /// Add external tools (e.g. from MCP servers).
     pub fn add_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
         self.tools.extend(tools);
+    }
+
+    /// Clear conversation-scoped state held by registered tools.
+    pub fn reset_session(&self) {
+        for tool in &self.tools {
+            tool.reset_session();
+        }
     }
 
     /// Get tool definitions for the API request.

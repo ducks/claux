@@ -69,6 +69,12 @@ impl PermissionChecker {
         self.bash_command_allows.insert(cmd.to_string());
     }
 
+    /// Clear permissions granted for the previous conversation.
+    pub fn reset_session(&mut self) {
+        self.session_allows.clear();
+        self.bash_command_allows.clear();
+    }
+
     /// Check if a specific bash command is always allowed.
     pub fn is_command_allowed(&self, cmd: &str) -> bool {
         self.bash_command_allows.contains(cmd)
@@ -346,6 +352,35 @@ mod tests {
         // Write should still ask
         assert!(matches!(
             checker.check("Write", &input, false),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn reset_session_clears_all_session_grants() {
+        let mut checker = PermissionChecker::new(PermissionMode::Default);
+        let bash_input = json!({"command": "cargo test"});
+        let write_input = json!({"file_path": "/tmp/test"});
+
+        checker.always_allow("Write");
+        checker.always_allow_command("cargo test");
+        assert!(matches!(
+            checker.check("Write", &write_input, false),
+            PermissionResult::Allow
+        ));
+        assert!(matches!(
+            checker.check("Bash", &bash_input, false),
+            PermissionResult::Allow
+        ));
+
+        checker.reset_session();
+
+        assert!(matches!(
+            checker.check("Write", &write_input, false),
+            PermissionResult::Ask { .. }
+        ));
+        assert!(matches!(
+            checker.check("Bash", &bash_input, false),
             PermissionResult::Ask { .. }
         ));
     }
