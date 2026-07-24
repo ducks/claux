@@ -23,6 +23,7 @@ mod utils;
 
 use anyhow::Result;
 use clap::Parser;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -74,6 +75,7 @@ async fn main() -> Result<()> {
             plugin_registry.get_by_trigger(&config::HookTrigger::OnPermissionRequest),
         );
     }
+    let plugin_registry = Arc::new(plugin_registry);
 
     let model = args.model.as_deref().unwrap_or(&config.model).to_string();
 
@@ -110,6 +112,7 @@ async fn main() -> Result<()> {
         tool_registry.add_tools(mcp_tools);
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
         let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
+        engine.set_plugins(plugin_registry.clone());
         engine.set_auto_compact_threshold(config.auto_compact_threshold);
         engine.set_max_tokens(config.max_tokens);
         engine.set_model_pricing(config.model_pricing.get(&model).copied());
@@ -139,26 +142,18 @@ async fn main() -> Result<()> {
     tool_registry.add_tools(mcp_tools);
     let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
     let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
+    engine.set_plugins(plugin_registry.clone());
     engine.set_auto_compact_threshold(config.auto_compact_threshold);
     engine.set_max_tokens(config.max_tokens);
     engine.set_model_pricing(config.model_pricing.get(&model).copied());
-
-    // Build system prompt with plugins for REPL mode
-    let system_prompt = context::build_system_prompt_for_model(
-        &model,
-        Some(&plugin_registry),
-        &config::HookTrigger::OnContextBuild,
-        config.is_anthropic(),
-    )
-    .await?;
-    engine.set_system_prompt(system_prompt);
 
     // Run session-start hooks
     plugin::PluginRegistry::execute_side_effects(
         &plugin_registry,
         &config::HookTrigger::OnSessionStart,
         None,
-    )?;
+    )
+    .await?;
 
     // Resume a previous session if requested. The matched id is handed to
     // the REPL so it continues that session instead of forking a new one.

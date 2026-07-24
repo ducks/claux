@@ -5,8 +5,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::api::{ApiEvent, ContentBlock, Message, Provider, ProviderStream};
 use crate::compact::{self};
+use crate::config::HookTrigger;
 use crate::cost::CostTracker;
 use crate::permissions::{PermissionChecker, PermissionResponse, PermissionResult};
+use crate::plugin::PluginRegistry;
 use crate::tools::ToolRegistry;
 
 /// Queue of user messages typed while a turn is running ("steering").
@@ -27,6 +29,7 @@ pub struct Engine {
     max_tokens: u32,
     auto_compact_threshold: f64,
     steering: SteeringQueue,
+    plugins: Option<Arc<PluginRegistry>>,
     pub cost: CostTracker,
 }
 
@@ -89,6 +92,7 @@ impl Engine {
             max_tokens: 16384,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
+            plugins: None,
             cost: CostTracker::new(model),
         }
     }
@@ -111,7 +115,22 @@ impl Engine {
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
             steering,
+            plugins: None,
             cost: CostTracker::new("test"),
+        }
+    }
+
+    /// Attach lifecycle hooks to the engine so every frontend observes the
+    /// same tool, permission, and turn events.
+    pub fn set_plugins(&mut self, plugins: Arc<PluginRegistry>) {
+        self.plugins = Some(plugins);
+    }
+
+    async fn fire_hook(&self, trigger: &HookTrigger) {
+        if let Some(plugins) = &self.plugins {
+            if let Err(error) = plugins.execute_side_effects(trigger, None).await {
+                tracing::warn!("plugin hook {trigger:?} failed: {error}");
+            }
         }
     }
 
@@ -470,6 +489,7 @@ impl Engine {
 
         let result = self.run_turn(user_input, tx, false, cancel).await;
         let text = collector.await.unwrap_or_default();
+        self.fire_hook(&HookTrigger::OnTurnEnd).await;
         result?;
         Ok(text)
     }
@@ -482,7 +502,9 @@ impl Engine {
         tx: mpsc::Sender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
-        self.run_turn(user_input, tx, true, cancel).await
+        let result = self.run_turn(user_input, tx, true, cancel).await;
+        self.fire_hook(&HookTrigger::OnTurnEnd).await;
+        result
     }
 
     /// The turn loop: chat -> tools -> chat -> ... until the assistant
@@ -588,6 +610,7 @@ impl Engine {
                         text_buf.push_str(&t);
                     }
                     ApiEvent::ToolUse { id, name, input } => {
+                        self.fire_hook(&HookTrigger::OnToolStart).await;
                         let summary = self.tools.summarize(&name, &input);
                         let _ = tx
                             .send(StreamEvent::ToolStart {
@@ -654,6 +677,7 @@ impl Engine {
                 if !tool_uses.is_empty() {
                     let mut result_blocks = Vec::with_capacity(tool_uses.len());
                     for (id, name, _) in &tool_uses {
+                        self.fire_hook(&HookTrigger::OnToolComplete).await;
                         let _ = tx
                             .send(StreamEvent::ToolResult {
                                 name: name.clone(),
@@ -824,6 +848,7 @@ impl Engine {
                 tracing::debug!("Truncated tool output for {}", name);
             }
 
+            self.fire_hook(&HookTrigger::OnToolComplete).await;
             let _ = tx
                 .send(StreamEvent::ToolResult {
                     name: name.clone(),
@@ -852,6 +877,7 @@ impl Engine {
         tx: &mpsc::Sender<StreamEvent>,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> crate::tools::ToolOutput {
+        self.fire_hook(&HookTrigger::OnPermissionRequest).await;
         let (resp_tx, resp_rx) = oneshot::channel();
 
         let event = if let Some(d) = diff {
@@ -911,6 +937,9 @@ mod tests {
     use super::*;
     use crate::api::ToolDefinition;
     use crate::permissions::PermissionMode;
+    use crate::plugin::Plugin;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
     // Mock provider for testing
@@ -1114,6 +1143,7 @@ mod tests {
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
+            plugins: None,
             cost: CostTracker::new("test"),
         };
 
@@ -1185,6 +1215,7 @@ mod tests {
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
+            plugins: None,
             cost: CostTracker::new("test"),
         };
 
@@ -1241,6 +1272,63 @@ mod tests {
             push_on_first_call,
             PermissionMode::Bypass,
         )
+    }
+
+    struct CountingPlugin {
+        trigger: HookTrigger,
+        count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Plugin for CountingPlugin {
+        fn name(&self) -> &str {
+            "counter"
+        }
+
+        fn trigger(&self) -> &HookTrigger {
+            &self.trigger
+        }
+
+        async fn execute(
+            &self,
+            _env_vars: Option<&HashMap<String, String>>,
+        ) -> Result<Option<String>> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn one_shot_submit_fires_tool_and_turn_hooks() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let completes = Arc::new(AtomicUsize::new(0));
+        let turns = Arc::new(AtomicUsize::new(0));
+        let mut plugins = PluginRegistry::new();
+        for (trigger, count) in [
+            (HookTrigger::OnToolStart, starts.clone()),
+            (HookTrigger::OnToolComplete, completes.clone()),
+            (HookTrigger::OnTurnEnd, turns.clone()),
+        ] {
+            plugins.add(Box::new(CountingPlugin { trigger, count }));
+        }
+
+        let mut engine = steering_engine(
+            vec![crate::test_support::tool_use(
+                "read-1",
+                "Read",
+                serde_json::json!({"file_path": "/dev/null"}),
+            )],
+            None,
+        );
+        engine.set_plugins(Arc::new(plugins));
+        engine
+            .submit("read it", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(completes.load(Ordering::SeqCst), 1);
+        assert_eq!(turns.load(Ordering::SeqCst), 1);
     }
 
     async fn run_streaming(engine: &mut Engine, prompt: &str) {
@@ -1567,6 +1655,7 @@ mod tests {
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
+            plugins: None,
             cost: CostTracker::new("test"),
         };
 
@@ -1623,6 +1712,7 @@ mod tests {
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
+            plugins: None,
             cost: CostTracker::new("test"),
         };
 

@@ -1,11 +1,16 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use std::collections::HashMap;
-use std::process::Command;
+use std::process::Stdio;
 use tracing::warn;
 
 use crate::config::HookTrigger;
 
+const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const HOOK_OUTPUT_LIMIT: usize = 64 * 1024;
+
 /// A plugin that can inject context into the system prompt or react to events.
+#[async_trait]
 pub trait Plugin: Send + Sync {
     /// Returns the name of the plugin.
     fn name(&self) -> &str;
@@ -15,7 +20,7 @@ pub trait Plugin: Send + Sync {
 
     /// Executes the plugin with optional environment variables.
     /// Returns None if the plugin has nothing to contribute.
-    fn execute(&self, env_vars: Option<&HashMap<String, String>>) -> Result<Option<String>>;
+    async fn execute(&self, env_vars: Option<&HashMap<String, String>>) -> Result<Option<String>>;
 }
 
 /// A plugin that runs an external command and captures its output.
@@ -24,6 +29,7 @@ pub struct CommandPlugin {
     command: String,
     args: Vec<String>,
     trigger: HookTrigger,
+    timeout: std::time::Duration,
 }
 
 impl CommandPlugin {
@@ -33,14 +39,22 @@ impl CommandPlugin {
             command: command.to_string(),
             args: args.to_vec(),
             trigger,
+            timeout: HOOK_TIMEOUT,
         }
     }
 
     pub fn trigger(&self) -> &HookTrigger {
         &self.trigger
     }
+
+    #[cfg(test)]
+    fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
 }
 
+#[async_trait]
 impl Plugin for CommandPlugin {
     fn name(&self) -> &str {
         &self.name
@@ -50,9 +64,12 @@ impl Plugin for CommandPlugin {
         &self.trigger
     }
 
-    fn execute(&self, env_vars: Option<&HashMap<String, String>>) -> Result<Option<String>> {
-        let mut cmd = Command::new(&self.command);
+    async fn execute(&self, env_vars: Option<&HashMap<String, String>>) -> Result<Option<String>> {
+        let mut cmd = tokio::process::Command::new(&self.command);
         cmd.args(&self.args);
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         // Inject environment variables if provided
         if let Some(env) = env_vars {
@@ -61,23 +78,57 @@ impl Plugin for CommandPlugin {
             }
         }
 
-        let output = cmd.output()?;
+        let mut child = cmd.spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("failed to capture hook stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("failed to capture hook stderr"))?;
 
-        if !output.status.success() {
+        let execution = async {
+            let (stdout, stderr, status) =
+                tokio::try_join!(read_capped(stdout), read_capped(stderr), async {
+                    child.wait().await
+                })?;
+            Ok::<_, std::io::Error>((stdout, stderr, status))
+        };
+        let (stdout, stderr, status) = tokio::time::timeout(self.timeout, execution)
+            .await
+            .map_err(|_| anyhow::anyhow!("hook timed out after {:?}", self.timeout))??;
+
+        if !status.success() {
             warn!(
                 "Plugin '{}' failed: {}",
                 self.name,
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&stderr)
             );
             return Ok(None);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
         if stdout.is_empty() {
             Ok(None)
         } else {
             Ok(Some(stdout))
         }
+    }
+}
+
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut reader: R) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut output = Vec::new();
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(output);
+        }
+        let remaining = HOOK_OUTPUT_LIMIT.saturating_sub(output.len());
+        output.extend_from_slice(&chunk[..read.min(remaining)]);
     }
 }
 
@@ -98,19 +149,24 @@ impl PluginRegistry {
     }
 
     /// Executes all plugins for a specific trigger and returns combined context.
-    pub fn execute_all(
+    pub async fn execute_all(
         &self,
         trigger: &HookTrigger,
         env_vars: Option<&HashMap<String, String>>,
     ) -> Result<String> {
         let mut parts = Vec::new();
 
-        for plugin in &self.plugins {
-            if plugin.trigger() != trigger {
-                continue;
-            }
+        let plugins: Vec<&Box<dyn Plugin>> = self
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.trigger() == trigger)
+            .collect();
+        let results =
+            futures_util::future::join_all(plugins.iter().map(|plugin| plugin.execute(env_vars)))
+                .await;
 
-            match plugin.execute(env_vars) {
+        for (plugin, result) in plugins.into_iter().zip(results) {
+            match result {
                 Ok(Some(context)) => {
                     parts.push(format!("# Plugin: {}\n{}", plugin.name(), context));
                 }
@@ -125,17 +181,22 @@ impl PluginRegistry {
     }
 
     /// Execute plugins that don't return context (side-effect only, like logging).
-    pub fn execute_side_effects(
+    pub async fn execute_side_effects(
         &self,
         trigger: &HookTrigger,
         env_vars: Option<&HashMap<String, String>>,
     ) -> Result<()> {
-        for plugin in &self.plugins {
-            if plugin.trigger() != trigger {
-                continue;
-            }
+        let plugins: Vec<&Box<dyn Plugin>> = self
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.trigger() == trigger)
+            .collect();
+        let results =
+            futures_util::future::join_all(plugins.iter().map(|plugin| plugin.execute(env_vars)))
+                .await;
 
-            if let Err(e) = plugin.execute(env_vars) {
+        for (plugin, result) in plugins.into_iter().zip(results) {
+            if let Err(e) = result {
                 warn!("Plugin '{}' error: {}", plugin.name(), e);
             }
         }
@@ -170,46 +231,47 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    #[test]
-    fn test_command_plugin_success() {
+    #[tokio::test]
+    async fn test_command_plugin_success() {
         let plugin = CommandPlugin::new(
             "echo-test",
             "echo",
             &["hello world".to_string()],
             HookTrigger::OnContextBuild,
         );
-        let result = plugin.execute(None).unwrap();
+        let result = plugin.execute(None).await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), "hello world");
     }
 
-    #[test]
-    fn test_command_plugin_empty_output() {
+    #[tokio::test]
+    async fn test_command_plugin_empty_output() {
         let plugin = CommandPlugin::new("true", "true", &[], HookTrigger::OnContextBuild);
-        let result = plugin.execute(None).unwrap();
+        let result = plugin.execute(None).await.unwrap();
         assert!(result.is_none());
     }
 
-    #[test]
-    fn test_command_plugin_failure() {
+    #[tokio::test]
+    async fn test_command_plugin_failure() {
         let plugin = CommandPlugin::new("fail", "false", &[], HookTrigger::OnContextBuild);
-        let result = plugin.execute(None).unwrap();
+        let result = plugin.execute(None).await.unwrap();
         assert!(result.is_none());
     }
 
-    #[test]
-    fn test_plugin_registry_empty() {
+    #[tokio::test]
+    async fn test_plugin_registry_empty() {
         let registry = PluginRegistry::new();
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
         let output = registry
             .execute_all(&HookTrigger::OnContextBuild, None)
+            .await
             .unwrap();
         assert!(output.is_empty());
     }
 
-    #[test]
-    fn test_plugin_registry_multiple() {
+    #[tokio::test]
+    async fn test_plugin_registry_multiple() {
         let mut registry = PluginRegistry::new();
         let args1: Vec<String> = vec!["first".to_string()];
         let args2: Vec<String> = vec!["second".to_string()];
@@ -231,6 +293,7 @@ mod tests {
 
         let output = registry
             .execute_all(&HookTrigger::OnContextBuild, None)
+            .await
             .unwrap();
         assert!(output.contains("Plugin: echo1"));
         assert!(output.contains("first"));
@@ -238,8 +301,8 @@ mod tests {
         assert!(output.contains("second"));
     }
 
-    #[test]
-    fn test_plugin_registry_filter_by_trigger() {
+    #[tokio::test]
+    async fn test_plugin_registry_filter_by_trigger() {
         let mut registry = PluginRegistry::new();
         let args1: Vec<String> = vec!["context".to_string()];
         let args2: Vec<String> = vec!["tool".to_string()];
@@ -258,9 +321,11 @@ mod tests {
 
         let ctx_output = registry
             .execute_all(&HookTrigger::OnContextBuild, None)
+            .await
             .unwrap();
         let tool_output = registry
             .execute_all(&HookTrigger::OnToolStart, None)
+            .await
             .unwrap();
 
         assert!(ctx_output.contains("ctx"));
@@ -281,8 +346,8 @@ mod tests {
         assert_eq!(*plugin.trigger(), HookTrigger::OnToolStart);
     }
 
-    #[test]
-    fn test_plugin_with_env_vars() {
+    #[tokio::test]
+    async fn test_plugin_with_env_vars() {
         let mut env = HashMap::new();
         env.insert("TEST_VAR".to_string(), "test_value".to_string());
 
@@ -292,8 +357,40 @@ mod tests {
             &["-c".to_string(), "echo $TEST_VAR".to_string()],
             HookTrigger::OnContextBuild,
         );
-        let result = plugin.execute(Some(&env)).unwrap();
+        let result = plugin.execute(Some(&env)).await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), "test_value");
+    }
+
+    #[tokio::test]
+    async fn command_plugin_times_out() {
+        let plugin = CommandPlugin::new(
+            "slow",
+            "sh",
+            &["-c".to_string(), "sleep 2".to_string()],
+            HookTrigger::OnToolStart,
+        )
+        .with_timeout(std::time::Duration::from_millis(50));
+
+        let started = std::time::Instant::now();
+        let error = plugin.execute(None).await.unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn command_plugin_caps_captured_output() {
+        let plugin = CommandPlugin::new(
+            "loud",
+            "sh",
+            &["-c".to_string(), "yes x | head -c 100000".to_string()],
+            HookTrigger::OnContextBuild,
+        );
+
+        let output = plugin.execute(None).await.unwrap().unwrap();
+
+        assert!(output.len() <= HOOK_OUTPUT_LIMIT);
+        assert!(output.len() > HOOK_OUTPUT_LIMIT / 2);
     }
 }

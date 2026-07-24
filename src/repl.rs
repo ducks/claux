@@ -250,7 +250,6 @@ pub async fn run(
                                     println!();
                                     in_tool = false;
                                 }
-                                fire_permission_hook(plugins);
                                 print_permission_prompt(&tool_name, &summary);
                                 let line = stdin_rx.recv().await.unwrap_or_default();
                                 let _ = respond.send(parse_permission_response(
@@ -268,7 +267,6 @@ pub async fn run(
                                     println!();
                                     in_tool = false;
                                 }
-                                fire_permission_hook(plugins);
                                 print_permission_prompt_with_diff(&tool_name, &summary, &diff);
                                 let line = stdin_rx.recv().await.unwrap_or_default();
                                 let _ = respond.send(parse_permission_response(
@@ -300,7 +298,6 @@ pub async fn run(
             }
         }
 
-        let turn_ok = !matches!(submit_result, Some(Err(_)));
         if let Some(Err(e)) = submit_result {
             eprintln!("\n\x1b[31mError: {e}\x1b[0m\n");
         }
@@ -310,16 +307,6 @@ pub async fn run(
         // lost everything the turn actually did.
         if let Err(e) = session::save_messages(&session_path, engine.messages()) {
             tracing::warn!("Failed to save session: {e}");
-        }
-
-        // Turn complete, control returns to the user. Fire on a normal
-        // completion only (an errored turn already surfaced its error).
-        if turn_ok {
-            if let Err(e) =
-                PluginRegistry::execute_side_effects(plugins, &HookTrigger::OnTurnEnd, None)
-            {
-                tracing::warn!("on_turn_end hook failed: {e}");
-            }
         }
 
         if exit_app {
@@ -382,16 +369,6 @@ fn replay_transcript(messages: &[crate::api::Message], model: &str, keep: usize)
 
 /// Print the permission question for a tool. The answer is read from the
 /// stdin channel by the caller.
-/// Fire the on_permission_request hooks (the "needs you" moment), best-effort.
-/// A hook failure must never disrupt the permission prompt itself.
-fn fire_permission_hook(plugins: &PluginRegistry) {
-    if let Err(e) =
-        PluginRegistry::execute_side_effects(plugins, &HookTrigger::OnPermissionRequest, None)
-    {
-        tracing::warn!("on_permission_request hook failed: {e}");
-    }
-}
-
 fn print_permission_prompt(tool_name: &str, summary: &str) {
     let summary = crate::utils::sanitize_terminal_text(summary);
     if tool_name == "Bash" {
