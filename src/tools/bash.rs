@@ -1,11 +1,15 @@
 use anyhow::Result;
 use async_trait::async_trait;
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{CommandWrap, KillOnDrop};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use super::{Tool, ToolOutput};
@@ -72,16 +76,23 @@ impl Tool for BashTool {
         let timeout_ms = params.timeout.unwrap_or(120_000).min(600_000);
         let timeout = Duration::from_millis(timeout_ms);
 
-        let mut child = match Command::new("sh")
-            .arg("-c")
-            .arg(&params.command)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // If the surrounding future is dropped (abandoned turn, killed
-            // sub-agent), the command must not outlive it as an orphan.
-            .kill_on_drop(true)
-            .spawn()
-        {
+        let mut command = CommandWrap::with_new("sh", |command| {
+            command
+                .arg("-c")
+                .arg(&params.command)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        });
+        // Commands commonly create descendants (shell pipelines, test runners,
+        // build systems). Put the whole tree in one killable unit so cancelling
+        // the tool cannot leave grandchildren alive with our pipes still open.
+        command.wrap(KillOnDrop);
+        #[cfg(unix)]
+        command.wrap(ProcessGroup::leader());
+        #[cfg(windows)]
+        command.wrap(JobObject);
+
+        let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
                 return Ok(ToolOutput {
@@ -92,8 +103,8 @@ impl Tool for BashTool {
         };
 
         // Take the pipes so we can read them concurrently with wait().
-        let mut stdout_pipe = child.stdout.take();
-        let mut stderr_pipe = child.stderr.take();
+        let mut stdout_pipe = child.stdout().take();
+        let mut stderr_pipe = child.stderr().take();
 
         // Spawn readers so partial output is captured even if we get cancelled
         // or time out mid-stream.
@@ -120,8 +131,7 @@ impl Tool for BashTool {
 
         // For Cancelled / TimedOut, the child is still alive — kill it.
         if !matches!(outcome, Outcome::Finished(_)) {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            let _ = Box::into_pin(child.kill()).await;
         }
 
         let stdout = stdout_task.await.unwrap_or_default();
@@ -246,10 +256,22 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             cancel_clone.cancel();
         });
+        let start = std::time::Instant::now();
         let result = tool
-            .execute(json!({"command": "sleep 30", "timeout": 60000}), cancel)
+            .execute(
+                json!({
+                    "command": "trap '' HUP; sleep 30 & wait",
+                    "timeout": 60000
+                }),
+                cancel,
+            )
             .await
             .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "cancellation should kill the entire process tree (took {:?})",
+            start.elapsed()
+        );
         assert!(result.is_error);
         assert!(result.content.contains("Interrupted"));
     }

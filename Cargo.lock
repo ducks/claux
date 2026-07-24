@@ -273,6 +273,7 @@ dependencies = [
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
+ "process-wrap",
  "pulldown-cmark",
  "ratatui",
  "reqwest",
