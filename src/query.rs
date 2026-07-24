@@ -185,6 +185,14 @@ impl Engine {
         self.auto_compact_threshold = threshold.clamp(0.0, 1.0);
     }
 
+    pub fn set_max_tokens(&mut self, max_tokens: u32) {
+        self.max_tokens = max_tokens.max(1);
+    }
+
+    pub fn set_model_pricing(&mut self, pricing: Option<crate::cost::ModelPricing>) {
+        self.cost.set_pricing_override(pricing);
+    }
+
     pub fn set_system_prompt(&mut self, prompt: String) {
         self.system_prompt = prompt;
     }

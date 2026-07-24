@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::cost::ModelPricing;
 use crate::permissions::PermissionMode;
 
 mod trust;
@@ -15,6 +16,14 @@ pub enum AuthMethod {
     ApiKey(String),
     /// OAuth access token from `claude login` (Authorization: Bearer header)
     OAuthToken(String),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAIProtocol {
+    #[default]
+    ChatCompletions,
+    Responses,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,9 +60,25 @@ pub struct Config {
     #[serde(default)]
     pub openai_api_key: Option<String>,
 
+    /// Environment variable containing the OpenAI-compatible API key
+    #[serde(default = "default_openai_api_key_env")]
+    pub openai_api_key_env: String,
+
     /// Shell command that returns the OpenAI-compatible API key
     #[serde(default)]
     pub openai_api_key_cmd: Option<String>,
+
+    /// Wire protocol used by the OpenAI provider.
+    #[serde(default)]
+    pub openai_protocol: OpenAIProtocol,
+
+    /// Optional Responses API reasoning effort.
+    #[serde(default)]
+    pub openai_reasoning_effort: Option<String>,
+
+    /// Per-model pricing overrides in USD per million tokens.
+    #[serde(default)]
+    pub model_pricing: std::collections::HashMap<String, ModelPricing>,
 
     /// Display name for the provider (e.g. "ollama", "openai", "lmstudio")
     #[serde(default)]
@@ -183,6 +208,10 @@ fn default_api_key_env() -> String {
     "ANTHROPIC_API_KEY".to_string()
 }
 
+fn default_openai_api_key_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
+
 fn default_max_tokens() -> u32 {
     16384
 }
@@ -203,7 +232,11 @@ impl Default for Config {
             auto_compact_threshold: default_auto_compact_threshold(),
             openai_base_url: None,
             openai_api_key: None,
+            openai_api_key_env: default_openai_api_key_env(),
             openai_api_key_cmd: None,
+            openai_protocol: OpenAIProtocol::default(),
+            openai_reasoning_effort: None,
+            model_pricing: std::collections::HashMap::new(),
             openai_provider_name: None,
             plugins: Vec::new(),
             mcp_servers: Vec::new(),
@@ -283,7 +316,7 @@ impl Config {
         None
     }
 
-    /// Resolve the OpenAI API key: direct value, then command.
+    /// Resolve the OpenAI API key: direct value, command, then environment.
     pub fn resolve_openai_key(&self) -> Option<String> {
         if let Some(ref key) = self.openai_api_key {
             if !key.is_empty() {
@@ -313,6 +346,12 @@ impl Config {
                 Err(e) => {
                     tracing::warn!("openai_api_key_cmd exec error: {}", e);
                 }
+            }
+        }
+
+        if let Ok(key) = std::env::var(&self.openai_api_key_env) {
+            if !key.is_empty() {
+                return Some(key);
             }
         }
 
@@ -381,6 +420,29 @@ fn apply_project_overrides(config: &mut Config, project: &toml::Value, trusted: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openai_defaults_to_standard_environment_and_legacy_protocol() {
+        let config = Config::default();
+        assert_eq!(config.openai_api_key_env, "OPENAI_API_KEY");
+        assert_eq!(config.openai_protocol, OpenAIProtocol::ChatCompletions);
+    }
+
+    #[test]
+    fn parses_model_pricing_override() {
+        let config: Config = toml::from_str(
+            r#"
+            [model_pricing."private-coder"]
+            input = 0.5
+            output = 1.5
+            "#,
+        )
+        .unwrap();
+        let pricing = config.model_pricing["private-coder"];
+        assert_eq!(pricing.input, 0.5);
+        assert_eq!(pricing.output, 1.5);
+        assert_eq!(pricing.cache_read, 0.0);
+    }
 
     #[test]
     fn untrusted_project_permission_can_only_tighten() {

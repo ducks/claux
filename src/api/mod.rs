@@ -1,11 +1,13 @@
 pub(crate) mod anthropic;
 pub(crate) mod openai_compat;
+pub(crate) mod openai_responses;
 pub(crate) mod provider;
 pub(crate) mod stream;
 pub(crate) mod types;
 
 pub use anthropic::AnthropicProvider;
 pub use openai_compat::OpenAICompatProvider;
+pub use openai_responses::OpenAIResponsesProvider;
 pub use provider::{Provider, ProviderStream};
 pub use stream::ApiEvent;
 pub use types::*;

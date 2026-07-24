@@ -119,6 +119,22 @@ permission_mode = "default"  # default | accept-edits | bypass | plan
 # cannot loosen it unless their directory is listed here or --trust-project
 # is passed for the invocation. Project-local .mcp.json uses the same boundary.
 trusted_projects = ["/absolute/path/to/a/trusted/project"]
+
+# OpenAI Responses API (recommended for current reasoning and coding models).
+# The key is read from OPENAI_API_KEY by default; do not store it here.
+# model = "gpt-5.6-sol"
+# openai_base_url = "https://api.openai.com/v1"
+# openai_protocol = "responses"
+# openai_provider_name = "openai"
+# openai_reasoning_effort = "medium"
+
+# Optional pricing overrides, in USD per million tokens. Built-in prices are
+# used for known models; unknown models display "Cost: unavailable".
+# [model_pricing."gpt-5.6-sol"]
+# input = 5.0
+# output = 30.0
+# cache_read = 0.5
+# cache_write = 6.25
 ```
 
 Per-project: `.claux.toml` in the project root (overrides global).

@@ -156,7 +156,15 @@ pub fn should_compact(messages: &[Message], context_window: usize) -> CompactStr
 
 /// Context window sizes for known models.
 pub fn context_window_for_model(model: &str) -> usize {
-    if model.contains("opus") {
+    if model.contains("gpt-5.6") {
+        1_050_000
+    } else if model.contains("gpt-5.3-codex")
+        || model.contains("gpt-5.2-codex")
+        || model.contains("gpt-5.1-codex")
+        || model.contains("gpt-5-codex")
+    {
+        400_000
+    } else if model.contains("opus") {
         200_000
     } else if model.contains("sonnet") {
         200_000
@@ -368,5 +376,7 @@ mod tests {
             200_000
         );
         assert_eq!(context_window_for_model("gpt-4o"), 128_000);
+        assert_eq!(context_window_for_model("gpt-5.6-sol"), 1_050_000);
+        assert_eq!(context_window_for_model("gpt-5.3-codex"), 400_000);
     }
 }

@@ -1,4 +1,16 @@
 use crate::api::types::Usage;
+use serde::{Deserialize, Serialize};
+
+/// Model prices in USD per million tokens.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ModelPricing {
+    pub input: f64,
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: f64,
+    #[serde(default)]
+    pub cache_write: f64,
+}
 
 /// Tracks token usage and estimated cost for a session.
 #[derive(Debug, Default)]
@@ -8,13 +20,21 @@ pub struct CostTracker {
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
     pub model: String,
+    pricing: Option<ModelPricing>,
 }
 
 impl CostTracker {
     pub fn new(model: &str) -> Self {
         Self {
             model: model.to_string(),
+            pricing: built_in_pricing(model),
             ..Default::default()
+        }
+    }
+
+    pub fn set_pricing_override(&mut self, pricing: Option<ModelPricing>) {
+        if let Some(pricing) = pricing {
+            self.pricing = Some(pricing);
         }
     }
 
@@ -27,21 +47,26 @@ impl CostTracker {
 
     /// Estimated cost in USD based on model pricing.
     pub fn total_cost_usd(&self) -> f64 {
-        let (input_price, output_price, cache_read_price, cache_write_price) =
-            model_pricing(&self.model);
+        let Some(pricing) = self.pricing else {
+            return 0.0;
+        };
 
         let per_m = |tokens: u64, price: f64| tokens as f64 / 1_000_000.0 * price;
 
-        per_m(self.input_tokens, input_price)
-            + per_m(self.output_tokens, output_price)
-            + per_m(self.cache_read_tokens, cache_read_price)
-            + per_m(self.cache_creation_tokens, cache_write_price)
+        per_m(self.input_tokens, pricing.input)
+            + per_m(self.output_tokens, pricing.output)
+            + per_m(self.cache_read_tokens, pricing.cache_read)
+            + per_m(self.cache_creation_tokens, pricing.cache_write)
     }
 
     pub fn format_summary(&self) -> String {
+        let cost = self
+            .pricing
+            .map(|_| format!("${:.4}", self.total_cost_usd()))
+            .unwrap_or_else(|| "unavailable".to_string());
         format!(
-            "Cost: ${:.4} | Tokens: {}in / {}out{}",
-            self.total_cost_usd(),
+            "Cost: {} | Tokens: {}in / {}out{}",
+            cost,
             self.input_tokens,
             self.output_tokens,
             if self.cache_read_tokens > 0 {
@@ -53,17 +78,32 @@ impl CostTracker {
     }
 }
 
-/// Returns (input $/M, output $/M, cache_read $/M, cache_write $/M).
-fn model_pricing(model: &str) -> (f64, f64, f64, f64) {
-    if model.contains("opus") {
-        (15.0, 75.0, 1.5, 18.75)
+fn pricing(input: f64, output: f64, cache_read: f64, cache_write: f64) -> ModelPricing {
+    ModelPricing {
+        input,
+        output,
+        cache_read,
+        cache_write,
+    }
+}
+
+fn built_in_pricing(model: &str) -> Option<ModelPricing> {
+    if model == "gpt-5.6" || model.contains("gpt-5.6-sol") {
+        Some(pricing(5.0, 30.0, 0.5, 6.25))
+    } else if model.contains("gpt-5.6-terra") {
+        Some(pricing(2.5, 15.0, 0.25, 3.125))
+    } else if model.contains("gpt-5.6-luna") {
+        Some(pricing(1.0, 6.0, 0.1, 1.25))
+    } else if model.contains("gpt-5.3-codex") || model.contains("gpt-5.2-codex") {
+        Some(pricing(1.75, 14.0, 0.175, 2.1875))
+    } else if model.contains("opus") {
+        Some(pricing(15.0, 75.0, 1.5, 18.75))
     } else if model.contains("sonnet") {
-        (3.0, 15.0, 0.3, 3.75)
+        Some(pricing(3.0, 15.0, 0.3, 3.75))
     } else if model.contains("haiku") {
-        (0.25, 1.25, 0.025, 0.3)
+        Some(pricing(0.25, 1.25, 0.025, 0.3))
     } else {
-        // Unknown model, use sonnet pricing as default
-        (3.0, 15.0, 0.3, 3.75)
+        None
     }
 }
 
@@ -139,11 +179,42 @@ mod tests {
     }
 
     #[test]
-    fn unknown_model_uses_sonnet_pricing() {
+    fn unknown_model_reports_unavailable_pricing() {
         let mut tracker = CostTracker::new("some-future-model");
         tracker.add_usage(&Usage {
             input_tokens: 1_000_000,
             output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        });
+        assert_eq!(tracker.total_cost_usd(), 0.0);
+        assert!(tracker.format_summary().contains("unavailable"));
+    }
+
+    #[test]
+    fn gpt_5_6_sol_pricing() {
+        let mut tracker = CostTracker::new("gpt-5.6-sol");
+        tracker.add_usage(&Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        });
+        assert!((tracker.total_cost_usd() - 35.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn config_pricing_overrides_built_in_value() {
+        let mut tracker = CostTracker::new("gpt-5.6-sol");
+        tracker.set_pricing_override(Some(ModelPricing {
+            input: 1.0,
+            output: 2.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+        }));
+        tracker.add_usage(&Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
         });

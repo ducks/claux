@@ -111,6 +111,8 @@ async fn main() -> Result<()> {
         let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
         let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
         engine.set_auto_compact_threshold(config.auto_compact_threshold);
+        engine.set_max_tokens(config.max_tokens);
+        engine.set_model_pricing(config.model_pricing.get(&model).copied());
 
         let system_prompt = context::build_system_prompt_for_model(
             &model,
@@ -138,6 +140,8 @@ async fn main() -> Result<()> {
     let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
     let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
     engine.set_auto_compact_threshold(config.auto_compact_threshold);
+    engine.set_max_tokens(config.max_tokens);
+    engine.set_model_pricing(config.model_pricing.get(&model).copied());
 
     // Build system prompt with plugins for REPL mode
     let system_prompt = context::build_system_prompt_for_model(
@@ -190,10 +194,26 @@ fn build_provider(config: &config::Config, model: &str) -> Result<Box<dyn api::P
     // Check for OpenAI-compatible provider in config
     if let Some(ref base_url) = config.openai_base_url {
         let api_key = config.resolve_openai_key().unwrap_or_default();
+        if api_key.is_empty() && base_url.contains("api.openai.com") {
+            anyhow::bail!(
+                "No OpenAI API key found. Set OPENAI_API_KEY or configure \
+                 openai_api_key_cmd in ~/.config/claux/config.toml. ChatGPT login \
+                 credentials are not API credentials."
+            );
+        }
         let name = config.openai_provider_name.as_deref().unwrap_or("openai");
-        return Ok(Box::new(api::OpenAICompatProvider::new(
-            base_url, &api_key, model, name,
-        )));
+        return match config.openai_protocol {
+            config::OpenAIProtocol::ChatCompletions => Ok(Box::new(
+                api::OpenAICompatProvider::new(base_url, &api_key, model, name),
+            )),
+            config::OpenAIProtocol::Responses => Ok(Box::new(api::OpenAIResponsesProvider::new(
+                base_url,
+                &api_key,
+                model,
+                name,
+                config.openai_reasoning_effort.as_deref(),
+            ))),
+        };
     }
 
     // Default: Anthropic
