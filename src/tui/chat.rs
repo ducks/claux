@@ -59,6 +59,7 @@ pub struct ChatApp {
     pub status: String,
     pub permission_prompt: Option<String>,
     pub permission_details: Option<Vec<String>>,
+    pub permission_always_is_command: bool,
     pub should_exit: bool,
     pub should_go_home: bool,
     pub model: String,
@@ -95,6 +96,7 @@ impl ChatApp {
             status: String::new(),
             permission_prompt: None,
             permission_details: None,
+            permission_always_is_command: false,
             should_exit: false,
             should_go_home: false,
             model: model.to_string(),
@@ -552,6 +554,7 @@ async fn prompt_permission_tui<B: ratatui::backend::Backend>(
 ) -> Result<PermissionResponse> {
     app.permission_prompt = Some(summary.to_string());
     app.permission_details = Some(format_permission_details(tool_name, input));
+    app.permission_always_is_command = tool_name == "Bash";
     app.mode = Mode::Permission;
     terminal.draw(|f| ui::draw_chat(f, app))?;
 
@@ -569,7 +572,7 @@ async fn prompt_permission_tui<B: ratatui::backend::Backend>(
                         break PermissionResponse::Allow;
                     }
                     KeyCode::Char('a') if perm_input.is_empty() => {
-                        break PermissionResponse::AlwaysAllow;
+                        break PermissionResponse::always_allow_for(tool_name, input);
                     }
                     KeyCode::Char('n') if perm_input.is_empty() => {
                         break PermissionResponse::Deny;
@@ -604,6 +607,7 @@ async fn prompt_permission_tui<B: ratatui::backend::Backend>(
 
     app.permission_prompt = None;
     app.permission_details = None;
+    app.permission_always_is_command = false;
     app.mode = Mode::Streaming;
     app.status = app.model.clone();
     Ok(response)
@@ -1018,6 +1022,34 @@ mod turn_tests {
         assert!(
             content.contains("approved-ok"),
             "tool actually ran: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_always_is_command_specific_for_bash() {
+        let mut app = ChatApp::new("test-model", Theme::dark());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut keys = ScriptedKeys(vec![ch('a')].into());
+        let steering = SteeringQueue::default();
+        let command = format!("echo {}", "x".repeat(200));
+        let input = serde_json::json!({"command": command});
+
+        let response = prompt_permission_tui(
+            &mut app,
+            &mut terminal,
+            &mut keys,
+            "Bash",
+            "bash: truncated display",
+            &input,
+            &steering,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response,
+            PermissionResponse::AlwaysAllowCommand(command),
+            "the grant must use the complete raw command"
         );
     }
 

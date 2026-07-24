@@ -42,6 +42,22 @@ pub enum PermissionResponse {
     DenyAndCancel,
 }
 
+impl PermissionResponse {
+    /// Build an "always allow" response with the narrowest useful scope.
+    ///
+    /// Bash grants are tied to the exact raw command rather than the
+    /// human-readable (and potentially truncated) permission summary.
+    pub fn always_allow_for(tool_name: &str, input: &serde_json::Value) -> Self {
+        if tool_name == "Bash" {
+            return input["command"]
+                .as_str()
+                .map(|command| Self::AlwaysAllowCommand(command.to_string()))
+                .unwrap_or(Self::Allow);
+        }
+        Self::AlwaysAllow
+    }
+}
+
 pub struct PermissionChecker {
     mode: PermissionMode,
     /// Tools the user has "always allowed" this session
