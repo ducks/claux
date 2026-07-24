@@ -38,6 +38,13 @@ pub trait Provider: Send + Sync {
     fn model(&self) -> &str;
     fn set_model(&mut self, model: &str);
 
+    /// Drop provider-side conversation state before loading another session.
+    ///
+    /// Stateless providers need no special handling. Stateful providers can
+    /// override this to clear continuation cursors such as
+    /// `previous_response_id`.
+    fn reset_session(&mut self) {}
+
     /// Send a streaming request. Returns a channel of events.
     async fn stream(
         &self,

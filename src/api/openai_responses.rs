@@ -78,6 +78,10 @@ impl Provider for OpenAIResponsesProvider {
 
     fn set_model(&mut self, model: &str) {
         self.model = model.to_string();
+        self.reset_session();
+    }
+
+    fn reset_session(&mut self) {
         *self.cursor.lock().expect("response cursor poisoned") = ResponseCursor::default();
     }
 
@@ -396,6 +400,29 @@ mod tests {
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "function_call_output");
         assert_eq!(input[0]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn resetting_session_drops_previous_response_cursor() {
+        let mut provider = OpenAIResponsesProvider::new(
+            "https://api.openai.com/v1",
+            "key",
+            "gpt-5.6-sol",
+            "openai",
+            None,
+        );
+        *provider.cursor.lock().unwrap() = ResponseCursor {
+            response_id: Some("resp_previous_session".to_string()),
+            next_message_index: 1,
+        };
+
+        provider.reset_session();
+
+        let messages = vec![Message::user("new session")];
+        let (input, previous_response_id) = provider.build_input(&messages);
+        assert!(previous_response_id.is_none());
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["content"], "new session");
     }
 
     #[test]

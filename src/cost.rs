@@ -45,6 +45,14 @@ impl CostTracker {
         self.cache_creation_tokens += usage.cache_creation_tokens as u64;
     }
 
+    /// Clear session usage while preserving the model's resolved pricing.
+    pub fn reset_usage(&mut self) {
+        self.input_tokens = 0;
+        self.output_tokens = 0;
+        self.cache_read_tokens = 0;
+        self.cache_creation_tokens = 0;
+    }
+
     /// Estimated cost in USD based on model pricing.
     pub fn total_cost_usd(&self) -> f64 {
         let Some(pricing) = self.pricing else {
@@ -137,6 +145,39 @@ mod tests {
         assert_eq!(tracker.input_tokens, 3000);
         assert_eq!(tracker.output_tokens, 800);
         assert_eq!(tracker.cache_read_tokens, 100);
+    }
+
+    #[test]
+    fn reset_usage_preserves_pricing() {
+        let mut tracker = CostTracker::new("private-model");
+        tracker.set_pricing_override(Some(ModelPricing {
+            input: 2.0,
+            output: 4.0,
+            cache_read: 0.5,
+            cache_write: 1.0,
+        }));
+        tracker.add_usage(&Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            cache_read_tokens: 100,
+            cache_creation_tokens: 50,
+        });
+
+        tracker.reset_usage();
+
+        assert_eq!(tracker.input_tokens, 0);
+        assert_eq!(tracker.output_tokens, 0);
+        assert_eq!(tracker.cache_read_tokens, 0);
+        assert_eq!(tracker.cache_creation_tokens, 0);
+        assert_eq!(tracker.total_cost_usd(), 0.0);
+
+        tracker.add_usage(&Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        });
+        assert_eq!(tracker.total_cost_usd(), 2.0);
     }
 
     #[test]

@@ -246,11 +246,8 @@ pub async fn run(
     // Clear engine state and load this session's messages. repair_history
     // makes old or crash-interrupted saves API-valid (tool_use/tool_result
     // pairing) before the engine sends them anywhere.
-    engine.messages_mut().clear();
     let existing_messages = crate::session::repair_history(db.get_messages(session_id)?);
-    for msg in &existing_messages {
-        engine.messages_mut().push(msg.clone());
-    }
+    engine.set_messages(existing_messages.clone());
 
     let mut app = ChatApp::new(engine.model(), theme);
     app.status = format!("{} | /help for commands", engine.model());

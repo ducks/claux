@@ -206,6 +206,12 @@ impl Engine {
     }
 
     pub fn set_messages(&mut self, messages: Vec<Message>) {
+        self.provider.reset_session();
+        self.cost.reset_usage();
+        self.steering
+            .lock()
+            .expect("steering queue poisoned")
+            .clear();
         self.messages = messages;
     }
 
@@ -950,6 +956,89 @@ mod tests {
             drop(tx);
             Ok(ProviderStream::new(rx, cancel.child_token()))
         }
+    }
+
+    struct ResetTrackingProvider {
+        resets: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ResetTrackingProvider {
+        fn name(&self) -> &str {
+            "reset-tracking"
+        }
+
+        fn model(&self) -> &str {
+            "test-model"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        fn reset_session(&mut self) {
+            self.resets
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(ProviderStream::new(rx, cancel.child_token()))
+        }
+    }
+
+    #[test]
+    fn set_messages_resets_session_scoped_engine_state() {
+        let resets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Box::new(ResetTrackingProvider {
+            resets: resets.clone(),
+        });
+        let mut engine = Engine::new(
+            provider,
+            ToolRegistry::without_agent(),
+            PermissionChecker::new(PermissionMode::Default),
+            "private-model",
+        );
+        engine
+            .cost
+            .set_pricing_override(Some(crate::cost::ModelPricing {
+                input: 2.0,
+                output: 4.0,
+                cache_read: 0.5,
+                cache_write: 1.0,
+            }));
+        engine.cost.add_usage(&crate::api::types::Usage {
+            input_tokens: 500,
+            output_tokens: 200,
+            cache_read_tokens: 100,
+            cache_creation_tokens: 50,
+        });
+        engine
+            .steering_queue()
+            .lock()
+            .unwrap()
+            .push_back("stale steering".to_string());
+
+        engine.set_messages(vec![Message::user("loaded session")]);
+
+        assert_eq!(resets.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(engine.message_count(), 1);
+        assert!(engine.steering_queue().lock().unwrap().is_empty());
+        assert_eq!(engine.cost.input_tokens, 0);
+        assert_eq!(engine.cost.output_tokens, 0);
+
+        engine.cost.add_usage(&crate::api::types::Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        });
+        assert_eq!(engine.cost.total_cost_usd(), 2.0);
     }
 
     #[tokio::test]
