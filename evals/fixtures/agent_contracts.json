@@ -1,0 +1,201 @@
+[
+  {
+    "name": "inspect_then_answer",
+    "permission_mode": "bypass",
+    "prompt": "Inspect src/main.rs and tell me what it prints.",
+    "initial_files": {
+      "src/main.rs": "fn main() { println!(\"hello\"); }\n"
+    },
+    "rounds": [
+      {
+        "text": "I’ll inspect the file.",
+        "tools": [
+          {
+            "id": "read-1",
+            "name": "Read",
+            "input": { "file_path": "$ROOT/src/main.rs" }
+          }
+        ]
+      },
+      { "text": "It prints hello." }
+    ],
+    "expect": {
+      "assistant_contains": "It prints hello.",
+      "tool_sequence": ["Read"],
+      "tool_error_count": 0,
+      "tool_result_contains": ["println!(\"hello\")"]
+    }
+  },
+  {
+    "name": "coordinated_multi_file_edit",
+    "permission_mode": "bypass",
+    "prompt": "Update the greeting and add its configuration.",
+    "initial_files": {
+      "src/greeting.txt": "hello\n"
+    },
+    "rounds": [
+      {
+        "tools": [
+          {
+            "id": "edit-1",
+            "name": "Edit",
+            "input": {
+              "file_path": "$ROOT/src/greeting.txt",
+              "old_string": "hello",
+              "new_string": "hello claux"
+            }
+          },
+          {
+            "id": "write-1",
+            "name": "Write",
+            "input": {
+              "file_path": "$ROOT/config/greeting.toml",
+              "content": "enabled = true\n"
+            }
+          }
+        ]
+      },
+      { "text": "Both files are updated." }
+    ],
+    "expect": {
+      "assistant_contains": "Both files are updated.",
+      "tool_sequence": ["Edit", "Write"],
+      "tool_error_count": 0,
+      "files": {
+        "src/greeting.txt": "hello claux\n",
+        "config/greeting.toml": "enabled = true\n"
+      }
+    }
+  },
+  {
+    "name": "plan_mode_blocks_mutation",
+    "permission_mode": "plan",
+    "prompt": "Create a release marker.",
+    "rounds": [
+      {
+        "tools": [
+          {
+            "id": "write-denied",
+            "name": "Write",
+            "input": {
+              "file_path": "$ROOT/release.txt",
+              "content": "published\n"
+            }
+          }
+        ]
+      },
+      { "text": "The write was blocked by plan mode." }
+    ],
+    "expect": {
+      "assistant_contains": "blocked by plan mode",
+      "tool_sequence": ["Write"],
+      "tool_error_count": 1,
+      "tool_result_contains": ["Permission denied"],
+      "files": {
+        "release.txt": null
+      }
+    }
+  },
+  {
+    "name": "one_shot_denies_confirmation_only_tool",
+    "permission_mode": "default",
+    "prompt": "Fetch a private endpoint.",
+    "rounds": [
+      {
+        "tools": [
+          {
+            "id": "fetch-denied",
+            "name": "WebFetch",
+            "input": { "url": "https://example.com/private" }
+          }
+        ]
+      },
+      { "text": "The fetch requires interactive approval." }
+    ],
+    "expect": {
+      "assistant_contains": "requires interactive approval",
+      "tool_sequence": ["WebFetch"],
+      "tool_error_count": 1,
+      "tool_result_contains": ["one-shot mode has no prompt"]
+    }
+  },
+  {
+    "name": "steering_preempts_queued_mutations",
+    "permission_mode": "bypass",
+    "prompt": "Create both marker files.",
+    "steering_on_first_call": "Stop; do not create those files.",
+    "rounds": [
+      {
+        "tools": [
+          {
+            "id": "write-a",
+            "name": "Write",
+            "input": {
+              "file_path": "$ROOT/a.txt",
+              "content": "a\n"
+            }
+          },
+          {
+            "id": "write-b",
+            "name": "Write",
+            "input": {
+              "file_path": "$ROOT/b.txt",
+              "content": "b\n"
+            }
+          }
+        ]
+      },
+      { "text": "Stopped before creating either file." }
+    ],
+    "expect": {
+      "assistant_contains": "Stopped before creating either file.",
+      "tool_sequence": ["Write", "Write"],
+      "tool_error_count": 2,
+      "tool_result_contains": ["superseded by a new user message"],
+      "steering_delivered": true,
+      "files": {
+        "a.txt": null,
+        "b.txt": null
+      }
+    }
+  },
+  {
+    "name": "unknown_tool_returns_recoverable_result",
+    "permission_mode": "bypass",
+    "prompt": "Use a tool that is not installed, then recover.",
+    "rounds": [
+      {
+        "tools": [
+          {
+            "id": "unknown-1",
+            "name": "ImaginaryTool",
+            "input": {}
+          }
+        ]
+      },
+      { "text": "I recovered from the unavailable tool." }
+    ],
+    "expect": {
+      "assistant_contains": "recovered from the unavailable tool",
+      "tool_sequence": ["ImaginaryTool"],
+      "tool_error_count": 1,
+      "tool_result_contains": ["Unknown tool"]
+    }
+  },
+  {
+    "name": "truncated_provider_stream_is_not_success",
+    "permission_mode": "bypass",
+    "prompt": "Answer over a broken stream.",
+    "rounds": [
+      {
+        "text": "partial",
+        "terminal": "close"
+      }
+    ],
+    "expect": {
+      "error_contains": "without completion",
+      "tool_sequence": [],
+      "tool_error_count": 0
+    }
+  }
+]

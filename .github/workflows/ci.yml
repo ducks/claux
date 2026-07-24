@@ -11,6 +11,19 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  agent-evals:
+    name: Deterministic agent contracts
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Run fixture-driven agent evaluations
+      run: cargo test evals::deterministic_agent_contracts -- --nocapture
+
   test:
     name: Test
     runs-on: ${{ matrix.os }}

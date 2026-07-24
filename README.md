@@ -227,6 +227,20 @@ In `accept-edits` mode, Agent, MCP, and other non-read-only tools still require
 explicit approval. Sub-agents inherit the parent permission mode; because they
 are non-interactive, operations that would require another prompt are denied.
 
+## Agent evaluations
+
+Claux has fixture-driven behavioral evaluations for complete multi-round turns,
+including real tool execution in isolated workspaces, permissions, steering,
+file outcomes, recovery, and provider stream failures:
+
+```bash
+cargo test evals::deterministic_agent_contracts -- --nocapture
+```
+
+They require no credentials or network and run as a dedicated CI check.
+An ignored paid-provider smoke test and manual workflow are also available;
+see [`evals/README.md`](evals/README.md).
+
 ## License
 
 MIT
