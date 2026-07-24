@@ -3,10 +3,13 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fmt::Write;
+use std::io::BufRead;
 
 use super::{Tool, ToolOutput};
 
 pub struct ReadTool;
+
+const MAX_READ_LINES: usize = 2_000;
 
 #[derive(Deserialize)]
 struct Params {
@@ -63,55 +66,77 @@ impl Tool for ReadTool {
     async fn execute(
         &self,
         input: Value,
-        _cancel: tokio_util::sync::CancellationToken,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
-        let path = expand_tilde(&params.file_path);
+        tokio::task::spawn_blocking(move || read_file(params, cancel)).await?
+    }
+}
 
-        if !path.exists() {
-            return Ok(ToolOutput {
-                content: format!("File does not exist: {}", params.file_path),
-                is_error: true,
-            });
+fn read_file(params: Params, cancel: tokio_util::sync::CancellationToken) -> Result<ToolOutput> {
+    if cancel.is_cancelled() {
+        return Ok(interrupted_output());
+    }
+
+    let path = expand_tilde(&params.file_path);
+    if !path.exists() {
+        return Ok(ToolOutput {
+            content: format!("File does not exist: {}", params.file_path),
+            is_error: true,
+        });
+    }
+    if !path.is_file() {
+        return Ok(ToolOutput {
+            content: format!("Not a file: {}", params.file_path),
+            is_error: true,
+        });
+    }
+
+    let reader = std::io::BufReader::new(std::fs::File::open(&path)?);
+    let start = params.offset.unwrap_or(1).max(1);
+    let limit = params.limit.unwrap_or(MAX_READ_LINES).min(MAX_READ_LINES);
+    let mut total_lines = 0;
+    let mut selected_lines = 0;
+    let mut result = String::new();
+
+    for line in reader.lines() {
+        if cancel.is_cancelled() {
+            return Ok(interrupted_output());
         }
 
-        if !path.is_file() {
-            return Ok(ToolOutput {
-                content: format!("Not a file: {}", params.file_path),
-                is_error: true,
-            });
+        let line = line?;
+        total_lines += 1;
+        if total_lines < start {
+            continue;
         }
-
-        let content = std::fs::read_to_string(&path)?;
-        let lines: Vec<&str> = content.lines().collect();
-
-        let start = params.offset.unwrap_or(1).saturating_sub(1);
-        if start >= lines.len() {
-            return Ok(ToolOutput {
-                content: format!(
-                    "Offset {} is beyond end of file ({} lines)",
-                    params.offset.unwrap_or(1),
-                    lines.len()
-                ),
-                is_error: true,
-            });
+        if selected_lines >= limit {
+            break;
         }
-        let end = if let Some(limit) = params.limit {
-            start.saturating_add(limit).min(lines.len())
-        } else {
-            lines.len().min(start + 2000) // default limit
-        };
+        let _ = writeln!(result, "{total_lines}\t{line}");
+        selected_lines += 1;
+    }
 
-        let mut result = String::new();
-        for (i, line) in lines[start..end].iter().enumerate() {
-            let line_num = start + i + 1;
-            let _ = writeln!(result, "{line_num}\t{line}");
-        }
+    if total_lines < start {
+        return Ok(ToolOutput {
+            content: format!(
+                "Offset {} is beyond end of file ({} lines)",
+                params.offset.unwrap_or(1),
+                total_lines
+            ),
+            is_error: true,
+        });
+    }
 
-        Ok(ToolOutput {
-            content: result,
-            is_error: false,
-        })
+    Ok(ToolOutput {
+        content: result,
+        is_error: false,
+    })
+}
+
+fn interrupted_output() -> ToolOutput {
+    ToolOutput {
+        content: "Interrupted by user.".to_string(),
+        is_error: true,
     }
 }
 
@@ -208,6 +233,40 @@ mod tests {
 
         assert!(result.is_error);
         assert!(result.content.contains("beyond end of file"));
+    }
+
+    #[tokio::test]
+    async fn explicit_limit_is_bounded() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        for line in 1..=2_100 {
+            writeln!(tmp, "line {line}").unwrap();
+        }
+
+        let result = ReadTool
+            .execute(
+                json!({"file_path": tmp.path(), "limit": 10_000}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.content.lines().count(), MAX_READ_LINES);
+        assert!(!result.content.contains("line 2001"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_read_stops_before_io() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = ReadTool
+            .execute(json!({"file_path": "/etc/hosts"}), cancel)
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Interrupted"));
     }
 
     #[test]
