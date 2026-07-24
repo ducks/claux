@@ -10,6 +10,8 @@ mod config;
 mod context;
 mod cost;
 mod db;
+#[cfg(test)]
+mod evals;
 mod onboarding;
 mod permissions;
 mod plugin;

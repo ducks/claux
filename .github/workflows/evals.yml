@@ -1,0 +1,37 @@
+name: Live Agent Evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Anthropic model used by the paid smoke test
+        required: false
+        default: claude-haiku-4-5-20251001
+
+permissions:
+  contents: read
+
+jobs:
+  live-anthropic:
+    name: Live Anthropic smoke
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUX_EVAL_MODEL: ${{ inputs.model }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Require evaluation secret
+      shell: bash
+      run: |
+        if [ -z "$ANTHROPIC_API_KEY" ]; then
+          echo "Repository secret ANTHROPIC_API_KEY is required" >&2
+          exit 1
+        fi
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Run paid live provider smoke
+      run: cargo test evals::live_anthropic_smoke -- --ignored --nocapture
