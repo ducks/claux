@@ -428,15 +428,16 @@ impl Engine {
 
     /// Check if an API error is a prompt-too-long error (413 or specific error message).
     fn is_prompt_too_long(err: &str) -> bool {
+        let err = err.to_ascii_lowercase();
         err.contains("413")
             || err.contains("prompt is too long")
             || err.contains("maximum context length")
-            || err.contains("max_tokens")
             || err.contains("context_length_exceeded")
     }
 
     /// Check if an API error is a max-output-tokens error.
     fn is_max_output_tokens(err: &str) -> bool {
+        let err = err.to_ascii_lowercase();
         err.contains("max_output_tokens") || err.contains("max_tokens_exceeded")
     }
 
@@ -542,6 +543,10 @@ impl Engine {
                         return Ok(());
                     }
                     let err_str = e.to_string();
+                    if Self::is_max_output_tokens(&err_str) && self.max_tokens < 64_000 {
+                        self.max_tokens = (self.max_tokens * 2).min(64_000);
+                        continue;
+                    }
                     if Self::is_prompt_too_long(&err_str) && recovery_attempts < MAX_RECOVERY {
                         recovery_attempts += 1;
                         let _ = tx
@@ -598,6 +603,11 @@ impl Engine {
                     }
                     ApiEvent::Done => break,
                     ApiEvent::Error(e) => {
+                        if Self::is_max_output_tokens(&e) && self.max_tokens < 64_000 {
+                            self.max_tokens = (self.max_tokens * 2).min(64_000);
+                            had_error = true;
+                            break;
+                        }
                         if Self::is_prompt_too_long(&e) && recovery_attempts < MAX_RECOVERY {
                             recovery_attempts += 1;
                             let _ = tx
@@ -606,11 +616,6 @@ impl Engine {
                                 ))
                                 .await;
                             self.compact().await?;
-                            had_error = true;
-                            break;
-                        }
-                        if Self::is_max_output_tokens(&e) && self.max_tokens < 64_000 {
-                            self.max_tokens = (self.max_tokens * 2).min(64_000);
                             had_error = true;
                             break;
                         }
@@ -973,6 +978,28 @@ mod tests {
 
     struct ResetTrackingProvider {
         resets: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[test]
+    fn output_token_limit_is_not_misclassified_as_prompt_too_long() {
+        let error = "max_tokens_exceeded: response reached max output tokens";
+        assert!(Engine::is_max_output_tokens(error));
+        assert!(!Engine::is_prompt_too_long(error));
+    }
+
+    #[test]
+    fn max_tokens_parameter_error_does_not_trigger_compaction() {
+        let error = "invalid max_tokens parameter";
+        assert!(!Engine::is_prompt_too_long(error));
+        assert!(!Engine::is_max_output_tokens(error));
+    }
+
+    #[test]
+    fn context_limit_errors_are_classified_case_insensitively() {
+        assert!(Engine::is_prompt_too_long(
+            "Maximum Context Length exceeded"
+        ));
+        assert!(Engine::is_prompt_too_long("CONTEXT_LENGTH_EXCEEDED"));
     }
 
     #[async_trait::async_trait]
