@@ -43,6 +43,10 @@ impl Db {
         // Enable WAL mode for better concurrent performance (ignore result)
         let _ = conn.execute("PRAGMA journal_mode = WAL", []);
 
+        // SQLite does not enforce declared foreign keys unless each
+        // connection opts in. Session deletion relies on ON DELETE CASCADE.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
         // Create tables if they don't exist
         Self::init_schema(&conn)?;
 
@@ -91,6 +95,16 @@ impl Db {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             )",
+            [],
+        )?;
+
+        // Older Claux versions left foreign-key enforcement disabled, so
+        // remove any unreachable transcript rows they may have accumulated.
+        conn.execute(
+            "DELETE FROM messages
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM sessions WHERE sessions.id = messages.session_id
+             )",
             [],
         )?;
 
@@ -487,5 +501,63 @@ mod tests {
 
         let sessions = db.list_sessions().unwrap();
         assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn deleting_session_cascades_to_messages() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Db::open(&temp_dir.path().join("test.db")).unwrap();
+        db.create_session("session", "model", None, None).unwrap();
+        db.append_message("session", &Message::user("private transcript"))
+            .unwrap();
+
+        db.delete_session("session").unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let message_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(message_count, 0);
+    }
+
+    #[test]
+    fn opening_database_removes_legacy_orphan_messages() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    model TEXT NOT NULL,
+                    name TEXT DEFAULT '',
+                    project TEXT DEFAULT 'uncategorized',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    last_active DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    message_count INTEGER DEFAULT 0,
+                    token_count INTEGER DEFAULT 0
+                );
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+                INSERT INTO messages (session_id, role, content)
+                VALUES ('missing', 'user', '\"private transcript\"');",
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&db_path).unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let message_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(message_count, 0);
     }
 }
