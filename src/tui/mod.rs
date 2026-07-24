@@ -6,6 +6,7 @@
 
 pub mod chat;
 pub mod home;
+mod input;
 pub mod markdown;
 mod screen;
 mod terminal;

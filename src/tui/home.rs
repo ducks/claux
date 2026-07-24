@@ -274,12 +274,10 @@ impl HomeScreen {
                 }
             }
             KeyCode::Backspace if self.cursor > 0 => {
-                self.cursor -= 1;
-                self.input.remove(self.cursor);
+                super::input::backspace(&mut self.input, &mut self.cursor);
             }
             KeyCode::Char(c) => {
-                self.input.insert(self.cursor, c);
-                self.cursor += 1;
+                super::input::insert(&mut self.input, &mut self.cursor, c);
             }
             _ => {}
         }
@@ -429,7 +427,8 @@ impl HomeScreen {
                             .title(" New Session "),
                     );
                 f.render_widget(input_widget, chunks[2]);
-                f.set_cursor_position((chunks[2].x + 39 + self.cursor as u16, chunks[2].y + 1));
+                let cursor_width = super::input::display_width_before(&self.input, self.cursor);
+                f.set_cursor_position((chunks[2].x + 39 + cursor_width as u16, chunks[2].y + 1));
             }
             Mode::NewProject => {
                 let prompt = format!("Project name: {}", self.input);
@@ -442,7 +441,8 @@ impl HomeScreen {
                             .title(" New Project "),
                     );
                 f.render_widget(input_widget, chunks[2]);
-                f.set_cursor_position((chunks[2].x + 15 + self.cursor as u16, chunks[2].y + 1));
+                let cursor_width = super::input::display_width_before(&self.input, self.cursor);
+                f.set_cursor_position((chunks[2].x + 15 + cursor_width as u16, chunks[2].y + 1));
             }
             Mode::Browse => {
                 let help = Paragraph::new(Line::from(vec![
@@ -559,12 +559,12 @@ mod tuishot_shots {
                 HomeShot::NewSession => {
                     screen.mode = Mode::NewSession;
                     screen.input = String::from("refactor queue");
-                    screen.cursor = screen.input.len();
+                    screen.cursor = crate::tui::input::char_count(&screen.input);
                 }
                 HomeShot::NewProject => {
                     screen.mode = Mode::NewProject;
                     screen.input = String::from("hosted-resumes");
-                    screen.cursor = screen.input.len();
+                    screen.cursor = crate::tui::input::char_count(&screen.input);
                 }
                 _ => {}
             }

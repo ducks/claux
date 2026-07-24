@@ -410,7 +410,8 @@ fn draw_input_and_status(f: &mut Frame, app: &mut ChatApp, chunks: &[ratatui::la
     }
 
     if app.mode == Mode::Input {
-        f.set_cursor_position((chunks[2].x + app.cursor as u16 + 1, chunks[2].y + 1));
+        let cursor_width = super::input::display_width_before(&app.input, app.cursor);
+        f.set_cursor_position((chunks[2].x + cursor_width as u16 + 1, chunks[2].y + 1));
     }
 
     // Status bar
