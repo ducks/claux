@@ -2,6 +2,7 @@
 
 mod api;
 mod bootstrap;
+mod checkpoint;
 mod cli;
 mod commands;
 mod compact;

@@ -15,6 +15,8 @@ pub enum CommandResult {
 
 pub enum AsyncCommand {
     Compact,
+    Diff,
+    UndoTurn,
     Resume(Option<String>),
     Model(Option<String>),
     Theme(Option<String>),
@@ -37,6 +39,8 @@ pub fn parse_command(input: &str) -> Option<CommandResult> {
         "/exit" | "/quit" => Some(CommandResult::Exit),
         "/clear" => Some(CommandResult::Text("\x1b[2J\x1b[H".to_string())),
         "/compact" => Some(CommandResult::Async(AsyncCommand::Compact)),
+        "/diff" => Some(CommandResult::Async(AsyncCommand::Diff)),
+        "/undo-turn" => Some(CommandResult::Async(AsyncCommand::UndoTurn)),
         "/resume" => {
             let id = if args.is_empty() {
                 None
@@ -72,6 +76,8 @@ pub fn parse_command(input: &str) -> Option<CommandResult> {
 pub async fn execute_async(cmd: AsyncCommand, engine: &mut Engine) -> Result<String> {
     match cmd {
         AsyncCommand::Compact => engine.compact().await,
+        AsyncCommand::Diff => Ok(engine.last_turn_diff()),
+        AsyncCommand::UndoTurn => engine.undo_last_turn(),
         AsyncCommand::Resume(id) => execute_resume(id, engine),
         AsyncCommand::Model(new_model) => execute_model(new_model, engine),
         AsyncCommand::Theme(theme_name) => execute_theme(theme_name, engine).await,
@@ -197,6 +203,8 @@ fn help_text() -> String {
   /help           Show this help
   /cost           Show token usage and cost
   /compact        Summarize conversation to free context
+  /diff           Show the last turn's file changes
+  /undo-turn      Safely undo the last turn's file changes
   /model [name]   Show or switch model
   /theme [name]   Show or switch theme (dark, light, ansi)
   /resume [id]    List or resume past sessions
@@ -244,6 +252,18 @@ mod tests {
         assert!(matches!(
             parse_command("/compact"),
             Some(CommandResult::Async(AsyncCommand::Compact))
+        ));
+    }
+
+    #[test]
+    fn checkpoint_commands_return_async_actions() {
+        assert!(matches!(
+            parse_command("/diff"),
+            Some(CommandResult::Async(AsyncCommand::Diff))
+        ));
+        assert!(matches!(
+            parse_command("/undo-turn"),
+            Some(CommandResult::Async(AsyncCommand::UndoTurn))
         ));
     }
 
