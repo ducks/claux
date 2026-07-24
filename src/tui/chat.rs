@@ -114,8 +114,8 @@ impl ChatApp {
     pub fn add_message(&mut self, role: &str, content: &str) {
         self.messages_rev += 1;
         self.messages.push(ChatMessage::Text {
-            role: role.to_string(),
-            content: content.to_string(),
+            role: crate::utils::sanitize_terminal_text(role),
+            content: crate::utils::sanitize_terminal_text(content),
         });
     }
 
@@ -126,8 +126,8 @@ impl ChatApp {
         self.thinking = false;
         self.messages_rev += 1;
         self.messages.push(ChatMessage::Tool {
-            name: name.to_string(),
-            summary: summary.to_string(),
+            name: crate::utils::sanitize_terminal_text(name),
+            summary: crate::utils::sanitize_terminal_text(summary),
             status,
         });
     }
@@ -448,7 +448,8 @@ async fn drive_streaming<B: ratatui::backend::Backend>(
                     match event {
                         StreamEvent::Text(t) => {
                             // Drawn by the tick, which coalesces chunks
-                            app.stream_buffer.push_str(&t);
+                            app.stream_buffer
+                                .push_str(&crate::utils::sanitize_terminal_text(&t));
                             app.thinking = false;
                         }
                         StreamEvent::Notice(n) => {
@@ -550,8 +551,13 @@ async fn prompt_permission_tui<B: ratatui::backend::Backend>(
     input: &serde_json::Value,
     steering: &SteeringQueue,
 ) -> Result<PermissionResponse> {
-    app.permission_prompt = Some(summary.to_string());
-    app.permission_details = Some(format_permission_details(tool_name, input));
+    app.permission_prompt = Some(crate::utils::sanitize_terminal_text(summary));
+    app.permission_details = Some(
+        format_permission_details(tool_name, input)
+            .into_iter()
+            .map(|line| crate::utils::sanitize_terminal_text(&line))
+            .collect(),
+    );
     app.permission_always_is_command = tool_name == "Bash";
     app.mode = Mode::Permission;
     terminal.draw(|f| ui::draw_chat(f, app))?;
@@ -813,6 +819,24 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
         assert_eq!(app.input, "a");
+    }
+
+    #[test]
+    fn displayed_messages_strip_terminal_controls() {
+        let mut app = test_app();
+        app.add_message("assistant", "hello\x1b]52;c;secret\x07 world");
+        app.add_tool("Bash\x1b[2J", "echo safe\rspoof", ToolStatus::Running);
+
+        assert!(matches!(
+            &app.messages[0],
+            ChatMessage::Text { content, .. }
+                if content == "hello]52;c;secret world" && !content.contains('\x1b')
+        ));
+        assert!(matches!(
+            &app.messages[1],
+            ChatMessage::Tool { name, summary, .. }
+                if name == "Bash[2J" && summary == "echo safespoof"
+        ));
     }
 
     #[test]

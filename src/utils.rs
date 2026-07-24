@@ -29,6 +29,17 @@ pub fn tail_str(s: &str, max_bytes: usize) -> &str {
     &s[start..]
 }
 
+/// Remove terminal control characters from untrusted display text.
+///
+/// Newlines and tabs are retained for normal formatting. ESC, BEL, C1
+/// controls, carriage returns, and other control bytes are removed so model
+/// and tool output cannot inject terminal commands.
+pub fn sanitize_terminal_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
+        .collect()
+}
+
 /// Double-press confirmation for Ctrl+C, so one stray keypress can't kill
 /// a live session. The first press arms; a second within the window
 /// confirms. Any other activity should call `disarm`.
@@ -102,6 +113,14 @@ mod tests {
     fn empty_string() {
         assert_eq!(truncate_str("", 5), "");
         assert_eq!(tail_str("", 5), "");
+    }
+
+    #[test]
+    fn terminal_text_sanitizer_strips_escape_sequences_and_bell() {
+        assert_eq!(
+            sanitize_terminal_text("safe\x1b]52;c;secret\x07\nnext\rline"),
+            "safe]52;c;secret\nnextline"
+        );
     }
 
     #[test]
