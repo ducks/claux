@@ -9,6 +9,7 @@ A terminal-based AI coding assistant written in Rust. Streams responses, execute
 - **Mid-turn steering** — type while claux is running tools and press Enter; the running tool is cancelled, remaining queued tools are skipped, and your message reaches the model immediately
 - **Interrupt anywhere** — Ctrl+C during a turn cancels it cleanly (in-flight tool calls are paired with interrupted results, so the conversation stays valid); press Ctrl+C twice within 2s to quit the app (Ctrl+D still exits immediately)
 - **Session persistence** — SQLite-backed with search; full transcripts including tool calls and results, so `/resume` and `--resume` restore exactly what the model saw. Histories from older versions are repaired on load
+- **Safe turn checkpoints** — `/diff` shows exactly what the last turn changed; `/undo-turn` restores it only when no file has been edited since, so later human work is never overwritten
 - **Compaction** — `/compact` summarizes conversation to free context
 - **Model switching** — `/model <name>` mid-conversation
 - **Sub-agents** — Agent tool spawns scoped sub-conversations. Sub-agents inherit the parent session's permission mode, so a sub-agent can't act with more authority than you granted the session. Because sub-agents run non-interactively, any tool the mode would prompt for is denied rather than auto-run (Plan denies all writes; Bypass allows all)
@@ -102,10 +103,17 @@ claux --resume 20260401-143022
 | `/help` | Show available commands |
 | `/cost` | Token usage and estimated cost |
 | `/compact` | Summarize conversation to free context |
+| `/diff` | Show file changes made by the last turn |
+| `/undo-turn` | Safely undo the last turn's file changes |
 | `/model [name]` | Show or switch model |
 | `/resume [id]` | List or resume past sessions |
 | `/clear` | Clear screen |
 | `/exit` | Exit |
+
+Turn checkpoints cover Git-tracked files and non-ignored untracked files.
+Ignored files and paths outside the repository are deliberately excluded.
+`/undo-turn` first verifies that every affected file still matches the end of
+the turn; if anything changed afterward, it refuses the entire undo.
 
 ## Config
 

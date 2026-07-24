@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::api::{ApiEvent, ContentBlock, Message, Provider, ProviderStream};
+use crate::checkpoint::{PendingCheckpoint, TurnCheckpoint};
 use crate::compact::{self};
 use crate::config::HookTrigger;
 use crate::cost::CostTracker;
@@ -30,6 +31,9 @@ pub struct Engine {
     auto_compact_threshold: f64,
     steering: SteeringQueue,
     plugins: Option<Arc<PluginRegistry>>,
+    checkpoint_enabled: bool,
+    pending_checkpoint: Option<PendingCheckpoint>,
+    last_checkpoint: Option<TurnCheckpoint>,
     pub cost: CostTracker,
 }
 
@@ -93,6 +97,9 @@ impl Engine {
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             plugins: None,
+            checkpoint_enabled: true,
+            pending_checkpoint: None,
+            last_checkpoint: None,
             cost: CostTracker::new(model),
         }
     }
@@ -116,6 +123,9 @@ impl Engine {
             auto_compact_threshold: 0.8,
             steering,
             plugins: None,
+            checkpoint_enabled: false,
+            pending_checkpoint: None,
+            last_checkpoint: None,
             cost: CostTracker::new("test"),
         }
     }
@@ -132,6 +142,54 @@ impl Engine {
                 tracing::warn!("plugin hook {trigger:?} failed: {error}");
             }
         }
+    }
+
+    fn begin_checkpoint(&mut self) {
+        if !self.checkpoint_enabled {
+            return;
+        }
+        self.last_checkpoint = None;
+        self.pending_checkpoint = match PendingCheckpoint::capture() {
+            Ok(checkpoint) => Some(checkpoint),
+            Err(error) => {
+                tracing::debug!("turn checkpoint unavailable: {error}");
+                None
+            }
+        };
+    }
+
+    fn finish_checkpoint(&mut self) {
+        let Some(pending) = self.pending_checkpoint.take() else {
+            return;
+        };
+        match pending.finish() {
+            Ok(checkpoint) => self.last_checkpoint = Some(checkpoint),
+            Err(error) => tracing::warn!("could not finish turn checkpoint: {error}"),
+        }
+    }
+
+    pub fn last_turn_diff(&self) -> String {
+        self.last_checkpoint
+            .as_ref()
+            .map(TurnCheckpoint::diff)
+            .unwrap_or_else(|| {
+                "No turn checkpoint is available (checkpoints require a Git worktree).".to_string()
+            })
+    }
+
+    pub fn undo_last_turn(&mut self) -> Result<String> {
+        let checkpoint = self.last_checkpoint.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("No turn checkpoint is available (checkpoints require a Git worktree).")
+        })?;
+        let result = checkpoint.undo()?;
+        self.last_checkpoint = None;
+        self.provider.reset_session();
+        self.messages.push(Message::user(
+            "[Claux checkpoint] The user invoked /undo-turn. The previous turn's \
+             checkpointed filesystem changes were reverted. Re-read affected files \
+             before relying on the previous turn's results.",
+        ));
+        Ok(result)
     }
 
     /// Clone a handle to the steering queue. UIs (or their input threads)
@@ -234,6 +292,8 @@ impl Engine {
             .expect("steering queue poisoned")
             .clear();
         self.messages = messages;
+        self.pending_checkpoint = None;
+        self.last_checkpoint = None;
     }
 
     pub fn model(&self) -> &str {
@@ -476,6 +536,7 @@ impl Engine {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String> {
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
+        self.begin_checkpoint();
 
         let collector = tokio::spawn(async move {
             let mut text = String::new();
@@ -489,6 +550,7 @@ impl Engine {
 
         let result = self.run_turn(user_input, tx, false, cancel).await;
         let text = collector.await.unwrap_or_default();
+        self.finish_checkpoint();
         self.fire_hook(&HookTrigger::OnTurnEnd).await;
         result?;
         Ok(text)
@@ -502,7 +564,9 @@ impl Engine {
         tx: mpsc::Sender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
+        self.begin_checkpoint();
         let result = self.run_turn(user_input, tx, true, cancel).await;
+        self.finish_checkpoint();
         self.fire_hook(&HookTrigger::OnTurnEnd).await;
         result
     }
@@ -1144,6 +1208,9 @@ mod tests {
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             plugins: None,
+            checkpoint_enabled: false,
+            pending_checkpoint: None,
+            last_checkpoint: None,
             cost: CostTracker::new("test"),
         };
 
@@ -1216,6 +1283,9 @@ mod tests {
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             plugins: None,
+            checkpoint_enabled: false,
+            pending_checkpoint: None,
+            last_checkpoint: None,
             cost: CostTracker::new("test"),
         };
 
@@ -1656,6 +1726,9 @@ mod tests {
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             plugins: None,
+            checkpoint_enabled: false,
+            pending_checkpoint: None,
+            last_checkpoint: None,
             cost: CostTracker::new("test"),
         };
 
@@ -1713,6 +1786,9 @@ mod tests {
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             plugins: None,
+            checkpoint_enabled: false,
+            pending_checkpoint: None,
+            last_checkpoint: None,
             cost: CostTracker::new("test"),
         };
 
