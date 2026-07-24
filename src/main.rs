@@ -64,12 +64,14 @@ async fn main() -> Result<()> {
     }
     if !plugin_registry.is_empty() {
         tracing::info!(
-            "Loaded {} plugin(s): {} context, {} tool-start, {} tool-complete, {} session-start",
+            "Loaded {} plugin(s): {} context, {} tool-start, {} tool-complete, {} session-start, {} turn-end, {} permission-request",
             plugin_registry.len(),
             plugin_registry.get_by_trigger(&config::HookTrigger::OnContextBuild),
             plugin_registry.get_by_trigger(&config::HookTrigger::OnToolStart),
             plugin_registry.get_by_trigger(&config::HookTrigger::OnToolComplete),
             plugin_registry.get_by_trigger(&config::HookTrigger::OnSessionStart),
+            plugin_registry.get_by_trigger(&config::HookTrigger::OnTurnEnd),
+            plugin_registry.get_by_trigger(&config::HookTrigger::OnPermissionRequest),
         );
     }
 

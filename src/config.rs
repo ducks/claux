@@ -165,6 +165,10 @@ pub enum HookTrigger {
     OnToolStart,
     OnToolComplete,
     OnSessionStart,
+    /// Fires when an agent turn completes and control returns to the user.
+    OnTurnEnd,
+    /// Fires when the agent blocks on a user decision (a permission prompt).
+    OnPermissionRequest,
 }
 
 fn default_trigger() -> HookTrigger {

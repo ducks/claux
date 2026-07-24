@@ -123,6 +123,52 @@ trusted_projects = ["/absolute/path/to/a/trusted/project"]
 
 Per-project: `.claux.toml` in the project root (overrides global).
 
+## Hooks
+
+Run a command on a lifecycle event. Each `[[plugins]]` entry runs its
+`command` when the matching `trigger` fires. Nothing about the command lives
+in claux - it's your config, so a hook can drive anything: a status light, a
+notification, a logger, a metrics counter.
+
+```toml
+[[plugins]]
+name = "lamp-idle"
+command = "glow-hook"
+args = ["purple"]
+trigger = "on_session_start"
+
+[[plugins]]
+name = "lamp-working"
+command = "glow-hook"
+args = ["blue"]
+trigger = "on_tool_start"
+
+[[plugins]]
+name = "lamp-your-turn"
+command = "glow-hook"
+args = ["green"]
+trigger = "on_turn_end"
+
+[[plugins]]
+name = "lamp-needs-you"
+command = "glow-hook"
+args = ["orange"]
+trigger = "on_permission_request"
+```
+
+| Trigger | Fires when |
+|---------|-----------|
+| `on_context_build` | building the system prompt (stdout is injected as context) |
+| `on_session_start` | a session starts |
+| `on_tool_start` | a tool call begins |
+| `on_tool_complete` | a tool call finishes |
+| `on_turn_end` | the agent finishes a turn and control returns to you |
+| `on_permission_request` | the agent blocks on a permission prompt (it needs you) |
+
+The example above is a [glow](https://github.com/ducks/glow) status lamp: your
+keyboard's RGB tracks what claux is doing. `on_context_build` is special - its
+stdout is added to the system prompt; the rest are fire-and-forget side effects.
+
 ## Permission Modes
 
 | Mode | Reads | File edits | Bash |
