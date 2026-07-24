@@ -61,7 +61,6 @@ pub async fn run(mut engine: Engine, config: &Config, plugins: &PluginRegistry) 
                         &db,
                         terminal_guard.terminal_mut(),
                         theme,
-                        plugins,
                     )
                     .await?;
                 }

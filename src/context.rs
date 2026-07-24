@@ -104,7 +104,7 @@ async fn build_runtime_section(
 
     // Plugin context
     if let Some(registry) = plugins {
-        if let Ok(plugin_context) = registry.execute_all(trigger, None) {
+        if let Ok(plugin_context) = registry.execute_all(trigger, None).await {
             if !plugin_context.is_empty() {
                 parts.push(format!("\n# Plugin Context\n{plugin_context}"));
             }

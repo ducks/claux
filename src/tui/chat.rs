@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 use crate::commands::{self, CommandResult};
 use crate::db::Db;
 use crate::permissions::PermissionResponse;
-use crate::plugin::PluginRegistry;
 use crate::query::{Engine, SteeringQueue, StreamEvent};
 use crate::theme::{Theme, ThemeName};
 
@@ -241,7 +240,6 @@ pub async fn run(
     db: &Db,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     theme: Theme,
-    _plugins: &PluginRegistry,
 ) -> Result<Action> {
     // Clear engine state and load this session's messages. repair_history
     // makes old or crash-interrupted saves API-valid (tool_use/tool_result

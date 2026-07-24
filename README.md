@@ -183,7 +183,8 @@ trigger = "on_permission_request"
 
 The example above is a [glow](https://github.com/ducks/glow) status lamp: your
 keyboard's RGB tracks what claux is doing. `on_context_build` is special - its
-stdout is added to the system prompt; the rest are fire-and-forget side effects.
+stdout is added to the system prompt; the rest are bounded side effects. Hook
+commands run concurrently with a 10-second timeout and bounded captured output.
 
 ## Permission Modes
 
