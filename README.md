@@ -195,8 +195,8 @@ stdout is added to the system prompt; the rest are fire-and-forget side effects.
 | `plan` | auto | denied | denied |
 
 In `accept-edits` mode, Agent, MCP, and other non-read-only tools still require
-explicit approval. Approving the Agent tool authorizes its sub-agent to run its
-tools without additional prompts.
+explicit approval. Sub-agents inherit the parent permission mode; because they
+are non-interactive, operations that would require another prompt are denied.
 
 ## License
 

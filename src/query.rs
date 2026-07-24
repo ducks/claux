@@ -1626,11 +1626,11 @@ mod tests {
             cost: CostTracker::new("test"),
         };
 
-        // Under PermissionMode::Default, Read asks for confirmation.
+        // Under PermissionMode::Default, network reads ask for confirmation.
         let tool_uses = vec![(
             "test1".to_string(),
-            "Read".to_string(),
-            serde_json::json!({"file_path": "/etc/hosts"}),
+            "WebFetch".to_string(),
+            serde_json::json!({"url": "https://example.com/private"}),
         )];
 
         let (batch_tx, mut batch_rx) = mpsc::channel(64);
