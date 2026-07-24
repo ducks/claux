@@ -249,7 +249,7 @@ impl HomeScreen {
                         let project = self
                             .selected_project()
                             .unwrap_or_else(|| "uncategorized".to_string());
-                        let session_id = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+                        let session_id = crate::session::new_session_id();
                         self.db.create_session(
                             &session_id,
                             &self.model,
