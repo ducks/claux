@@ -221,10 +221,12 @@ pub async fn run(
                                     let _ = stdout().flush();
                                     first_text = false;
                                 }
-                                print!("{t}");
+                                print!("{}", crate::utils::sanitize_terminal_text(&t));
                                 let _ = stdout().flush();
                             }
                             StreamEvent::ToolStart { name, summary, .. } => {
+                                let name = crate::utils::sanitize_terminal_text(&name);
+                                let summary = crate::utils::sanitize_terminal_text(&summary);
                                 print!("\n  \x1b[2m[{name}]\x1b[0m {summary} ");
                                 let _ = stdout().flush();
                                 in_tool = true;
@@ -274,7 +276,10 @@ pub async fn run(
                                 ));
                             }
                             StreamEvent::Error(e) => {
-                                eprintln!("\n\x1b[31mError: {e}\x1b[0m");
+                                eprintln!(
+                                    "\n\x1b[31mError: {}\x1b[0m",
+                                    crate::utils::sanitize_terminal_text(&e)
+                                );
                             }
                             StreamEvent::Done => {
                                 println!("\n");
@@ -345,18 +350,22 @@ fn replay_transcript(messages: &[crate::api::Message], model: &str, keep: usize)
     for msg in &messages[start..] {
         match (msg.role.as_str(), &msg.content) {
             ("user", MessageContent::Text(t)) => {
+                let t = crate::utils::sanitize_terminal_text(t);
                 out.push_str(&format!("\x1b[1;34m>\x1b[0m {t}\n"));
             }
             ("assistant", MessageContent::Text(t)) => {
+                let t = crate::utils::sanitize_terminal_text(t);
                 out.push_str(&format!("\x1b[2m● {model}\x1b[0m {t}\n"));
             }
             ("assistant", MessageContent::Blocks(blocks)) => {
                 for block in blocks {
                     match block {
                         ContentBlock::Text { text } => {
+                            let text = crate::utils::sanitize_terminal_text(text);
                             out.push_str(&format!("\x1b[2m● {model}\x1b[0m {text}\n"));
                         }
                         ContentBlock::ToolUse { name, .. } => {
+                            let name = crate::utils::sanitize_terminal_text(name);
                             out.push_str(&format!("  \x1b[2m[{name}] ✓\x1b[0m\n"));
                         }
                         ContentBlock::ToolResult { .. } => {}
@@ -384,6 +393,7 @@ fn fire_permission_hook(plugins: &PluginRegistry) {
 }
 
 fn print_permission_prompt(tool_name: &str, summary: &str) {
+    let summary = crate::utils::sanitize_terminal_text(summary);
     if tool_name == "Bash" {
         print!(
             "\n  \x1b[33m⚡ {summary}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways this command\x1b[0m "
@@ -396,6 +406,8 @@ fn print_permission_prompt(tool_name: &str, summary: &str) {
 
 /// Print the permission question with a diff preview.
 fn print_permission_prompt_with_diff(tool_name: &str, summary: &str, diff: &str) {
+    let summary = crate::utils::sanitize_terminal_text(summary);
+    let diff = crate::utils::sanitize_terminal_text(diff);
     if tool_name == "Bash" {
         println!(
             "\n  \x1b[33m⚡ {summary}\x1b[0m  \x1b[2m(y)es / (n)o / (a)lways this command\x1b[0m"
@@ -405,7 +417,7 @@ fn print_permission_prompt_with_diff(tool_name: &str, summary: &str, diff: &str)
     }
     println!("\n  \x1b[2m--- Diff Preview ---\x1b[0m");
 
-    let colored_diff = colorize_diff(diff);
+    let colored_diff = colorize_diff(&diff);
     for line in colored_diff.lines() {
         println!("  {line}");
     }
