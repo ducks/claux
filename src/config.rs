@@ -389,7 +389,7 @@ impl Config {
             .map(|s| s.to_string())
     }
 
-    fn global_path() -> PathBuf {
+    pub fn global_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("claux")
