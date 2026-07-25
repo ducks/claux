@@ -36,6 +36,10 @@ pub struct Config {
     #[serde(default = "default_model")]
     pub model: String,
 
+    /// Additional model IDs offered when creating a TUI session.
+    #[serde(default)]
+    pub models: Vec<String>,
+
     #[serde(default)]
     pub api_key: Option<String>,
 
@@ -229,6 +233,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             model: default_model(),
+            models: Vec::new(),
             api_key: None,
             api_key_env: default_api_key_env(),
             api_key_cmd: None,
@@ -252,9 +257,32 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Models available for new TUI sessions, with the default first.
+    pub fn available_models(&self) -> Vec<String> {
+        let mut models = Vec::with_capacity(self.models.len() + 1);
+        for model in std::iter::once(&self.model).chain(&self.models) {
+            let model = model.trim();
+            if !model.is_empty() && !models.iter().any(|existing| existing == model) {
+                models.push(model.to_string());
+            }
+        }
+        models
+    }
+
     /// Returns true when using the native Anthropic API (not an OpenAI-compatible endpoint).
     pub fn is_anthropic(&self) -> bool {
         self.openai_base_url.is_none()
+    }
+
+    /// Whether the configured OpenAI-compatible endpoint is a hosted
+    /// provider that cannot be used anonymously.
+    pub fn openai_requires_api_key(&self) -> bool {
+        self.openai_provider_name.as_deref().is_some_and(|name| {
+            matches!(name.to_ascii_lowercase().as_str(), "openai" | "openrouter")
+        }) || self
+            .openai_base_url
+            .as_deref()
+            .is_some_and(|url| url.contains("api.openai.com") || url.contains("openrouter.ai"))
     }
 
     pub fn load(force_project_trust: bool) -> Result<Self> {
@@ -394,6 +422,44 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.openai_api_key_env, "OPENAI_API_KEY");
         assert_eq!(config.openai_protocol, OpenAIProtocol::ChatCompletions);
+    }
+
+    #[test]
+    fn available_models_puts_default_first_and_deduplicates() {
+        let config = Config {
+            model: "primary".to_string(),
+            models: vec![
+                "fast".to_string(),
+                "primary".to_string(),
+                "  review  ".to_string(),
+                String::new(),
+            ],
+            ..Config::default()
+        };
+
+        assert_eq!(config.available_models(), vec!["primary", "fast", "review"]);
+    }
+
+    #[test]
+    fn hosted_openai_compatible_providers_require_keys() {
+        for (name, url) in [
+            ("openai", "https://api.openai.com/v1"),
+            ("openrouter", "https://openrouter.ai/api/v1"),
+        ] {
+            let config = Config {
+                openai_provider_name: Some(name.to_string()),
+                openai_base_url: Some(url.to_string()),
+                ..Config::default()
+            };
+            assert!(config.openai_requires_api_key());
+        }
+
+        let ollama = Config {
+            openai_provider_name: Some("ollama".to_string()),
+            openai_base_url: Some("http://localhost:11434/v1".to_string()),
+            ..Config::default()
+        };
+        assert!(!ollama.openai_requires_api_key());
     }
 
     #[test]

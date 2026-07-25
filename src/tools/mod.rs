@@ -34,6 +34,9 @@ pub trait Tool: Send + Sync {
     /// Clear state that must not carry into another conversation.
     fn reset_session(&self) {}
 
+    /// Update model-dependent tool state when the session model changes.
+    fn set_model(&mut self, _model: &str) {}
+
     /// Short human-readable summary of what this invocation does.
     /// Shown to the user while the tool runs.
     fn summarize(&self, _input: &Value) -> String {
@@ -107,6 +110,13 @@ impl ToolRegistry {
     pub fn reset_session(&self) {
         for tool in &self.tools {
             tool.reset_session();
+        }
+    }
+
+    /// Propagate a session model change to model-dependent tools.
+    pub fn set_model(&mut self, model: &str) {
+        for tool in &mut self.tools {
+            tool.set_model(model);
         }
     }
 

@@ -117,36 +117,9 @@ async fn main() -> Result<()> {
         config.model
     );
 
-    // Build the provider
-    let provider = build_provider(&config, &model)?;
-    let provider_name = provider.name().to_string();
-    tracing::info!("Provider: {} ({})", provider_name, model);
-
-    // Build a factory for agent sub-providers
-    let config_for_factory = config.clone();
-    let model_for_factory = model.clone();
-    let agent_factory: tools::agent::ProviderFactory = Box::new(move || {
-        build_provider(&config_for_factory, &model_for_factory)
-            .expect("failed to build agent provider")
-    });
-
-    // Connect once; the tools are moved into whichever frontend is selected.
-    let mcp_tools = bootstrap::connect_mcp_tools(&config).await;
-
     // One-shot mode: --print / -p
     if let Some(ref prompt) = args.prompt {
-        let mut tool_registry = tools::ToolRegistry::new_with_agent_factory(
-            agent_factory,
-            model.clone(),
-            config.permission_mode,
-        );
-        tool_registry.add_tools(mcp_tools);
-        let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
-        let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
-        engine.set_plugins(plugin_registry.clone());
-        engine.set_auto_compact_threshold(config.auto_compact_threshold);
-        engine.set_max_tokens(config.max_tokens);
-        engine.set_model_pricing(config.model_pricing.get(&model).copied());
+        let mut engine = build_engine(&config, &model, plugin_registry.clone()).await?;
 
         let system_prompt = context::build_system_prompt_for_model(
             &model,
@@ -164,20 +137,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Interactive REPL
-    let mut tool_registry = tools::ToolRegistry::new_with_agent_factory(
-        agent_factory,
-        model.clone(),
-        config.permission_mode,
-    );
-    tool_registry.add_tools(mcp_tools);
-    let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
-    let mut engine = query::Engine::new(provider, tool_registry, permission_checker, &model);
-    engine.set_plugins(plugin_registry.clone());
-    engine.set_auto_compact_threshold(config.auto_compact_threshold);
-    engine.set_max_tokens(config.max_tokens);
-    engine.set_model_pricing(config.model_pricing.get(&model).copied());
-
     // Run session-start hooks
     plugin::PluginRegistry::execute_side_effects(
         &plugin_registry,
@@ -185,6 +144,18 @@ async fn main() -> Result<()> {
         None,
     )
     .await?;
+
+    if args.tui {
+        let mut models = config.available_models();
+        if let Some(cli_model) = args.model.as_deref() {
+            models.retain(|configured| configured != cli_model);
+            models.insert(0, cli_model.to_string());
+        }
+        return tui::run(&config, plugin_registry, models).await;
+    }
+
+    // Interactive REPL
+    let mut engine = build_engine(&config, &model, plugin_registry.clone()).await?;
 
     // Resume a previous session if requested. The matched id is handed to
     // the REPL so it continues that session instead of forking a new one.
@@ -208,11 +179,37 @@ async fn main() -> Result<()> {
         }
     }
 
-    if args.tui {
-        tui::run(engine, &config, &plugin_registry).await
-    } else {
-        repl::run(engine, &config, &plugin_registry, resumed_id).await
-    }
+    repl::run(engine, &config, &plugin_registry, resumed_id).await
+}
+
+async fn build_engine(
+    config: &config::Config,
+    model: &str,
+    plugins: Arc<plugin::PluginRegistry>,
+) -> Result<query::Engine> {
+    let provider = build_provider(config, model)?;
+    tracing::info!("Provider: {} ({})", provider.name(), model);
+
+    let config_for_factory = config.clone();
+    let model_for_factory = model.to_string();
+    let agent_factory: tools::agent::ProviderFactory = Box::new(move || {
+        build_provider(&config_for_factory, &model_for_factory)
+            .expect("failed to build agent provider")
+    });
+    let mut tool_registry = tools::ToolRegistry::new_with_agent_factory(
+        agent_factory,
+        model.to_string(),
+        config.permission_mode,
+    );
+    tool_registry.add_tools(bootstrap::connect_mcp_tools(config).await);
+
+    let permission_checker = permissions::PermissionChecker::new(config.permission_mode);
+    let mut engine = query::Engine::new(provider, tool_registry, permission_checker, model);
+    engine.set_plugins(plugins);
+    engine.set_auto_compact_threshold(config.auto_compact_threshold);
+    engine.set_max_tokens(config.max_tokens);
+    engine.set_model_pricing(config.model_pricing.get(model).copied());
+    Ok(engine)
 }
 
 /// Build a provider from config.
@@ -220,11 +217,12 @@ fn build_provider(config: &config::Config, model: &str) -> Result<Box<dyn api::P
     // Check for OpenAI-compatible provider in config
     if let Some(ref base_url) = config.openai_base_url {
         let api_key = config.resolve_openai_key().unwrap_or_default();
-        if api_key.is_empty() && base_url.contains("api.openai.com") {
+        if api_key.is_empty() && config.openai_requires_api_key() {
             anyhow::bail!(
-                "No OpenAI API key found. Set OPENAI_API_KEY or configure \
-                 openai_api_key_cmd in ~/.config/claux/config.toml. ChatGPT login \
-                 credentials are not API credentials."
+                "No API key found for {}. Set {} or configure openai_api_key_cmd in \
+                 ~/.config/claux/config.toml.",
+                config.openai_provider_name.as_deref().unwrap_or(base_url),
+                config.openai_api_key_env,
             );
         }
         let name = config.openai_provider_name.as_deref().unwrap_or("openai");

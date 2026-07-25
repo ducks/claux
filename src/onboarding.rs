@@ -78,7 +78,9 @@ fn init_config_at(
 }
 
 fn config_template(provider: ConfigProvider, model: Option<&str>) -> String {
-    let shared = "permission_mode = \"default\"\n\
+    let shared = "# Additional model IDs offered by the TUI new-session picker.\n\
+                  models = []\n\
+                  permission_mode = \"default\"\n\
                   max_tokens = 16384\n\
                   auto_compact_threshold = 0.8\n";
     match provider {
@@ -212,13 +214,7 @@ pub async fn doctor(config: &Config, offline: bool) -> DoctorReport {
         }
     } else {
         let key = config.resolve_openai_key();
-        let provider_requires_key = config.openai_provider_name.as_deref().is_some_and(|name| {
-            matches!(name.to_ascii_lowercase().as_str(), "openai" | "openrouter")
-        }) || config
-            .openai_base_url
-            .as_deref()
-            .is_some_and(|url| url.contains("api.openai.com") || url.contains("openrouter.ai"));
-        if provider_requires_key && key.is_none() {
+        if config.openai_requires_api_key() && key.is_none() {
             report.fail(format!(
                 "authentication: {} is required for {}",
                 config.openai_api_key_env,

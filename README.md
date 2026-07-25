@@ -65,6 +65,20 @@ The generated file contains environment-variable names, never API keys. Claux
 creates it with private permissions and refuses to overwrite an existing file
 unless `--force` is explicit.
 
+The TUI uses `model` as the default for new sessions. Add more model IDs to
+`models` to choose among them with Tab while naming a session:
+
+```toml
+model = "anthropic/claude-sonnet-5"
+models = [
+  "anthropic/claude-haiku-4.5",
+  "openai/gpt-5.6",
+]
+```
+
+Each session remembers its model. Opening an existing session restores that
+model instead of changing the configured default.
+
 ## Auth
 
 claux resolves authentication in order:
