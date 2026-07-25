@@ -101,6 +101,17 @@ fn config_template(provider: ConfigProvider, model: Option<&str>) -> String {
              {shared}",
             model.unwrap_or("gpt-5.6-sol")
         ),
+        ConfigProvider::OpenRouter => format!(
+            "# claux configuration\n\
+             # Set OPENROUTER_API_KEY in your environment; do not put secrets here.\n\
+             model = {:?}\n\
+             openai_base_url = \"https://openrouter.ai/api/v1\"\n\
+             openai_provider_name = \"openrouter\"\n\
+             openai_protocol = \"chat_completions\"\n\
+             openai_api_key_env = \"OPENROUTER_API_KEY\"\n\
+             {shared}",
+            model.unwrap_or("anthropic/claude-sonnet-5")
+        ),
         ConfigProvider::Ollama => format!(
             "# claux configuration\n\
              # Change the model to one installed by `ollama list`.\n\
@@ -201,13 +212,21 @@ pub async fn doctor(config: &Config, offline: bool) -> DoctorReport {
         }
     } else {
         let key = config.resolve_openai_key();
-        let official_openai = config
+        let provider_requires_key = config.openai_provider_name.as_deref().is_some_and(|name| {
+            matches!(name.to_ascii_lowercase().as_str(), "openai" | "openrouter")
+        }) || config
             .openai_base_url
             .as_deref()
-            .is_some_and(|url| url.contains("api.openai.com"));
-        if official_openai && key.is_none() {
-            report
-                .fail("authentication: OPENAI_API_KEY is required for api.openai.com".to_string());
+            .is_some_and(|url| url.contains("api.openai.com") || url.contains("openrouter.ai"));
+        if provider_requires_key && key.is_none() {
+            report.fail(format!(
+                "authentication: {} is required for {}",
+                config.openai_api_key_env,
+                config
+                    .openai_provider_name
+                    .as_deref()
+                    .unwrap_or("the configured provider")
+            ));
         } else if key.is_some() {
             report.ok("authentication: OpenAI-compatible API key resolved".to_string());
         } else {
@@ -390,11 +409,30 @@ mod tests {
         for provider in [
             ConfigProvider::Anthropic,
             ConfigProvider::Openai,
+            ConfigProvider::OpenRouter,
             ConfigProvider::Ollama,
         ] {
             let parsed: Config = toml::from_str(&config_template(provider, None)).unwrap();
             assert!(!parsed.model.is_empty());
         }
+    }
+
+    #[test]
+    fn openrouter_template_uses_compatible_endpoint_and_key_environment() {
+        let parsed: Config =
+            toml::from_str(&config_template(ConfigProvider::OpenRouter, None)).unwrap();
+        assert_eq!(parsed.model, "anthropic/claude-sonnet-5");
+        assert_eq!(
+            parsed.openai_base_url.as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert_eq!(parsed.openai_provider_name.as_deref(), Some("openrouter"));
+        assert_eq!(
+            parsed.openai_protocol,
+            crate::config::OpenAIProtocol::ChatCompletions
+        );
+        assert_eq!(parsed.openai_api_key_env, "OPENROUTER_API_KEY");
+        assert!(parsed.openai_api_key.is_none());
     }
 
     #[test]
@@ -440,6 +478,22 @@ mod tests {
         };
         let report = doctor(&config, true).await;
         assert!(report.text.contains("skipped (--offline)"));
+    }
+
+    #[tokio::test]
+    async fn doctor_requires_openrouter_api_key() {
+        let config = Config {
+            model: "anthropic/claude-sonnet-5".to_string(),
+            openai_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            openai_provider_name: Some("openrouter".to_string()),
+            openai_api_key_env: "CLAUX_TEST_MISSING_OPENROUTER_KEY".to_string(),
+            ..Config::default()
+        };
+        let report = doctor(&config, true).await;
+        assert!(!report.healthy);
+        assert!(report
+            .text
+            .contains("CLAUX_TEST_MISSING_OPENROUTER_KEY is required for openrouter"));
     }
 
     #[tokio::test]

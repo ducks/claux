@@ -77,6 +77,8 @@ pub enum ConfigCommand {
 pub enum ConfigProvider {
     Anthropic,
     Openai,
+    #[value(name = "openrouter")]
+    OpenRouter,
     Ollama,
 }
 
@@ -114,6 +116,30 @@ mod tests {
                     force: false,
                 },
             }) if model == "local-coder"
+        ));
+    }
+
+    #[test]
+    fn parses_openrouter_config_init() {
+        let cli = Cli::try_parse_from([
+            "claux",
+            "config",
+            "init",
+            "--provider",
+            "openrouter",
+            "--model",
+            "anthropic/claude-sonnet-5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::Config {
+                command: ConfigCommand::Init {
+                    provider: ConfigProvider::OpenRouter,
+                    model: Some(ref model),
+                    force: false,
+                },
+            }) if model == "anthropic/claude-sonnet-5"
         ));
     }
 }
