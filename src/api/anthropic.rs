@@ -7,21 +7,21 @@ use tokio_util::sync::CancellationToken;
 use super::provider::{Provider, ProviderStream};
 use super::stream::{self, ApiEvent};
 use super::types::{Message, ToolDefinition};
-use crate::config::AuthMethod;
+use crate::config::AnthropicApiKey;
 use crate::context::SYSTEM_PROMPT_BLOCK_SEPARATOR;
 
 /// Anthropic Messages API provider.
 pub struct AnthropicProvider {
-    auth: AuthMethod,
+    api_key: AnthropicApiKey,
     model: String,
     api_url: String,
     http: reqwest::Client,
 }
 
 impl AnthropicProvider {
-    pub fn new(auth: AuthMethod, model: &str) -> Self {
+    pub fn new(api_key: AnthropicApiKey, model: &str) -> Self {
         Self {
-            auth,
+            api_key,
             model: model.to_string(),
             api_url: "https://api.anthropic.com/v1/messages".to_string(),
             http: reqwest::Client::new(),
@@ -86,12 +86,7 @@ impl Provider for AnthropicProvider {
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
 
-        request = match &self.auth {
-            AuthMethod::ApiKey(key) => request.header("x-api-key", key),
-            AuthMethod::OAuthToken(token) => request
-                .header("Authorization", format!("Bearer {token}"))
-                .header("anthropic-beta", "oauth-2025-04-20"),
-        };
+        request = request.header("x-api-key", self.api_key.expose());
 
         let response = tokio::select! {
             _ = cancel.cancelled() => anyhow::bail!("API request cancelled"),

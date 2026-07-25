@@ -196,11 +196,11 @@ mod tests {
     #[test]
     fn registry_with_agent_has_agent() {
         use crate::api::AnthropicProvider;
-        use crate::config::AuthMethod;
+        use crate::config::AnthropicApiKey;
 
         let factory: agent::ProviderFactory = Box::new(|| {
             Box::new(AnthropicProvider::new(
-                AuthMethod::ApiKey("fake".into()),
+                AnthropicApiKey::new("fake".into()),
                 "model",
             ))
         });
