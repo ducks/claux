@@ -53,13 +53,15 @@ pub struct HomeScreen {
     input: String,
     cursor: usize,
     theme: Theme,
-    model: String,
+    models: Vec<String>,
+    selected_model: usize,
     /// Empty projects created by the user (no sessions yet)
     empty_projects: Vec<String>,
 }
 
 impl HomeScreen {
-    pub fn new(db: Db, theme: Theme, model: &str) -> Self {
+    pub fn new(db: Db, theme: Theme, models: Vec<String>) -> Self {
+        debug_assert!(!models.is_empty());
         let mut screen = Self {
             db,
             tree: Vec::new(),
@@ -68,11 +70,27 @@ impl HomeScreen {
             input: String::new(),
             cursor: 0,
             theme,
-            model: model.to_string(),
+            models,
+            selected_model: 0,
             empty_projects: Vec::new(),
         };
         let _ = screen.reload();
         screen
+    }
+
+    fn selected_model(&self) -> &str {
+        &self.models[self.selected_model]
+    }
+
+    fn select_next_model(&mut self) {
+        self.selected_model = (self.selected_model + 1) % self.models.len();
+    }
+
+    fn select_previous_model(&mut self) {
+        self.selected_model = self
+            .selected_model
+            .checked_sub(1)
+            .unwrap_or(self.models.len() - 1);
     }
 
     /// Reload sessions from DB and rebuild the tree.
@@ -286,7 +304,7 @@ impl HomeScreen {
                         let session_id = crate::session::new_session_id();
                         self.db.create_session(
                             &session_id,
-                            &self.model,
+                            self.selected_model(),
                             Some(&name),
                             Some(&project),
                         )?;
@@ -309,6 +327,12 @@ impl HomeScreen {
             }
             KeyCode::Backspace if self.cursor > 0 => {
                 super::input::backspace(&mut self.input, &mut self.cursor);
+            }
+            KeyCode::Tab | KeyCode::Right if self.mode == Mode::NewSession => {
+                self.select_next_model();
+            }
+            KeyCode::BackTab | KeyCode::Left if self.mode == Mode::NewSession => {
+                self.select_previous_model();
             }
             KeyCode::Char(c) => {
                 super::input::insert(&mut self.input, &mut self.cursor, c);
@@ -451,7 +475,11 @@ impl HomeScreen {
         // Input / help area
         match &self.mode {
             Mode::NewSession => {
-                let prompt = format!("Session name (Enter for timestamp): {}", self.input);
+                let prompt = format!(
+                    "Name: {}  Model: {} (Tab to change)",
+                    self.input,
+                    self.selected_model()
+                );
                 let input_widget = Paragraph::new(prompt)
                     .style(Style::default().fg(self.theme.fg))
                     .block(
@@ -462,7 +490,7 @@ impl HomeScreen {
                     );
                 f.render_widget(input_widget, chunks[2]);
                 let cursor_width = super::input::display_width_before(&self.input, self.cursor);
-                f.set_cursor_position((chunks[2].x + 39 + cursor_width as u16, chunks[2].y + 1));
+                f.set_cursor_position((chunks[2].x + 7 + cursor_width as u16, chunks[2].y + 1));
             }
             Mode::NewProject => {
                 let prompt = format!("Project name: {}", self.input);
@@ -520,7 +548,7 @@ impl HomeScreen {
 
         // Status
         let status = Paragraph::new(Line::from(vec![Span::styled(
-            format!(" {} ", self.model),
+            format!(" {} ", self.selected_model()),
             Style::default().fg(self.theme.dim),
         )]));
         f.render_widget(status, chunks[3]);
@@ -541,7 +569,7 @@ mod tests {
             Some("project"),
         )
         .unwrap();
-        let mut screen = HomeScreen::new(db, Theme::dark(), "model");
+        let mut screen = HomeScreen::new(db, Theme::dark(), vec!["model".to_string()]);
         screen.selected = screen
             .tree
             .iter()
@@ -578,6 +606,31 @@ mod tests {
 
         assert_eq!(screen.mode, Mode::Browse);
         assert!(screen.db.get_session("session-1").unwrap().is_some());
+    }
+
+    #[test]
+    fn new_session_uses_selected_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Db::open(&temp.path().join("test.db")).unwrap();
+        let mut screen = HomeScreen::new(
+            db,
+            Theme::dark(),
+            vec!["model-a".to_string(), "model-b".to_string()],
+        );
+        screen.mode = Mode::NewSession;
+        screen.select_next_model();
+
+        let action = screen
+            .handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap()
+            .unwrap();
+        let Action::Chat { session_id } = action else {
+            panic!("expected chat action");
+        };
+        assert_eq!(
+            screen.db.get_session(&session_id).unwrap().unwrap().model,
+            "model-b"
+        );
     }
 }
 
@@ -649,14 +702,22 @@ mod tuishot_shots {
                     let tmp = tempfile::NamedTempFile::new().unwrap();
                     let db = Db::open(&tmp.path().to_path_buf()).unwrap();
                     (
-                        HomeScreen::new(db, theme, "claude-sonnet-4-20250514"),
+                        HomeScreen::new(
+                            db,
+                            theme,
+                            vec!["claude-sonnet-4-20250514".to_string(), "gpt-4o".to_string()],
+                        ),
                         Some(tmp),
                     )
                 }
                 _ => {
                     let (db, tmp) = seeded_db();
                     (
-                        HomeScreen::new(db, theme, "claude-sonnet-4-20250514"),
+                        HomeScreen::new(
+                            db,
+                            theme,
+                            vec!["claude-sonnet-4-20250514".to_string(), "gpt-4o".to_string()],
+                        ),
                         Some(tmp),
                     )
                 }

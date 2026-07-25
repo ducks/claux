@@ -76,6 +76,10 @@ impl Tool for AgentTool {
         false
     }
 
+    fn set_model(&mut self, model: &str) {
+        self.model = model.to_string();
+    }
+
     fn summarize(&self, input: &Value) -> String {
         input["description"]
             .as_str()
@@ -99,7 +103,8 @@ impl Tool for AgentTool {
     ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
 
-        let provider = (self.make_provider)();
+        let mut provider = (self.make_provider)();
+        provider.set_model(&self.model);
         let tools = ToolRegistry::without_agent();
         // Inherit the parent's permission mode. Previously hardcoded to
         // Bypass, which let a sub-agent run Bash/Write/Edit with no prompts
@@ -157,6 +162,16 @@ mod tests {
     use super::*;
     use crate::api::{ApiEvent, Message, ToolDefinition};
     use tokio::sync::mpsc;
+
+    #[test]
+    fn model_change_propagates_to_agent_tool() {
+        let factory: ProviderFactory = Box::new(|| panic!("provider should not be created"));
+        let mut tool = AgentTool::new(factory, "model-a".to_string(), PermissionMode::Plan);
+
+        Tool::set_model(&mut tool, "model-b");
+
+        assert_eq!(tool.model, "model-b");
+    }
 
     /// Provider that, on the sub-agent's first turn, requests a Write to a
     /// concrete path, then ends the turn. Lets us prove the sub-agent's

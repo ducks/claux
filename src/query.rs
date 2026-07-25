@@ -303,6 +303,7 @@ impl Engine {
     pub fn set_model(&mut self, model: &str) {
         self.model = model.to_string();
         self.provider.set_model(model);
+        self.tools.set_model(model);
         self.cost = CostTracker::new(model);
     }
 
