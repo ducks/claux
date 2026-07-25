@@ -353,7 +353,7 @@ async fn live_anthropic_smoke() {
     let model = std::env::var("CLAUX_EVAL_MODEL")
         .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
     let provider = Box::new(crate::api::AnthropicProvider::new(
-        crate::config::AuthMethod::ApiKey(key),
+        crate::config::AnthropicApiKey::new(key),
         &model,
     ));
     let mut engine = Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Plan);

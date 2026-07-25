@@ -245,7 +245,7 @@ fn build_provider(config: &config::Config, model: &str) -> Result<Box<dyn api::P
     // Default: Anthropic
     let auth = config.resolve_auth().ok_or_else(|| {
         anyhow::anyhow!(
-            "No authentication found. Set ANTHROPIC_API_KEY, run `claude login`, or run \
+            "No authentication found. Set ANTHROPIC_API_KEY, or run \
              `claux config init` followed by `claux doctor`."
         )
     })?;

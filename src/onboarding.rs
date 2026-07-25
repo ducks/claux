@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cli::ConfigProvider;
-use crate::config::{AuthMethod, Config};
+use crate::config::{AnthropicApiKey, Config};
 
 pub struct DoctorReport {
     pub text: String,
@@ -188,18 +188,13 @@ pub async fn doctor(config: &Config, offline: bool) -> DoctorReport {
 
     let auth = if config.is_anthropic() {
         match config.resolve_auth() {
-            Some(auth) => {
-                let label = match &auth {
-                    AuthMethod::ApiKey(_) => "Anthropic API key",
-                    AuthMethod::OAuthToken(_) => "Claude OAuth token (best-effort)",
-                };
-                report.ok(format!("authentication: {label} resolved"));
-                Some(ProviderAuth::Anthropic(auth))
+            Some(api_key) => {
+                report.ok("authentication: Anthropic API key resolved".to_string());
+                Some(ProviderAuth::Anthropic(api_key))
             }
             None => {
                 report.fail(
-                    "authentication: no Anthropic credentials; set ANTHROPIC_API_KEY or run `claude login`"
-                        .to_string(),
+                    "authentication: no Anthropic credentials; set ANTHROPIC_API_KEY".to_string(),
                 );
                 None
             }
@@ -247,7 +242,7 @@ pub async fn doctor(config: &Config, offline: bool) -> DoctorReport {
 }
 
 enum ProviderAuth {
-    Anthropic(AuthMethod),
+    Anthropic(AnthropicApiKey),
     OpenAi(String),
 }
 
@@ -256,17 +251,10 @@ async fn check_provider(config: &Config, auth: ProviderAuth) -> Result<reqwest::
         .timeout(Duration::from_secs(10))
         .build()?;
     let request = match auth {
-        ProviderAuth::Anthropic(auth) => {
-            let request = client
-                .get("https://api.anthropic.com/v1/models?limit=1")
-                .header("anthropic-version", "2023-06-01");
-            match auth {
-                AuthMethod::ApiKey(key) => request.header("x-api-key", key),
-                AuthMethod::OAuthToken(token) => request
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("anthropic-beta", "oauth-2025-04-20"),
-            }
-        }
+        ProviderAuth::Anthropic(api_key) => client
+            .get("https://api.anthropic.com/v1/models?limit=1")
+            .header("anthropic-version", "2023-06-01")
+            .header("x-api-key", api_key.expose()),
         ProviderAuth::OpenAi(key) => {
             let base = config
                 .openai_base_url

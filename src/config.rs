@@ -9,13 +9,18 @@ mod trust;
 
 pub use trust::ProjectTrust;
 
-/// How we authenticate with the API.
+/// An API key used to authenticate with Anthropic.
 #[derive(Debug, Clone)]
-pub enum AuthMethod {
-    /// Direct API key (x-api-key header)
-    ApiKey(String),
-    /// OAuth access token from `claude login` (Authorization: Bearer header)
-    OAuthToken(String),
+pub struct AnthropicApiKey(String);
+
+impl AnthropicApiKey {
+    pub fn new(key: String) -> Self {
+        Self(key)
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
@@ -276,16 +281,15 @@ impl Config {
         Ok(config)
     }
 
-    /// Resolve authentication. Priority:
+    /// Resolve the Anthropic API key. Priority:
     /// 1. Direct API key in config
     /// 2. API key from command
     /// 3. ANTHROPIC_API_KEY env var
-    /// 4. OAuth token from ~/.claude/.credentials.json (claude login)
-    pub fn resolve_auth(&self) -> Option<AuthMethod> {
+    pub fn resolve_auth(&self) -> Option<AnthropicApiKey> {
         // Direct value
         if let Some(ref key) = self.api_key {
             if !key.is_empty() {
-                return Some(AuthMethod::ApiKey(key.clone()));
+                return Some(AnthropicApiKey::new(key.clone()));
             }
         }
 
@@ -295,7 +299,7 @@ impl Config {
                 if output.status.success() {
                     let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if !key.is_empty() {
-                        return Some(AuthMethod::ApiKey(key));
+                        return Some(AnthropicApiKey::new(key));
                     }
                 }
             }
@@ -304,13 +308,8 @@ impl Config {
         // Environment variable
         if let Ok(key) = std::env::var(&self.api_key_env) {
             if !key.is_empty() {
-                return Some(AuthMethod::ApiKey(key));
+                return Some(AnthropicApiKey::new(key));
             }
-        }
-
-        // Fall back to Claude Code OAuth credentials
-        if let Some(token) = Self::read_claude_oauth_token() {
-            return Some(AuthMethod::OAuthToken(token));
         }
 
         None
@@ -356,37 +355,6 @@ impl Config {
         }
 
         None
-    }
-
-    /// Read OAuth access token from ~/.claude/.credentials.json
-    fn read_claude_oauth_token() -> Option<String> {
-        let home = std::env::var("HOME").ok()?;
-        let path = PathBuf::from(home)
-            .join(".claude")
-            .join(".credentials.json");
-
-        let content = std::fs::read_to_string(&path).ok()?;
-        let creds: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-        let oauth = creds.get("claudeAiOauth")?;
-
-        // Check if token is expired (with 60s buffer)
-        if let Some(expires_at) = oauth.get("expiresAt").and_then(|v| v.as_i64()) {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_millis() as i64;
-
-            if now_ms > expires_at - 60_000 {
-                tracing::warn!("Claude OAuth token is expired. Run `claude login` to refresh.");
-                return None;
-            }
-        }
-
-        oauth
-            .get("accessToken")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
     }
 
     pub fn global_path() -> PathBuf {
