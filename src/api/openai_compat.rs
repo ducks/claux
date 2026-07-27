@@ -199,16 +199,18 @@ impl Provider for OpenAICompatProvider {
         };
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("API error ({status}): {error_text}");
+            return Err(super::error::http_error(response, &self.provider_name, &self.model).await);
         }
 
         let stream_cancel = cancel.child_token();
         let reader_cancel = stream_cancel.clone();
         let error_tx = tx.clone();
+        let provider_name = self.provider_name.clone();
+        let model = self.model.clone();
         tokio::spawn(async move {
-            if let Err(e) = read_openai_sse(response, tx, reader_cancel).await {
+            if let Err(e) =
+                read_openai_sse(response, tx, reader_cancel, &provider_name, &model).await
+            {
                 let message = format!("OpenAI SSE stream error: {e}");
                 tracing::error!("{message}");
                 let _ = error_tx.send(ApiEvent::Error(message)).await;
@@ -241,6 +243,8 @@ async fn read_openai_sse(
     response: reqwest::Response,
     tx: mpsc::Sender<ApiEvent>,
     cancel: CancellationToken,
+    provider: &str,
+    model: &str,
 ) -> Result<()> {
     use futures_util::StreamExt as _;
 
@@ -291,6 +295,12 @@ async fn read_openai_sse(
 
             let event = serde_json::from_str::<serde_json::Value>(data)
                 .map_err(|error| anyhow::anyhow!("invalid JSON in OpenAI SSE event: {error}"))?;
+
+            if event["error"].is_object() {
+                let message = super::error::stream_error(&event, provider, model);
+                let _ = tx.send(ApiEvent::Error(message)).await;
+                return Ok(());
+            }
 
             // Check for usage in the chunk
             if let Some(usage) = event.get("usage") {
@@ -426,7 +436,7 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let error = read_openai_sse(response, tx, CancellationToken::new())
+        let error = read_openai_sse(response, tx, CancellationToken::new(), "openai", "model")
             .await
             .unwrap_err();
 
@@ -443,7 +453,7 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        read_openai_sse(response, tx, CancellationToken::new())
+        read_openai_sse(response, tx, CancellationToken::new(), "openai", "model")
             .await
             .unwrap();
 
@@ -460,7 +470,7 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        read_openai_sse(response, tx, CancellationToken::new())
+        read_openai_sse(response, tx, CancellationToken::new(), "openai", "model")
             .await
             .unwrap();
 
@@ -482,7 +492,7 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let error = read_openai_sse(response, tx, CancellationToken::new())
+        let error = read_openai_sse(response, tx, CancellationToken::new(), "openai", "model")
             .await
             .unwrap_err();
 
@@ -495,11 +505,39 @@ mod tests {
         let response = crate::test_support::sse_response("data: {not json}\n\n").await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let error = read_openai_sse(response, tx, CancellationToken::new())
+        let error = read_openai_sse(response, tx, CancellationToken::new(), "openai", "model")
             .await
             .unwrap_err();
 
         assert!(error.to_string().contains("invalid JSON"));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn surfaces_streamed_rate_limit_details() {
+        let response = crate::test_support::sse_response(
+            "data: {\"error\":{\"code\":429,\"message\":\"upstream limit\",\"metadata\":{\"error_type\":\"rate_limit_exceeded\"}},\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"error\"}]}\n\n",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_openai_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            "openrouter",
+            "poolside/laguna",
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(ApiEvent::Error(error))
+                if error.contains("429 Too Many Requests")
+                    && error.contains("poolside/laguna")
+                    && error.contains("choose another model/provider")
+        ));
         assert!(rx.recv().await.is_none());
     }
 }

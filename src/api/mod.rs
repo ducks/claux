@@ -1,4 +1,5 @@
 pub(crate) mod anthropic;
+mod error;
 pub(crate) mod openai_compat;
 pub(crate) mod openai_responses;
 pub(crate) mod provider;
