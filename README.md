@@ -11,7 +11,7 @@ A terminal-based AI coding assistant written in Rust. Streams responses, execute
 - **Session persistence** — SQLite-backed with search; full transcripts including tool calls and results, so `/resume` and `--resume` restore exactly what the model saw. Histories from older versions are repaired on load
 - **Safe turn checkpoints** — `/diff` shows exactly what the last turn changed; `/undo-turn` restores it only when no file has been edited since, so later human work is never overwritten
 - **Compaction** — `/compact` summarizes conversation to free context
-- **Model switching** — `/model <name>` mid-conversation
+- **Model selection** — choose one configured model/provider for each new TUI session; `/model <name>` can switch model IDs on the active provider
 - **Sub-agents** — Agent tool spawns scoped sub-conversations. Sub-agents inherit the parent session's permission mode, so a sub-agent can't act with more authority than you granted the session. Because sub-agents run non-interactively, any tool the mode would prompt for is denied rather than auto-run (Plan denies all writes; Bypass allows all)
 - **Auto-compact** — triggers when conversation gets large
 - **Cost tracking** — per-model token usage and USD estimates
@@ -61,38 +61,59 @@ claux config init --provider ollama --model llama3
 claux doctor --offline  # configuration checks without a network request
 ```
 
-The generated file contains environment-variable names, never API keys. Claux
-creates it with private permissions and refuses to overwrite an existing file
-unless `--force` is explicit.
+The generated file contains environment-variable names, never API keys, and is
+created with private permissions. Run `config init` again with another provider
+to add it without replacing existing settings or comments. `--force` explicitly
+starts over.
 
-The TUI uses `model` as the default for new sessions. Add more model IDs to
-`models` to choose among them with Tab while naming a session:
+The TUI opens on the session browser. Starting a session lets you choose one
+named model profile; opening an existing session restores its exact provider,
+endpoint, protocol, and model:
 
 ```toml
-model = "anthropic/claude-sonnet-5"
-models = [
-  "anthropic/claude-haiku-4.5",
-  "openai/gpt-5.6",
-]
+default_profile = "sonnet"
+
+[providers.anthropic]
+type = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[providers.openrouter]
+type = "openai"
+base_url = "https://openrouter.ai/api/v1"
+name = "openrouter"
+protocol = "chat_completions"
+api_key_env = "OPENROUTER_API_KEY"
+
+[model_profiles.sonnet]
+provider = "anthropic"
+model = "claude-sonnet-5"
+display_name = "Sonnet"
+
+[model_profiles.gpt]
+provider = "openrouter"
+model = "openai/gpt-5.6"
+display_name = "GPT via OpenRouter"
 ```
 
-Each session remembers its model. Opening an existing session restores that
-model instead of changing the configured default.
+Saved sessions never contain API keys. They retain a credential-free transport
+snapshot and resolve credentials from the current matching provider config or
+saved environment-variable name when reopened. If that credential is no longer
+available, the TUI returns to the session browser with a recovery message.
 
 ## Auth
 
-claux resolves authentication in order:
+For each named provider, claux resolves authentication in order:
 
-1. `api_key` in `~/.config/claux/config.toml`
+1. `api_key` in its provider table
 2. `api_key_cmd` (shell command that returns a key)
-3. `ANTHROPIC_API_KEY` environment variable
+3. The provider's `api_key_env` environment variable
 
 Claude Free, Pro, and Max subscription credentials are not supported. Use an
 Anthropic API key or an OpenAI-compatible endpoint such as OpenRouter.
 
-### OpenAI-compatible providers
+### Legacy single-provider configuration
 
-For Ollama, vLLM, LMStudio, OpenAI, or any hosted endpoint:
+Existing flat configuration remains supported:
 
 ```toml
 model = "llama3"
@@ -100,7 +121,7 @@ openai_base_url = "http://localhost:11434/v1"
 openai_provider_name = "ollama"
 ```
 
-API keys via command (works with 1Password, Vault, etc.):
+API keys via command also remain supported (works with 1Password, Vault, etc.):
 
 ```toml
 model = "gpt-4o"
@@ -149,7 +170,7 @@ the turn; if anything changed afterward, it refuses the entire undo.
 Global: `~/.config/claux/config.toml`
 
 ```toml
-model = "claude-sonnet-5"
+default_profile = "sonnet"
 permission_mode = "default"  # default | accept-edits | bypass | plan
 
 # Project-local .claux.toml files may tighten this mode without trust, but
@@ -157,13 +178,27 @@ permission_mode = "default"  # default | accept-edits | bypass | plan
 # is passed for the invocation. Project-local .mcp.json uses the same boundary.
 trusted_projects = ["/absolute/path/to/a/trusted/project"]
 
-# OpenAI Responses API (recommended for current reasoning and coding models).
-# The key is read from OPENAI_API_KEY by default; do not store it here.
-# model = "gpt-5.6-sol"
-# openai_base_url = "https://api.openai.com/v1"
-# openai_protocol = "responses"
-# openai_provider_name = "openai"
-# openai_reasoning_effort = "medium"
+[providers.anthropic]
+type = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[providers.openai]
+type = "openai"
+base_url = "https://api.openai.com/v1"
+name = "openai"
+protocol = "responses"
+api_key_env = "OPENAI_API_KEY"
+
+[model_profiles.sonnet]
+provider = "anthropic"
+model = "claude-sonnet-5"
+display_name = "Sonnet"
+
+[model_profiles.openai-coder]
+provider = "openai"
+model = "gpt-5.6-sol"
+display_name = "OpenAI Coder"
+reasoning_effort = "medium"
 
 # Optional pricing overrides, in USD per million tokens. Built-in prices are
 # used for known models; unknown models display "Cost: unavailable".

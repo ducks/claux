@@ -1,9 +1,10 @@
 use anyhow::Result;
 use std::io::{stdout, Write};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::commands::{self, CommandResult};
-use crate::config::{Config, HookTrigger};
+use crate::config::{Config, HookTrigger, ProviderKind, ResolvedModel};
 use crate::context;
 use crate::permissions::PermissionResponse;
 use crate::plugin::PluginRegistry;
@@ -22,15 +23,16 @@ use crate::utils::diff::colorize_diff;
 pub async fn run(
     mut engine: Engine,
     config: &Config,
-    plugins: &PluginRegistry,
+    plugins: Arc<PluginRegistry>,
     resumed: Option<String>,
+    mut resolved_model: ResolvedModel,
 ) -> Result<()> {
     // Build system prompt
     let system_prompt = context::build_system_prompt_for_model(
         engine.model(),
-        Some(plugins),
+        Some(&plugins),
         &HookTrigger::OnContextBuild,
-        config.is_anthropic(),
+        resolved_model.binding.provider_kind == ProviderKind::Anthropic,
     )
     .await?;
     engine.set_system_prompt(system_prompt);
@@ -40,7 +42,7 @@ pub async fn run(
     // into a duplicate and the original never grew.
     let mut session_path = match resumed {
         Some(id) => std::path::PathBuf::from(format!("sqlite://{id}")),
-        None => session::create_session(engine.model())?.1,
+        None => session::create_session_with_model(&resolved_model)?.1,
     };
 
     // Persistent stdin reader. Exits on EOF (Ctrl+D) or when the receiver
@@ -118,8 +120,24 @@ pub async fn run(
                 CommandResult::Async(commands::AsyncCommand::Resume(Some(ref prefix))) => {
                     match session::find_session(prefix)? {
                         Some((sid, path)) => {
-                            let (_meta, messages) = session::load_session(&path)?;
-                            engine.set_messages(messages);
+                            let (meta, messages) = session::load_session(&path)?;
+                            resolved_model = match meta.model_binding.as_ref() {
+                                Some(binding) => config.resolve_binding(binding)?,
+                                None => config.resolve_model(&meta.model)?,
+                            };
+                            let mut resumed_engine =
+                                crate::build_engine(config, &resolved_model, plugins.clone())
+                                    .await?;
+                            let system_prompt = context::build_system_prompt_for_model(
+                                &resolved_model.binding.model,
+                                Some(&plugins),
+                                &HookTrigger::OnContextBuild,
+                                resolved_model.binding.provider_kind == ProviderKind::Anthropic,
+                            )
+                            .await?;
+                            resumed_engine.set_system_prompt(system_prompt);
+                            resumed_engine.set_messages(messages);
+                            engine = resumed_engine;
                             session_path = path;
                             println!(
                                 "Resumed session \x1b[33m{sid}\x1b[0m ({} messages)",
@@ -140,6 +158,9 @@ pub async fn run(
                     }
                     // Commands like /compact rewrite engine history
                     let _ = session::save_messages(&session_path, engine.messages());
+                    if let Some(binding) = engine.model_binding() {
+                        let _ = session::save_model_binding(&session_path, binding);
+                    }
                 }
             }
             continue;

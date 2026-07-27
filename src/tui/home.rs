@@ -13,6 +13,7 @@ use ratatui::{
 use std::collections::HashMap;
 use std::io::Stdout;
 
+use crate::config::ResolvedModel;
 use crate::db::{Db, SessionInfo};
 use crate::theme::Theme;
 
@@ -42,7 +43,7 @@ enum TreeItem {
         expanded: bool,
         session_count: usize,
     },
-    Session(SessionInfo),
+    Session(Box<SessionInfo>),
 }
 
 pub struct HomeScreen {
@@ -53,14 +54,15 @@ pub struct HomeScreen {
     input: String,
     cursor: usize,
     theme: Theme,
-    models: Vec<String>,
+    models: Vec<ResolvedModel>,
     selected_model: usize,
+    notice: Option<String>,
     /// Empty projects created by the user (no sessions yet)
     empty_projects: Vec<String>,
 }
 
 impl HomeScreen {
-    pub fn new(db: Db, theme: Theme, models: Vec<String>) -> Self {
+    pub fn new(db: Db, theme: Theme, models: Vec<ResolvedModel>) -> Self {
         debug_assert!(!models.is_empty());
         let mut screen = Self {
             db,
@@ -72,14 +74,19 @@ impl HomeScreen {
             theme,
             models,
             selected_model: 0,
+            notice: None,
             empty_projects: Vec::new(),
         };
         let _ = screen.reload();
         screen
     }
 
-    fn selected_model(&self) -> &str {
+    fn selected_model(&self) -> &ResolvedModel {
         &self.models[self.selected_model]
+    }
+
+    pub fn set_notice(&mut self, notice: impl Into<String>) {
+        self.notice = Some(notice.into());
     }
 
     fn select_next_model(&mut self) {
@@ -142,7 +149,7 @@ impl HomeScreen {
 
             if expanded {
                 for session in sessions {
-                    self.tree.push(TreeItem::Session(session));
+                    self.tree.push(TreeItem::Session(Box::new(session)));
                 }
             }
         }
@@ -302,9 +309,9 @@ impl HomeScreen {
                             .selected_project()
                             .unwrap_or_else(|| "uncategorized".to_string());
                         let session_id = crate::session::new_session_id();
-                        self.db.create_session(
+                        self.db.create_session_with_binding(
                             &session_id,
-                            self.selected_model(),
+                            &self.selected_model().binding,
                             Some(&name),
                             Some(&project),
                         )?;
@@ -428,11 +435,14 @@ impl HomeScreen {
                         .as_deref()
                         .filter(|n| !n.is_empty())
                         .unwrap_or(&session.id);
-                    let model_short = if session.model.len() > 15 {
-                        &session.model[..15]
-                    } else {
-                        &session.model
-                    };
+                    let model_label = session
+                        .model_binding
+                        .as_ref()
+                        .map(|binding| {
+                            format!("{} · {}", binding.display_name, binding.provider_name)
+                        })
+                        .unwrap_or_else(|| session.model.clone());
+                    let model_short = model_label.chars().take(24).collect::<String>();
 
                     let line = Line::from(vec![
                         Span::styled(
@@ -444,7 +454,7 @@ impl HomeScreen {
                             },
                         ),
                         Span::styled(
-                            format!(" {model_short} ",),
+                            format!(" {model_short} "),
                             Style::default().fg(self.theme.dim),
                         ),
                         Span::styled(
@@ -478,7 +488,7 @@ impl HomeScreen {
                 let prompt = format!(
                     "Name: {}  Model: {} (Tab to change)",
                     self.input,
-                    self.selected_model()
+                    self.selected_model().binding.display_name
                 );
                 let input_widget = Paragraph::new(prompt)
                     .style(Style::default().fg(self.theme.fg))
@@ -547,9 +557,23 @@ impl HomeScreen {
         }
 
         // Status
+        let status_text = self.notice.as_deref().map_or_else(
+            || {
+                format!(
+                    " {} · {} ",
+                    self.selected_model().binding.display_name,
+                    self.selected_model().binding.provider_name
+                )
+            },
+            |notice| format!(" {notice} "),
+        );
         let status = Paragraph::new(Line::from(vec![Span::styled(
-            format!(" {} ", self.selected_model()),
-            Style::default().fg(self.theme.dim),
+            status_text,
+            Style::default().fg(if self.notice.is_some() {
+                self.theme.error
+            } else {
+                self.theme.dim
+            }),
         )]));
         f.render_widget(status, chunks[3]);
     }
@@ -558,6 +582,14 @@ impl HomeScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn models(names: &[&str]) -> Vec<ResolvedModel> {
+        let config = crate::config::Config::default();
+        names
+            .iter()
+            .map(|name| config.resolve_model(name).unwrap())
+            .collect()
+    }
 
     fn screen_with_session() -> (HomeScreen, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
@@ -569,7 +601,7 @@ mod tests {
             Some("project"),
         )
         .unwrap();
-        let mut screen = HomeScreen::new(db, Theme::dark(), vec!["model".to_string()]);
+        let mut screen = HomeScreen::new(db, Theme::dark(), models(&["model"]));
         screen.selected = screen
             .tree
             .iter()
@@ -612,11 +644,7 @@ mod tests {
     fn new_session_uses_selected_model() {
         let temp = tempfile::tempdir().unwrap();
         let db = Db::open(&temp.path().join("test.db")).unwrap();
-        let mut screen = HomeScreen::new(
-            db,
-            Theme::dark(),
-            vec!["model-a".to_string(), "model-b".to_string()],
-        );
+        let mut screen = HomeScreen::new(db, Theme::dark(), models(&["model-a", "model-b"]));
         screen.mode = Mode::NewSession;
         screen.select_next_model();
 
@@ -644,6 +672,14 @@ mod tests {
 mod tuishot_shots {
     use super::*;
     use tuishot::Tuishot;
+
+    fn models() -> Vec<ResolvedModel> {
+        let config = crate::config::Config::default();
+        ["claude-sonnet-4-20250514", "gpt-4o"]
+            .into_iter()
+            .map(|model| config.resolve_model(model).unwrap())
+            .collect()
+    }
 
     /// Build a temp-file-backed Db seeded with a known set of projects/sessions.
     fn seeded_db() -> (Db, tempfile::NamedTempFile) {
@@ -701,25 +737,11 @@ mod tuishot_shots {
                 HomeShot::Empty => {
                     let tmp = tempfile::NamedTempFile::new().unwrap();
                     let db = Db::open(&tmp.path().to_path_buf()).unwrap();
-                    (
-                        HomeScreen::new(
-                            db,
-                            theme,
-                            vec!["claude-sonnet-4-20250514".to_string(), "gpt-4o".to_string()],
-                        ),
-                        Some(tmp),
-                    )
+                    (HomeScreen::new(db, theme, models()), Some(tmp))
                 }
                 _ => {
                     let (db, tmp) = seeded_db();
-                    (
-                        HomeScreen::new(
-                            db,
-                            theme,
-                            vec!["claude-sonnet-4-20250514".to_string(), "gpt-4o".to_string()],
-                        ),
-                        Some(tmp),
-                    )
+                    (HomeScreen::new(db, theme, models()), Some(tmp))
                 }
             };
             match self {

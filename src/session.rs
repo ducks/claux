@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::api::types::Message;
+use crate::config::{ModelBinding, ResolvedModel};
 use crate::db::{Db, SessionInfo};
 
 /// Get the database path.
@@ -50,6 +51,13 @@ pub fn create_session(model: &str) -> Result<(String, PathBuf)> {
     Ok((id, dummy_path))
 }
 
+pub fn create_session_with_model(resolved: &ResolvedModel) -> Result<(String, PathBuf)> {
+    let id = new_session_id();
+    let db = get_db()?;
+    db.create_session_with_binding(&id, &resolved.binding, None, None)?;
+    Ok((id.clone(), PathBuf::from(format!("sqlite://{id}"))))
+}
+
 /// Generate a readable, collision-resistant session identifier.
 pub(crate) fn new_session_id() -> String {
     format!(
@@ -71,6 +79,11 @@ pub fn save_messages(path: &std::path::Path, messages: &[Message]) -> Result<()>
     Ok(())
 }
 
+pub fn save_model_binding(path: &std::path::Path, binding: &ModelBinding) -> Result<()> {
+    let session_id = extract_session_id(path);
+    get_db()?.update_session_binding(&session_id, binding)
+}
+
 /// Load all messages from a session.
 pub fn load_session(path: &std::path::Path) -> Result<(SessionMeta, Vec<Message>)> {
     let session_id = extract_session_id(path);
@@ -87,6 +100,7 @@ pub fn load_session(path: &std::path::Path) -> Result<(SessionMeta, Vec<Message>
         id: session_info.id,
         cwd: String::new(), // Not tracked in SQLite version
         model: session_info.model,
+        model_binding: session_info.model_binding,
         created_at: session_info
             .created_at
             .parse()
@@ -154,6 +168,7 @@ pub struct SessionMeta {
     pub id: String,
     pub cwd: String,
     pub model: String,
+    pub model_binding: Option<ModelBinding>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
