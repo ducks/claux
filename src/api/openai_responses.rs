@@ -355,7 +355,12 @@ fn translate_event(event: &Value, provider: &str, model: &str) -> Vec<ApiEvent> 
                     cache_read_tokens: usage["input_tokens_details"]["cached_tokens"]
                         .as_u64()
                         .unwrap_or(0) as u32,
-                    cache_creation_tokens: 0,
+                    cache_creation_tokens: usage["input_tokens_details"]["cache_write_tokens"]
+                        .as_u64()
+                        .unwrap_or(0) as u32,
+                    provider_cost_usd: usage["cost"]
+                        .as_f64()
+                        .filter(|cost| cost.is_finite() && *cost >= 0.0),
                 }),
                 ApiEvent::Done,
             ]
@@ -468,7 +473,11 @@ mod tests {
                     "usage": {
                         "input_tokens": 12,
                         "output_tokens": 4,
-                        "input_tokens_details": {"cached_tokens": 3}
+                        "input_tokens_details": {
+                            "cached_tokens": 3,
+                            "cache_write_tokens": 2
+                        },
+                        "cost": 0.0042
                     }
                 }
             }),
@@ -481,8 +490,9 @@ mod tests {
                 input_tokens: 12,
                 output_tokens: 4,
                 cache_read_tokens: 3,
-                ..
-            })
+                cache_creation_tokens: 2,
+                provider_cost_usd: Some(cost),
+            }) if (*cost - 0.0042).abs() < f64::EPSILON
         ));
         assert!(matches!(completed[1], ApiEvent::Done));
 

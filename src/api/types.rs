@@ -53,6 +53,8 @@ pub struct Usage {
     pub output_tokens: u32,
     pub cache_read_tokens: u32,
     pub cache_creation_tokens: u32,
+    /// Exact charge reported by the provider for this API request.
+    pub provider_cost_usd: Option<f64>,
 }
 
 impl Message {

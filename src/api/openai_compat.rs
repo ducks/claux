@@ -256,6 +256,9 @@ async fn read_openai_sse(
 
     let mut input_tokens: u32 = 0;
     let mut output_tokens: u32 = 0;
+    let mut cache_read_tokens: u32 = 0;
+    let mut cache_creation_tokens: u32 = 0;
+    let mut provider_cost_usd: Option<f64> = None;
     let mut saw_finish_reason = false;
 
     loop {
@@ -285,8 +288,9 @@ async fn read_openai_sse(
                     .send(ApiEvent::Usage(Usage {
                         input_tokens,
                         output_tokens,
-                        cache_read_tokens: 0,
-                        cache_creation_tokens: 0,
+                        cache_read_tokens,
+                        cache_creation_tokens,
+                        provider_cost_usd,
                     }))
                     .await;
                 let _ = tx.send(ApiEvent::Done).await;
@@ -310,6 +314,17 @@ async fn read_openai_sse(
                 output_tokens = usage["completion_tokens"]
                     .as_u64()
                     .unwrap_or(output_tokens as u64) as u32;
+                cache_read_tokens = usage["prompt_tokens_details"]["cached_tokens"]
+                    .as_u64()
+                    .unwrap_or(cache_read_tokens as u64) as u32;
+                cache_creation_tokens = usage["prompt_tokens_details"]["cache_write_tokens"]
+                    .as_u64()
+                    .unwrap_or(cache_creation_tokens as u64)
+                    as u32;
+                provider_cost_usd = usage["cost"]
+                    .as_f64()
+                    .filter(|cost| cost.is_finite() && *cost >= 0.0)
+                    .or(provider_cost_usd);
             }
 
             let Some(choices) = event.get("choices").and_then(|c| c.as_array()) else {
@@ -407,8 +422,9 @@ async fn read_openai_sse(
         .send(ApiEvent::Usage(Usage {
             input_tokens,
             output_tokens,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
+            cache_read_tokens,
+            cache_creation_tokens,
+            provider_cost_usd,
         }))
         .await;
     let _ = tx.send(ApiEvent::Done).await;
@@ -459,6 +475,40 @@ mod tests {
 
         assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "complete"));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Usage(_))));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
+    }
+
+    #[tokio::test]
+    async fn captures_provider_reported_cost_and_cache_usage() {
+        let response = crate::test_support::sse_response(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"complete\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":194,\"completion_tokens\":2,\"cost\":0.00095,\"prompt_tokens_details\":{\"cached_tokens\":40,\"cache_write_tokens\":10}}}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_openai_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            "openrouter",
+            "deepseek/deepseek-v4-flash",
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "complete"));
+        assert!(matches!(
+            rx.recv().await,
+            Some(ApiEvent::Usage(Usage {
+                input_tokens: 194,
+                output_tokens: 2,
+                cache_read_tokens: 40,
+                cache_creation_tokens: 10,
+                provider_cost_usd: Some(cost),
+            })) if (cost - 0.00095).abs() < f64::EPSILON
+        ));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
     }
 
