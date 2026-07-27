@@ -72,10 +72,6 @@ impl Provider for OpenAIResponsesProvider {
         &self.provider_name
     }
 
-    fn model(&self) -> &str {
-        &self.model
-    }
-
     fn set_model(&mut self, model: &str) {
         self.model = model.to_string();
         self.reset_session();

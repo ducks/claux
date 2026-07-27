@@ -3,7 +3,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::api::{ApiEvent, ContentBlock, Message, Provider, ProviderStream};
+#[cfg(test)]
+use crate::api::ProviderStream;
+use crate::api::{ApiEvent, ContentBlock, Message, Provider};
 use crate::checkpoint::{PendingCheckpoint, TurnCheckpoint};
 use crate::compact::{self};
 use crate::config::{HookTrigger, ModelBinding};
@@ -49,12 +51,9 @@ pub enum StreamEvent {
     SteeringSent(String),
     ToolStart {
         name: String,
-        id: String,
         summary: String,
     },
     ToolResult {
-        name: String,
-        content: String,
         is_error: bool,
     },
     /// Permission prompt — UI must respond via the oneshot sender.
@@ -281,6 +280,7 @@ impl Engine {
         &self.messages
     }
 
+    #[cfg(test)]
     pub fn messages_mut(&mut self) -> &mut Vec<Message> {
         &mut self.messages
     }
@@ -332,72 +332,6 @@ impl Engine {
 
     pub fn message_count(&self) -> usize {
         self.messages.len()
-    }
-
-    /// Get tool definitions for the API.
-    pub fn tool_definitions(&self) -> Vec<crate::api::ToolDefinition> {
-        self.tools.definitions()
-    }
-
-    /// Start a streaming API call. Returns the event receiver.
-    pub async fn start_stream(
-        &self,
-        tool_defs: &[crate::api::ToolDefinition],
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<ProviderStream> {
-        self.provider
-            .stream(
-                &self.messages,
-                &self.system_prompt,
-                tool_defs,
-                self.max_tokens,
-                cancel,
-            )
-            .await
-    }
-
-    /// Check permission for a tool.
-    pub fn check_permission(
-        &self,
-        tool_name: &str,
-        input: &serde_json::Value,
-        is_read_only: bool,
-    ) -> PermissionResult {
-        self.permissions.check(tool_name, input, is_read_only)
-    }
-
-    /// Get a human-readable summary of a tool invocation.
-    pub fn summarize_tool(&self, name: &str, input: &serde_json::Value) -> String {
-        self.tools.summarize(name, input)
-    }
-
-    /// Check if a tool is read-only.
-    pub fn is_tool_read_only(&self, name: &str) -> bool {
-        self.tools.is_read_only(name)
-    }
-
-    /// Execute a tool by name. Pass `CancellationToken::new()` (non-cancellable)
-    /// if the caller doesn't need to interrupt; pass a real token to support
-    /// mid-execution cancellation. Failures (unknown tool, bad params, tool
-    /// errors) come back as error ToolOutputs, never as Err — see
-    /// ToolRegistry::execute.
-    pub async fn execute_tool(
-        &self,
-        name: &str,
-        input: serde_json::Value,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> crate::tools::ToolOutput {
-        self.tools.execute(name, input, cancel).await
-    }
-
-    /// Record a tool as always-allowed for the session.
-    pub fn always_allow_tool(&mut self, name: &str) {
-        self.permissions.always_allow(name);
-    }
-
-    /// Record a bash command as always-allowed for the session.
-    pub fn always_allow_command(&mut self, cmd: &str) {
-        self.permissions.always_allow_command(cmd);
     }
 
     /// Check if auto-compact is needed and perform it if so.
@@ -697,7 +631,6 @@ impl Engine {
                         let _ = tx
                             .send(StreamEvent::ToolStart {
                                 name: name.clone(),
-                                id: id.clone(),
                                 summary,
                             })
                             .await;
@@ -758,15 +691,9 @@ impl Engine {
             if stream_interrupted {
                 if !tool_uses.is_empty() {
                     let mut result_blocks = Vec::with_capacity(tool_uses.len());
-                    for (id, name, _) in &tool_uses {
+                    for (id, _, _) in &tool_uses {
                         self.fire_hook(&HookTrigger::OnToolComplete).await;
-                        let _ = tx
-                            .send(StreamEvent::ToolResult {
-                                name: name.clone(),
-                                content: Self::INTERRUPTED_BY_USER.to_string(),
-                                is_error: true,
-                            })
-                            .await;
+                        let _ = tx.send(StreamEvent::ToolResult { is_error: true }).await;
                         result_blocks.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content: Self::INTERRUPTED_BY_USER.to_string(),
@@ -933,8 +860,6 @@ impl Engine {
             self.fire_hook(&HookTrigger::OnToolComplete).await;
             let _ = tx
                 .send(StreamEvent::ToolResult {
-                    name: name.clone(),
-                    content: content.clone(),
                     is_error: output.is_error,
                 })
                 .await;
@@ -1033,10 +958,6 @@ mod tests {
             "mock"
         }
 
-        fn model(&self) -> &str {
-            "test-model"
-        }
-
         fn set_model(&mut self, _model: &str) {
             // No-op for mock
         }
@@ -1062,10 +983,6 @@ mod tests {
     impl Provider for TruncatedProvider {
         fn name(&self) -> &str {
             "truncated"
-        }
-
-        fn model(&self) -> &str {
-            "test-model"
         }
 
         fn set_model(&mut self, _model: &str) {}
@@ -1117,10 +1034,6 @@ mod tests {
     impl Provider for ResetTrackingProvider {
         fn name(&self) -> &str {
             "reset-tracking"
-        }
-
-        fn model(&self) -> &str {
-            "test-model"
         }
 
         fn set_model(&mut self, _model: &str) {}

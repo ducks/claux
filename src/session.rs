@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::api::types::Message;
 use crate::config::{ModelBinding, ResolvedModel};
-use crate::db::{Db, SessionInfo};
+use crate::db::Db;
 
 /// Get the database path.
 pub(crate) fn db_path() -> Result<PathBuf> {
@@ -38,17 +38,6 @@ fn prepare_storage_dir(dir: &Path) -> Result<()> {
 fn get_db() -> Result<Db> {
     let path = db_path()?;
     Db::open(&path).context("Failed to open session database")
-}
-
-/// Create a new session and return its ID and a dummy path for compatibility.
-pub fn create_session(model: &str) -> Result<(String, PathBuf)> {
-    let id = new_session_id();
-    let db = get_db()?;
-    db.create_session(&id, model, None, None)?;
-
-    // Return a dummy path for API compatibility
-    let dummy_path = PathBuf::from(format!("sqlite://{id}"));
-    Ok((id, dummy_path))
 }
 
 pub fn create_session_with_model(resolved: &ResolvedModel) -> Result<(String, PathBuf)> {
@@ -101,14 +90,6 @@ pub fn load_session(path: &std::path::Path) -> Result<(SessionMeta, Vec<Message>
         cwd: String::new(), // Not tracked in SQLite version
         model: session_info.model,
         model_binding: session_info.model_binding,
-        created_at: session_info
-            .created_at
-            .parse()
-            .unwrap_or_else(|_| chrono::Utc::now()),
-        updated_at: session_info
-            .last_active
-            .parse()
-            .unwrap_or_else(|_| chrono::Utc::now()),
     };
 
     Ok((meta, messages))
@@ -145,23 +126,6 @@ fn extract_session_id(path: &std::path::Path) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
-/// Update session statistics (message count, token count).
-pub fn update_session_stats(
-    session_id: &str,
-    message_count: usize,
-    token_count: usize,
-) -> Result<()> {
-    let db = get_db()?;
-    db.update_session_stats(session_id, message_count, token_count)?;
-    Ok(())
-}
-
-/// Search sessions by content.
-pub fn search_sessions(query: &str) -> Result<Vec<SessionInfo>> {
-    let db = get_db()?;
-    db.search_sessions(query)
-}
-
 /// Session metadata (kept for API compatibility).
 #[derive(Debug, Clone)]
 pub struct SessionMeta {
@@ -169,8 +133,6 @@ pub struct SessionMeta {
     pub cwd: String,
     pub model: String,
     pub model_binding: Option<ModelBinding>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Make a loaded history API-valid: every tool_use must be followed by a

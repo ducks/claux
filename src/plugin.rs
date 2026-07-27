@@ -43,10 +43,6 @@ impl CommandPlugin {
         }
     }
 
-    pub fn trigger(&self) -> &HookTrigger {
-        &self.trigger
-    }
-
     #[cfg(test)]
     fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = timeout;

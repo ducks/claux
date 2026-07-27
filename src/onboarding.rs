@@ -78,6 +78,7 @@ fn init_config_at(
     Ok(path.to_path_buf())
 }
 
+#[cfg(test)]
 fn config_template(provider: ConfigProvider, model: Option<&str>) -> String {
     add_model_profile("", provider, model).expect("built-in configuration must be valid")
 }

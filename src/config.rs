@@ -554,13 +554,9 @@ impl Config {
         })
     }
 
-    /// Returns true when using the native Anthropic API (not an OpenAI-compatible endpoint).
-    pub fn is_anthropic(&self) -> bool {
-        self.openai_base_url.is_none()
-    }
-
     /// Whether the configured OpenAI-compatible endpoint is a hosted
     /// provider that cannot be used anonymously.
+    #[cfg(test)]
     pub fn openai_requires_api_key(&self) -> bool {
         self.openai_provider_name.as_deref().is_some_and(|name| {
             matches!(name.to_ascii_lowercase().as_str(), "openai" | "openrouter")
@@ -592,82 +588,6 @@ impl Config {
         config.project_trust = Some(trust);
 
         Ok(config)
-    }
-
-    /// Resolve the Anthropic API key. Priority:
-    /// 1. Direct API key in config
-    /// 2. API key from command
-    /// 3. ANTHROPIC_API_KEY env var
-    pub fn resolve_auth(&self) -> Option<AnthropicApiKey> {
-        // Direct value
-        if let Some(ref key) = self.api_key {
-            if !key.is_empty() {
-                return Some(AnthropicApiKey::new(key.clone()));
-            }
-        }
-
-        // Command
-        if let Some(ref cmd) = self.api_key_cmd {
-            if let Ok(output) = std::process::Command::new("sh").arg("-c").arg(cmd).output() {
-                if output.status.success() {
-                    let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !key.is_empty() {
-                        return Some(AnthropicApiKey::new(key));
-                    }
-                }
-            }
-        }
-
-        // Environment variable
-        if let Ok(key) = std::env::var(&self.api_key_env) {
-            if !key.is_empty() {
-                return Some(AnthropicApiKey::new(key));
-            }
-        }
-
-        None
-    }
-
-    /// Resolve the OpenAI API key: direct value, command, then environment.
-    pub fn resolve_openai_key(&self) -> Option<String> {
-        if let Some(ref key) = self.openai_api_key {
-            if !key.is_empty() {
-                return Some(key.clone());
-            }
-        }
-
-        if let Some(ref cmd) = self.openai_api_key_cmd {
-            match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
-                Ok(output) => {
-                    if output.status.success() {
-                        let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        if !key.is_empty() {
-                            tracing::debug!("openai_api_key_cmd succeeded, key len={}", key.len());
-                            return Some(key);
-                        }
-                        tracing::warn!("openai_api_key_cmd returned empty output");
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        tracing::warn!(
-                            "openai_api_key_cmd failed ({}): {}",
-                            output.status,
-                            stderr.trim()
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("openai_api_key_cmd exec error: {}", e);
-                }
-            }
-        }
-
-        if let Ok(key) = std::env::var(&self.openai_api_key_env) {
-            if !key.is_empty() {
-                return Some(key);
-            }
-        }
-
-        None
     }
 
     pub fn global_path() -> PathBuf {

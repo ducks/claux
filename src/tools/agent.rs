@@ -39,8 +39,8 @@ impl AgentTool {
 #[derive(Deserialize)]
 struct Params {
     prompt: String,
-    #[serde(default)]
-    description: Option<String>,
+    #[serde(default, rename = "description")]
+    _description: Option<String>,
 }
 
 #[async_trait]
@@ -184,9 +184,6 @@ mod tests {
     impl Provider for PathWriteProvider {
         fn name(&self) -> &str {
             "path-write"
-        }
-        fn model(&self) -> &str {
-            "test"
         }
         fn set_model(&mut self, _model: &str) {}
         async fn stream(

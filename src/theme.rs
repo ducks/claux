@@ -326,11 +326,6 @@ impl Theme {
     }
 }
 
-/// Get the default theme.
-pub fn default_theme() -> Theme {
-    Theme::dark()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -139,6 +139,7 @@ impl Db {
     }
 
     /// Create a new session.
+    #[cfg(test)]
     pub fn create_session(
         &self,
         id: &str,
@@ -184,8 +185,7 @@ impl Db {
     pub fn get_session(&self, id: &str) -> Result<Option<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, model, name, project, created_at, last_active, message_count, token_count,
-                    model_profile, model_binding
+            "SELECT id, model, name, project, message_count, model_binding
              FROM sessions WHERE id = ?1",
         )?;
 
@@ -197,12 +197,8 @@ impl Db {
                 project: row
                     .get::<_, Option<String>>(3)?
                     .unwrap_or_else(|| "uncategorized".to_string()),
-                created_at: row.get(4)?,
-                last_active: row.get(5)?,
-                message_count: row.get(6)?,
-                token_count: row.get(7)?,
-                model_profile: row.get(8)?,
-                model_binding: parse_model_binding(row.get(9)?),
+                message_count: row.get(4)?,
+                model_binding: parse_model_binding(row.get(5)?),
             })
         });
 
@@ -217,8 +213,7 @@ impl Db {
     pub fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, model, name, project, created_at, last_active, message_count, token_count,
-                    model_profile, model_binding
+            "SELECT id, model, name, project, message_count, model_binding
              FROM sessions ORDER BY last_active DESC",
         )?;
 
@@ -230,12 +225,8 @@ impl Db {
                 project: row
                     .get::<_, Option<String>>(3)?
                     .unwrap_or_else(|| "uncategorized".to_string()),
-                created_at: row.get(4)?,
-                last_active: row.get(5)?,
-                message_count: row.get(6)?,
-                token_count: row.get(7)?,
-                model_profile: row.get(8)?,
-                model_binding: parse_model_binding(row.get(9)?),
+                message_count: row.get(4)?,
+                model_binding: parse_model_binding(row.get(5)?),
             })
         })?;
 
@@ -243,6 +234,7 @@ impl Db {
     }
 
     /// Append a message to a session.
+    #[cfg(test)]
     pub fn append_message(&self, session_id: &str, message: &Message) -> Result<()> {
         let conn = self.conn.lock().unwrap();
 
@@ -334,81 +326,11 @@ impl Db {
         Ok(messages.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Get the last N messages for a session.
-    pub fn get_last_messages(&self, session_id: &str, limit: usize) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
-        let limit_str = limit.to_string();
-        let mut stmt = conn.prepare(
-            "SELECT role, content FROM messages WHERE session_id = ?1
-             ORDER BY id DESC LIMIT ?2",
-        )?;
-
-        let messages = stmt.query_map((session_id, limit_str.as_str()), |row| {
-            let role: String = row.get(0)?;
-            let content_json: String = row.get(1)?;
-            let content: crate::api::types::MessageContent =
-                serde_json::from_str(&content_json).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            Ok(Message { role, content })
-        })?;
-
-        let mut msgs: Vec<Message> = messages.collect::<Result<Vec<_>, _>>()?;
-        msgs.reverse(); // Reverse to get chronological order
-        Ok(msgs)
-    }
-
-    /// Update message count and token count for a session.
-    pub fn update_session_stats(
-        &self,
-        session_id: &str,
-        message_count: usize,
-        token_count: usize,
-    ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE sessions SET message_count = ?1, token_count = ?2, last_active = CURRENT_TIMESTAMP 
-             WHERE id = ?3",
-            (message_count as i64, token_count as i64, session_id),
-        )?;
-        Ok(())
-    }
-
     /// Delete a session and all its messages.
     pub fn delete_session(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         Ok(())
-    }
-
-    /// Search sessions by content.
-    pub fn search_sessions(&self, query: &str) -> Result<Vec<SessionInfo>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT s.id, s.model, s.name, s.project, s.created_at, s.last_active,
-                    s.message_count, s.token_count, s.model_profile, s.model_binding
-             FROM sessions s
-             JOIN messages m ON s.id = m.session_id
-             WHERE m.content LIKE ?1
-             ORDER BY s.last_active DESC",
-        )?;
-
-        let sessions = stmt.query_map([format!("%{query}%")], |row| {
-            Ok(SessionInfo {
-                id: row.get(0)?,
-                model: row.get(1)?,
-                name: row.get(2)?,
-                project: row
-                    .get::<_, Option<String>>(3)?
-                    .unwrap_or_else(|| "uncategorized".to_string()),
-                created_at: row.get(4)?,
-                last_active: row.get(5)?,
-                message_count: row.get(6)?,
-                token_count: row.get(7)?,
-                model_profile: row.get(8)?,
-                model_binding: parse_model_binding(row.get(9)?),
-            })
-        })?;
-
-        Ok(sessions.collect::<Result<Vec<_>, _>>()?)
     }
 }
 
@@ -419,11 +341,7 @@ pub struct SessionInfo {
     pub model: String,
     pub name: Option<String>,
     pub project: String,
-    pub created_at: String,
-    pub last_active: String,
     pub message_count: i64,
-    pub token_count: i64,
-    pub model_profile: Option<String>,
     pub model_binding: Option<ModelBinding>,
 }
 
@@ -497,7 +415,10 @@ mod tests {
             .unwrap();
 
         let created = db.get_session("bound").unwrap().unwrap();
-        assert_eq!(created.model_profile.as_deref(), Some("router-model"));
+        assert_eq!(
+            created.model_binding.as_ref().unwrap().profile,
+            "router-model"
+        );
         assert_eq!(created.model_binding.unwrap(), binding("model-a"));
 
         let mut updated = binding("model-b");
