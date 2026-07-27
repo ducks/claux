@@ -57,17 +57,17 @@ pub enum CliCommand {
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Create a secure starter configuration
+    /// Add a secure provider and model profile
     Init {
-        /// Provider template to create
+        /// Provider profile to add
         #[arg(long, value_enum, default_value_t = ConfigProvider::Anthropic)]
         provider: ConfigProvider,
 
-        /// Model identifier to write into the template
+        /// Model identifier for the new profile
         #[arg(long)]
         model: Option<String>,
 
-        /// Replace an existing configuration
+        /// Replace the existing configuration instead of adding to it
         #[arg(long)]
         force: bool,
     },

@@ -330,6 +330,9 @@ pub async fn run(
                             }
                             // Commands like /compact rewrite engine history
                             let _ = db.replace_messages(session_id, engine.messages());
+                            if let Some(binding) = engine.model_binding() {
+                                let _ = db.update_session_binding(session_id, binding);
+                            }
                         }
                     },
                 }

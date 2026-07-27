@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::api::Message;
+use crate::config::ModelBinding;
 
 /// Database wrapper with connection pooling.
 pub struct Db {
@@ -66,7 +67,9 @@ impl Db {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 last_active DATETIME DEFAULT CURRENT_TIMESTAMP,
                 message_count INTEGER DEFAULT 0,
-                token_count INTEGER DEFAULT 0
+                token_count INTEGER DEFAULT 0,
+                model_profile TEXT,
+                model_binding TEXT
             )",
             [],
         )?;
@@ -84,6 +87,16 @@ impl Db {
             Ok(_) => tracing::info!("Migration: added 'project' column to sessions"),
             Err(e) if e.to_string().contains("duplicate column") => {}
             Err(e) => tracing::warn!("Migration failed (project column): {e}"),
+        }
+        match conn.execute("ALTER TABLE sessions ADD COLUMN model_profile TEXT", []) {
+            Ok(_) => tracing::info!("Migration: added 'model_profile' column to sessions"),
+            Err(e) if e.to_string().contains("duplicate column") => {}
+            Err(e) => tracing::warn!("Migration failed (model_profile column): {e}"),
+        }
+        match conn.execute("ALTER TABLE sessions ADD COLUMN model_binding TEXT", []) {
+            Ok(_) => tracing::info!("Migration: added 'model_binding' column to sessions"),
+            Err(e) if e.to_string().contains("duplicate column") => {}
+            Err(e) => tracing::warn!("Migration failed (model_binding column): {e}"),
         }
 
         conn.execute(
@@ -141,11 +154,38 @@ impl Db {
         Ok(())
     }
 
+    /// Create a session with an immutable, credential-free provider/model snapshot.
+    pub fn create_session_with_binding(
+        &self,
+        id: &str,
+        binding: &ModelBinding,
+        name: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<()> {
+        let binding_json = serde_json::to_string(binding)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (id, model, model_profile, model_binding, name, project, created_at, last_active)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (
+                id,
+                &binding.model,
+                &binding.profile,
+                binding_json,
+                name.unwrap_or(""),
+                project.unwrap_or("uncategorized"),
+            ),
+        )?;
+        Ok(())
+    }
+
     /// Get a session by ID.
     pub fn get_session(&self, id: &str) -> Result<Option<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, model, name, project, created_at, last_active, message_count, token_count
+            "SELECT id, model, name, project, created_at, last_active, message_count, token_count,
+                    model_profile, model_binding
              FROM sessions WHERE id = ?1",
         )?;
 
@@ -161,6 +201,8 @@ impl Db {
                 last_active: row.get(5)?,
                 message_count: row.get(6)?,
                 token_count: row.get(7)?,
+                model_profile: row.get(8)?,
+                model_binding: parse_model_binding(row.get(9)?),
             })
         });
 
@@ -175,7 +217,8 @@ impl Db {
     pub fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, model, name, project, created_at, last_active, message_count, token_count
+            "SELECT id, model, name, project, created_at, last_active, message_count, token_count,
+                    model_profile, model_binding
              FROM sessions ORDER BY last_active DESC",
         )?;
 
@@ -191,6 +234,8 @@ impl Db {
                 last_active: row.get(5)?,
                 message_count: row.get(6)?,
                 token_count: row.get(7)?,
+                model_profile: row.get(8)?,
+                model_binding: parse_model_binding(row.get(9)?),
             })
         })?;
 
@@ -251,6 +296,20 @@ impl Db {
         )?;
 
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Persist a model change while retaining the session's provider transport.
+    pub fn update_session_binding(&self, session_id: &str, binding: &ModelBinding) -> Result<()> {
+        let binding_json = serde_json::to_string(binding)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions
+             SET model = ?1, model_profile = ?2, model_binding = ?3,
+                 last_active = CURRENT_TIMESTAMP
+             WHERE id = ?4",
+            (&binding.model, &binding.profile, binding_json, session_id),
+        )?;
         Ok(())
     }
 
@@ -324,11 +383,12 @@ impl Db {
     pub fn search_sessions(&self, query: &str) -> Result<Vec<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT s.id, s.model, s.name, s.project, s.created_at, s.last_active, s.message_count, s.token_count
+            "SELECT DISTINCT s.id, s.model, s.name, s.project, s.created_at, s.last_active,
+                    s.message_count, s.token_count, s.model_profile, s.model_binding
              FROM sessions s
              JOIN messages m ON s.id = m.session_id
              WHERE m.content LIKE ?1
-             ORDER BY s.last_active DESC"
+             ORDER BY s.last_active DESC",
         )?;
 
         let sessions = stmt.query_map([format!("%{query}%")], |row| {
@@ -343,6 +403,8 @@ impl Db {
                 last_active: row.get(5)?,
                 message_count: row.get(6)?,
                 token_count: row.get(7)?,
+                model_profile: row.get(8)?,
+                model_binding: parse_model_binding(row.get(9)?),
             })
         })?;
 
@@ -361,12 +423,40 @@ pub struct SessionInfo {
     pub last_active: String,
     pub message_count: i64,
     pub token_count: i64,
+    pub model_profile: Option<String>,
+    pub model_binding: Option<ModelBinding>,
+}
+
+fn parse_model_binding(json: Option<String>) -> Option<ModelBinding> {
+    json.and_then(|json| match serde_json::from_str(&json) {
+        Ok(binding) => Some(binding),
+        Err(error) => {
+            tracing::warn!("ignoring invalid saved model binding: {error}");
+            None
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{OpenAIProtocol, ProviderKind};
     use tempfile::TempDir;
+
+    fn binding(model: &str) -> ModelBinding {
+        ModelBinding {
+            profile: "router-model".to_string(),
+            display_name: "Router Model".to_string(),
+            provider: "openrouter".to_string(),
+            provider_kind: ProviderKind::Openai,
+            provider_name: "openrouter".to_string(),
+            model: model.to_string(),
+            base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            protocol: OpenAIProtocol::ChatCompletions,
+            api_key_env: "OPENROUTER_API_KEY".to_string(),
+            reasoning_effort: None,
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -397,6 +487,25 @@ mod tests {
         let s = session.unwrap();
         assert_eq!(s.id, "test-123");
         assert_eq!(s.model, "claude-sonnet");
+    }
+
+    #[test]
+    fn model_binding_roundtrips_and_can_be_updated() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Db::open(&temp_dir.path().join("test.db")).unwrap();
+        db.create_session_with_binding("bound", &binding("model-a"), None, None)
+            .unwrap();
+
+        let created = db.get_session("bound").unwrap().unwrap();
+        assert_eq!(created.model_profile.as_deref(), Some("router-model"));
+        assert_eq!(created.model_binding.unwrap(), binding("model-a"));
+
+        let mut updated = binding("model-b");
+        updated.profile = "adhoc:model-b".to_string();
+        db.update_session_binding("bound", &updated).unwrap();
+        let loaded = db.get_session("bound").unwrap().unwrap();
+        assert_eq!(loaded.model, "model-b");
+        assert_eq!(loaded.model_binding.unwrap(), updated);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::api::{ApiEvent, ContentBlock, Message, Provider, ProviderStream};
 use crate::checkpoint::{PendingCheckpoint, TurnCheckpoint};
 use crate::compact::{self};
-use crate::config::HookTrigger;
+use crate::config::{HookTrigger, ModelBinding};
 use crate::cost::CostTracker;
 use crate::permissions::{PermissionChecker, PermissionResponse, PermissionResult};
 use crate::plugin::PluginRegistry;
@@ -27,6 +27,7 @@ pub struct Engine {
     messages: Vec<Message>,
     system_prompt: String,
     model: String,
+    model_binding: Option<ModelBinding>,
     max_tokens: u32,
     auto_compact_threshold: f64,
     steering: SteeringQueue,
@@ -93,6 +94,7 @@ impl Engine {
             messages: Vec::new(),
             system_prompt: String::new(),
             model: model.to_string(),
+            model_binding: None,
             max_tokens: 16384,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
@@ -119,6 +121,7 @@ impl Engine {
             messages: vec![],
             system_prompt: String::new(),
             model: "test".to_string(),
+            model_binding: None,
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
             steering,
@@ -302,9 +305,23 @@ impl Engine {
 
     pub fn set_model(&mut self, model: &str) {
         self.model = model.to_string();
+        if let Some(binding) = &mut self.model_binding {
+            binding.model = model.to_string();
+            binding.display_name = model.to_string();
+            binding.profile = format!("adhoc:{model}");
+            binding.reasoning_effort = None;
+        }
         self.provider.set_model(model);
         self.tools.set_model(model);
         self.cost = CostTracker::new(model);
+    }
+
+    pub fn set_model_binding(&mut self, binding: ModelBinding) {
+        self.model_binding = Some(binding);
+    }
+
+    pub fn model_binding(&self) -> Option<&ModelBinding> {
+        self.model_binding.as_ref()
     }
 
     pub fn set_theme(&mut self, _theme: crate::theme::ThemeName) {
@@ -1205,6 +1222,7 @@ mod tests {
             messages: vec![],
             system_prompt: String::new(),
             model: "test".to_string(),
+            model_binding: None,
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
@@ -1280,6 +1298,7 @@ mod tests {
             messages: vec![],
             system_prompt: String::new(),
             model: "test".to_string(),
+            model_binding: None,
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
@@ -1723,6 +1742,7 @@ mod tests {
             messages: vec![],
             system_prompt: String::new(),
             model: "test".to_string(),
+            model_binding: None,
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
@@ -1783,6 +1803,7 @@ mod tests {
             messages: vec![],
             system_prompt: String::new(),
             model: "test".to_string(),
+            model_binding: None,
             max_tokens: 1000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),

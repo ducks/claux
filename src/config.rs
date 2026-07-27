@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::cost::ModelPricing;
@@ -23,12 +24,114 @@ impl AnthropicApiKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenAIProtocol {
     #[default]
     ChatCompletions,
     Responses,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    Anthropic,
+    Openai,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    #[serde(rename = "type")]
+    pub kind: ProviderKind,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub protocol: OpenAIProtocol,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub api_key_cmd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProfile {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+}
+
+/// Credential-free provider/model identity persisted with each session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelBinding {
+    pub profile: String,
+    pub display_name: String,
+    pub provider: String,
+    pub provider_kind: ProviderKind,
+    pub provider_name: String,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub protocol: OpenAIProtocol,
+    pub api_key_env: String,
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedModel {
+    pub binding: ModelBinding,
+    pub api_key: Option<String>,
+    pub api_key_cmd: Option<String>,
+}
+
+impl ResolvedModel {
+    pub fn resolve_api_key(&self) -> Option<String> {
+        if let Some(key) = self.api_key.as_deref().filter(|key| !key.is_empty()) {
+            return Some(key.to_string());
+        }
+        if let Some(command) = self.api_key_cmd.as_deref() {
+            match std::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !key.is_empty() {
+                        return Some(key);
+                    }
+                }
+                Ok(output) => tracing::warn!(
+                    "credential command failed ({}): {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+                Err(error) => tracing::warn!("credential command failed to start: {error}"),
+            }
+        }
+        std::env::var(&self.binding.api_key_env)
+            .ok()
+            .filter(|key| !key.is_empty())
+    }
+
+    pub fn requires_api_key(&self) -> bool {
+        match self.binding.provider_kind {
+            ProviderKind::Anthropic => true,
+            ProviderKind::Openai => {
+                matches!(
+                    self.binding.provider_name.to_ascii_lowercase().as_str(),
+                    "openai" | "openrouter"
+                ) || self.binding.base_url.as_deref().is_some_and(|url| {
+                    url.contains("api.openai.com") || url.contains("openrouter.ai")
+                })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +142,18 @@ pub struct Config {
     /// Additional model IDs offered when creating a TUI session.
     #[serde(default)]
     pub models: Vec<String>,
+
+    /// Named providers used by model profiles.
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
+
+    /// Named choices displayed by the TUI new-session picker.
+    #[serde(default)]
+    pub model_profiles: HashMap<String, ModelProfile>,
+
+    /// Default named profile for new sessions.
+    #[serde(default)]
+    pub default_profile: Option<String>,
 
     #[serde(default)]
     pub api_key: Option<String>,
@@ -234,6 +349,9 @@ impl Default for Config {
         Self {
             model: default_model(),
             models: Vec::new(),
+            providers: HashMap::new(),
+            model_profiles: HashMap::new(),
+            default_profile: None,
             api_key: None,
             api_key_env: default_api_key_env(),
             api_key_cmd: None,
@@ -267,6 +385,173 @@ impl Config {
             }
         }
         models
+    }
+
+    /// Resolve every selectable model, putting the configured default first.
+    pub fn selectable_models(&self) -> Result<Vec<ResolvedModel>> {
+        if self.model_profiles.is_empty() {
+            return self
+                .available_models()
+                .into_iter()
+                .map(|model| self.resolve_legacy_model(&model))
+                .collect();
+        }
+
+        let mut names = self.model_profiles.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        if let Some(default) = self.default_profile.as_deref() {
+            if !self.model_profiles.contains_key(default) {
+                anyhow::bail!("default_profile '{default}' is not defined in model_profiles");
+            }
+            names.retain(|name| name != default);
+            names.insert(0, default.to_string());
+        }
+        names
+            .into_iter()
+            .map(|name| self.resolve_profile(&name))
+            .collect()
+    }
+
+    pub fn default_resolved_model(&self) -> Result<ResolvedModel> {
+        self.selectable_models()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no models configured"))
+    }
+
+    /// Resolve a profile name first, then an exact configured model ID.
+    pub fn resolve_model(&self, name_or_model: &str) -> Result<ResolvedModel> {
+        if self.model_profiles.contains_key(name_or_model) {
+            return self.resolve_profile(name_or_model);
+        }
+        let matches = self
+            .selectable_models()?
+            .into_iter()
+            .filter(|resolved| resolved.binding.model == name_or_model)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [resolved] => Ok(resolved.clone()),
+            [] if self.model_profiles.is_empty() => self.resolve_legacy_model(name_or_model),
+            [] => anyhow::bail!(
+                "model/profile '{name_or_model}' is not configured; choose one of: {}",
+                self.model_profiles
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            _ => anyhow::bail!(
+                "model ID '{name_or_model}' is configured by multiple profiles; use a profile name"
+            ),
+        }
+    }
+
+    pub fn resolve_binding(&self, binding: &ModelBinding) -> Result<ResolvedModel> {
+        let provider = self
+            .providers
+            .get(&binding.provider)
+            .filter(|provider| provider.kind == binding.provider_kind);
+        let (api_key, api_key_cmd) = provider
+            .map(|provider| (provider.api_key.clone(), provider.api_key_cmd.clone()))
+            .unwrap_or((None, None));
+        Ok(ResolvedModel {
+            binding: binding.clone(),
+            api_key,
+            api_key_cmd,
+        })
+    }
+
+    fn resolve_profile(&self, name: &str) -> Result<ResolvedModel> {
+        let profile = self
+            .model_profiles
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("model profile '{name}' is not configured"))?;
+        let provider = self.providers.get(&profile.provider).ok_or_else(|| {
+            anyhow::anyhow!(
+                "model profile '{name}' references missing provider '{}'",
+                profile.provider
+            )
+        })?;
+        let default_env = match provider.kind {
+            ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+            ProviderKind::Openai => "OPENAI_API_KEY",
+        };
+        let base_url = match provider.kind {
+            ProviderKind::Anthropic => None,
+            ProviderKind::Openai => Some(provider.base_url.clone().ok_or_else(|| {
+                anyhow::anyhow!("provider '{}' is missing base_url", profile.provider)
+            })?),
+        };
+        Ok(ResolvedModel {
+            binding: ModelBinding {
+                profile: name.to_string(),
+                display_name: profile
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| profile.model.clone()),
+                provider: profile.provider.clone(),
+                provider_kind: provider.kind,
+                provider_name: provider
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| profile.provider.clone()),
+                model: profile.model.clone(),
+                base_url,
+                protocol: provider.protocol,
+                api_key_env: provider
+                    .api_key_env
+                    .clone()
+                    .unwrap_or_else(|| default_env.to_string()),
+                reasoning_effort: profile.reasoning_effort.clone(),
+            },
+            api_key: provider.api_key.clone(),
+            api_key_cmd: provider.api_key_cmd.clone(),
+        })
+    }
+
+    fn resolve_legacy_model(&self, model: &str) -> Result<ResolvedModel> {
+        let (provider_kind, provider, provider_name, base_url, protocol, key_env, key, key_cmd) =
+            if let Some(base_url) = self.openai_base_url.clone() {
+                (
+                    ProviderKind::Openai,
+                    "legacy".to_string(),
+                    self.openai_provider_name
+                        .clone()
+                        .unwrap_or_else(|| "openai".to_string()),
+                    Some(base_url),
+                    self.openai_protocol,
+                    self.openai_api_key_env.clone(),
+                    self.openai_api_key.clone(),
+                    self.openai_api_key_cmd.clone(),
+                )
+            } else {
+                (
+                    ProviderKind::Anthropic,
+                    "legacy".to_string(),
+                    "anthropic".to_string(),
+                    None,
+                    OpenAIProtocol::ChatCompletions,
+                    self.api_key_env.clone(),
+                    self.api_key.clone(),
+                    self.api_key_cmd.clone(),
+                )
+            };
+        Ok(ResolvedModel {
+            binding: ModelBinding {
+                profile: format!("legacy:{model}"),
+                display_name: model.to_string(),
+                provider,
+                provider_kind,
+                provider_name,
+                model: model.to_string(),
+                base_url,
+                protocol,
+                api_key_env: key_env,
+                reasoning_effort: self.openai_reasoning_effort.clone(),
+            },
+            api_key: key,
+            api_key_cmd: key_cmd,
+        })
     }
 
     /// Returns true when using the native Anthropic API (not an OpenAI-compatible endpoint).
@@ -395,7 +680,25 @@ impl Config {
 
 fn apply_project_overrides(config: &mut Config, project: &toml::Value, trusted: bool) {
     if let Some(model) = project.get("model").and_then(|v| v.as_str()) {
-        config.model = model.to_string();
+        if config.model_profiles.is_empty() {
+            config.model = model.to_string();
+        } else if config.model_profiles.contains_key(model) {
+            config.default_profile = Some(model.to_string());
+        } else {
+            let matches = config
+                .model_profiles
+                .iter()
+                .filter(|(_, profile)| profile.model == model)
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            if let [name] = matches.as_slice() {
+                config.default_profile = Some((*name).clone());
+            } else {
+                tracing::warn!(
+                    "Ignoring project model={model:?}: use a unique configured model profile"
+                );
+            }
+        }
     }
     if let Some(mode) = project.get("permission_mode").and_then(|v| v.as_str()) {
         if let Ok(requested) =
@@ -438,6 +741,98 @@ mod tests {
         };
 
         assert_eq!(config.available_models(), vec!["primary", "fast", "review"]);
+    }
+
+    #[test]
+    fn named_profiles_resolve_across_providers_with_default_first() {
+        let config: Config = toml::from_str(
+            r#"
+            default_profile = "sonnet"
+
+            [providers.anthropic]
+            type = "anthropic"
+            api_key_env = "ANTHROPIC_TEST_KEY"
+
+            [providers.openrouter]
+            type = "openai"
+            base_url = "https://openrouter.ai/api/v1"
+            name = "openrouter"
+            api_key_env = "OPENROUTER_TEST_KEY"
+
+            [model_profiles.sonnet]
+            provider = "anthropic"
+            model = "claude-sonnet"
+            display_name = "Sonnet"
+
+            [model_profiles.gpt]
+            provider = "openrouter"
+            model = "openai/gpt"
+            display_name = "GPT via OpenRouter"
+            "#,
+        )
+        .unwrap();
+
+        let models = config.selectable_models().unwrap();
+        assert_eq!(models[0].binding.profile, "sonnet");
+        assert_eq!(models[0].binding.provider_kind, ProviderKind::Anthropic);
+        assert_eq!(models[1].binding.profile, "gpt");
+        assert_eq!(
+            models[1].binding.base_url.as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
+    }
+
+    #[test]
+    fn saved_binding_keeps_transport_but_refreshes_credentials() {
+        let mut config: Config = toml::from_str(
+            r#"
+            [providers.local]
+            type = "openai"
+            base_url = "http://old.invalid/v1"
+            api_key = "new-secret"
+
+            [model_profiles.local]
+            provider = "local"
+            model = "coder"
+            "#,
+        )
+        .unwrap();
+        let mut binding = config.resolve_model("local").unwrap().binding;
+        binding.base_url = Some("http://saved.invalid/v1".to_string());
+        config.providers.get_mut("local").unwrap().base_url =
+            Some("http://changed.invalid/v1".to_string());
+
+        let restored = config.resolve_binding(&binding).unwrap();
+        assert_eq!(
+            restored.binding.base_url.as_deref(),
+            Some("http://saved.invalid/v1")
+        );
+        assert_eq!(restored.api_key.as_deref(), Some("new-secret"));
+        assert!(!serde_json::to_string(&binding)
+            .unwrap()
+            .contains("new-secret"));
+    }
+
+    #[test]
+    fn duplicate_model_ids_require_profile_name() {
+        let config: Config = toml::from_str(
+            r#"
+            [providers.a]
+            type = "anthropic"
+            [providers.b]
+            type = "anthropic"
+            [model_profiles.first]
+            provider = "a"
+            model = "same"
+            [model_profiles.second]
+            provider = "b"
+            model = "same"
+            "#,
+        )
+        .unwrap();
+
+        assert!(config.resolve_model("same").is_err());
+        assert_eq!(config.resolve_model("first").unwrap().binding.provider, "a");
     }
 
     #[test]
@@ -495,6 +890,28 @@ mod tests {
         let project: toml::Value = toml::from_str("permission_mode = \"plan\"").unwrap();
         apply_project_overrides(&mut config, &project, false);
         assert_eq!(config.permission_mode, PermissionMode::Plan);
+    }
+
+    #[test]
+    fn project_model_selects_a_named_profile() {
+        let mut config: Config = toml::from_str(
+            r#"
+            [providers.p]
+            type = "anthropic"
+            [model_profiles.fast]
+            provider = "p"
+            model = "fast-id"
+            [model_profiles.deep]
+            provider = "p"
+            model = "deep-id"
+            "#,
+        )
+        .unwrap();
+        let project: toml::Value = toml::from_str("model = \"deep\"").unwrap();
+
+        apply_project_overrides(&mut config, &project, false);
+
+        assert_eq!(config.default_profile.as_deref(), Some("deep"));
     }
 
     #[test]

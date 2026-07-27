@@ -15,7 +15,7 @@ mod ui;
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::config::{Config, HookTrigger};
+use crate::config::{Config, HookTrigger, ModelBinding, ProviderKind, ResolvedModel};
 use crate::context;
 use crate::db::Db;
 use crate::plugin::PluginRegistry;
@@ -27,7 +27,11 @@ use terminal::TerminalGuard;
 
 /// Run the TUI application. Provider construction is deferred until a
 /// session is opened so Home remains available without startup credentials.
-pub async fn run(config: &Config, plugins: Arc<PluginRegistry>, models: Vec<String>) -> Result<()> {
+pub async fn run(
+    config: &Config,
+    plugins: Arc<PluginRegistry>,
+    models: Vec<ResolvedModel>,
+) -> Result<()> {
     if models.is_empty() {
         anyhow::bail!("no models configured; set `model` in ~/.config/claux/config.toml");
     }
@@ -40,6 +44,8 @@ pub async fn run(config: &Config, plugins: Arc<PluginRegistry>, models: Vec<Stri
 
     let theme = Theme::dark();
     let mut engine: Option<Engine> = None;
+    let mut engine_binding: Option<ModelBinding> = None;
+    let mut home_notice = None;
 
     let app_result: Result<()> = async {
         // Screen loop: home -> chat -> home -> ...
@@ -50,27 +56,58 @@ pub async fn run(config: &Config, plugins: Arc<PluginRegistry>, models: Vec<Stri
                 Action::Home => {
                     let mut home_screen =
                         home::HomeScreen::new(Db::open(&db_path)?, theme, models.clone());
+                    if let Some(notice) = home_notice.take() {
+                        home_screen.set_notice(notice);
+                    }
                     next_action = home_screen.run(terminal_guard.terminal_mut())?;
                 }
                 Action::Chat { session_id } => {
                     let session = db
                         .get_session(&session_id)?
                         .ok_or_else(|| anyhow::anyhow!("session {session_id} no longer exists"))?;
-                    if engine.is_none() {
-                        engine = Some(
-                            crate::build_engine(config, &session.model, plugins.clone()).await?,
-                        );
+                    let resolved = match session.model_binding.as_ref() {
+                        Some(binding) => config.resolve_binding(binding),
+                        None => config.resolve_model(&session.model).map_err(|error| {
+                            anyhow::anyhow!(
+                                "Legacy session '{}' uses model '{}': {error}",
+                                session.id,
+                                session.model
+                            )
+                        }),
+                    };
+                    let resolved = match resolved {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            home_notice = Some(format!(
+                                "Cannot open '{}': {error}. Restore its profile or create a new chat.",
+                                session.name.as_deref().unwrap_or(&session.id)
+                            ));
+                            next_action = Action::Home;
+                            continue;
+                        }
+                    };
+                    if engine_binding.as_ref() != Some(&resolved.binding) {
+                        match crate::build_engine(config, &resolved, plugins.clone()).await {
+                            Ok(new_engine) => {
+                                engine = Some(new_engine);
+                                engine_binding = Some(resolved.binding.clone());
+                            }
+                            Err(error) => {
+                                home_notice = Some(format!(
+                                    "Cannot open '{}': {error}",
+                                    session.name.as_deref().unwrap_or(&session.id)
+                                ));
+                                next_action = Action::Home;
+                                continue;
+                            }
+                        }
                     }
                     let engine = engine.as_mut().expect("engine initialized");
-                    if engine.model() != session.model {
-                        engine.set_model(&session.model);
-                        engine.set_model_pricing(config.model_pricing.get(&session.model).copied());
-                    }
                     let system_prompt = context::build_system_prompt_for_model(
-                        &session.model,
+                        &resolved.binding.model,
                         Some(&plugins),
                         &HookTrigger::OnContextBuild,
-                        config.is_anthropic(),
+                        resolved.binding.provider_kind == ProviderKind::Anthropic,
                     )
                     .await?;
                     engine.set_system_prompt(system_prompt);
@@ -82,6 +119,7 @@ pub async fn run(config: &Config, plugins: Arc<PluginRegistry>, models: Vec<Stri
                         theme,
                     )
                     .await?;
+                    engine_binding = engine.model_binding().cloned();
                 }
                 Action::Quit => return Ok(()),
             }
