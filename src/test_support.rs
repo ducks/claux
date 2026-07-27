@@ -26,10 +26,6 @@ impl Provider for ScriptedProvider {
         "scripted-mock"
     }
 
-    fn model(&self) -> &str {
-        "test-model"
-    }
-
     fn set_model(&mut self, _model: &str) {}
 
     async fn stream(

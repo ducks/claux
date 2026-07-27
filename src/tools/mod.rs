@@ -104,6 +104,7 @@ impl ToolRegistry {
     }
 
     /// Create a basic registry (no Agent).
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::without_agent()
     }

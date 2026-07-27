@@ -91,11 +91,6 @@ impl PermissionChecker {
         self.bash_command_allows.clear();
     }
 
-    /// Check if a specific bash command is always allowed.
-    pub fn is_command_allowed(&self, cmd: &str) -> bool {
-        self.bash_command_allows.contains(cmd)
-    }
-
     /// Check whether a tool invocation should be allowed.
     pub fn check(
         &self,

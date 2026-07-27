@@ -129,6 +129,7 @@ pub fn snip_old_messages(messages: &[Message], keep_recent: usize) -> Option<Vec
 
 /// Determine if compaction should be triggered based on estimated token usage.
 /// Returns the recommended strategy.
+#[cfg(test)]
 pub enum CompactStrategy {
     /// No compaction needed
     None,
@@ -140,6 +141,7 @@ pub enum CompactStrategy {
 
 /// Check what compaction strategy to use based on token estimates.
 /// Uses model context window as reference.
+#[cfg(test)]
 pub fn should_compact(messages: &[Message], context_window: usize) -> CompactStrategy {
     let tokens = estimate_tokens(messages);
     let threshold_snip = context_window * 60 / 100; // 60% — snip
@@ -164,15 +166,12 @@ pub fn context_window_for_model(model: &str) -> usize {
         || model.contains("gpt-5-codex")
     {
         400_000
-    } else if model.contains("opus") {
+    } else if ["opus", "sonnet", "haiku"]
+        .iter()
+        .any(|family| model.contains(family))
+    {
         200_000
-    } else if model.contains("sonnet") {
-        200_000
-    } else if model.contains("haiku") {
-        200_000
-    } else if model.contains("gpt-4o") {
-        128_000
-    } else if model.contains("gpt-4") {
+    } else if model.contains("gpt-4o") || model.contains("gpt-4") {
         128_000
     } else if model.contains("gpt-3.5") {
         16_000

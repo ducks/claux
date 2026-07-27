@@ -19,14 +19,12 @@ pub struct CostTracker {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
-    pub model: String,
     pricing: Option<ModelPricing>,
 }
 
 impl CostTracker {
     pub fn new(model: &str) -> Self {
         Self {
-            model: model.to_string(),
             pricing: built_in_pricing(model),
             ..Default::default()
         }

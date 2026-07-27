@@ -22,7 +22,8 @@ struct Params {
     #[serde(default)]
     timeout: Option<u64>,
     #[serde(default)]
-    description: Option<String>,
+    #[serde(rename = "description")]
+    _description: Option<String>,
 }
 
 #[async_trait]

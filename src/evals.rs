@@ -83,10 +83,6 @@ impl Provider for FixtureProvider {
         "eval-fixture"
     }
 
-    fn model(&self) -> &str {
-        "eval-model"
-    }
-
     fn set_model(&mut self, _model: &str) {}
 
     async fn stream(

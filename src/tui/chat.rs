@@ -132,6 +132,7 @@ impl ChatApp {
     }
 
     /// Update the last tool message's status (e.g., from Running to Success/Error).
+    #[cfg(test)]
     pub fn update_last_tool_status(&mut self, new_status: ToolStatus) {
         self.messages_rev += 1;
         if let Some(ChatMessage::Tool { status, .. }) = self.messages.last_mut() {

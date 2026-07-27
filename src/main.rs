@@ -1,5 +1,3 @@
-#![allow(dead_code, clippy::if_same_then_else)]
-
 mod api;
 mod bootstrap;
 mod checkpoint;

@@ -35,7 +35,6 @@ impl Drop for ProviderStream {
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
-    fn model(&self) -> &str;
     fn set_model(&mut self, model: &str);
 
     /// Drop provider-side conversation state before loading another session.
