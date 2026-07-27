@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{Tool, ToolOutput};
+use super::{interrupted_output, Tool, ToolOutput};
 
 pub struct WriteTool;
 
@@ -51,8 +51,11 @@ impl Tool for WriteTool {
     async fn execute(
         &self,
         input: Value,
-        _cancel: tokio_util::sync::CancellationToken,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ToolOutput> {
+        if cancel.is_cancelled() {
+            return Ok(interrupted_output());
+        }
         let params: Params = serde_json::from_value(input)?;
         let path = crate::tools::read::expand_tilde(&params.file_path);
 
@@ -61,11 +64,64 @@ impl Tool for WriteTool {
             std::fs::create_dir_all(parent)?;
         }
 
+        if cancel.is_cancelled() {
+            return Ok(interrupted_output());
+        }
         std::fs::write(&path, &params.content)?;
 
         Ok(ToolOutput {
             content: format!("Successfully wrote to {}", params.file_path),
             is_error: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn write_creates_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested/file.txt");
+
+        let result = WriteTool
+            .execute(
+                json!({
+                    "file_path": path.to_str().unwrap(),
+                    "content": "hello"
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn cancelled_write_does_not_create_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested/file.txt");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = WriteTool
+            .execute(
+                json!({
+                    "file_path": path.to_str().unwrap(),
+                    "content": "must not be written"
+                }),
+                cancel,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(result.content, "Interrupted by user.");
+        assert!(!path.exists());
+        assert!(!temp.path().join("nested").exists());
     }
 }

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::fmt::Write;
 use std::io::BufRead;
 
-use super::{Tool, ToolOutput};
+use super::{interrupted_output, Tool, ToolOutput};
 
 pub struct ReadTool;
 
@@ -131,13 +131,6 @@ fn read_file(params: Params, cancel: tokio_util::sync::CancellationToken) -> Res
         content: result,
         is_error: false,
     })
-}
-
-fn interrupted_output() -> ToolOutput {
-    ToolOutput {
-        content: "Interrupted by user.".to_string(),
-        is_error: true,
-    }
 }
 
 pub fn expand_tilde(path: &str) -> std::path::PathBuf {

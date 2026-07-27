@@ -23,6 +23,13 @@ pub struct ToolOutput {
     pub is_error: bool,
 }
 
+fn interrupted_output() -> ToolOutput {
+    ToolOutput {
+        content: "Interrupted by user.".to_string(),
+        is_error: true,
+    }
+}
+
 /// Every tool implements this trait.
 #[async_trait]
 pub trait Tool: Send + Sync {
