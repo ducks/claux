@@ -116,6 +116,7 @@ pub async fn read_sse_stream(
                         output_tokens,
                         cache_read_tokens,
                         cache_creation_tokens,
+                        provider_cost_usd: None,
                     }))
                     .await;
                 let _ = tx.send(ApiEvent::Done).await;
@@ -210,6 +211,7 @@ pub async fn read_sse_stream(
                             output_tokens,
                             cache_read_tokens,
                             cache_creation_tokens,
+                            provider_cost_usd: None,
                         }))
                         .await;
                     let _ = tx.send(ApiEvent::Done).await;

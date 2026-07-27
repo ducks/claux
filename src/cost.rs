@@ -19,6 +19,7 @@ pub struct CostTracker {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
+    provider_cost_usd: Option<f64>,
     pricing: Option<ModelPricing>,
 }
 
@@ -41,6 +42,12 @@ impl CostTracker {
         self.output_tokens += usage.output_tokens as u64;
         self.cache_read_tokens += usage.cache_read_tokens as u64;
         self.cache_creation_tokens += usage.cache_creation_tokens as u64;
+        if let Some(cost) = usage
+            .provider_cost_usd
+            .filter(|cost| cost.is_finite() && *cost >= 0.0)
+        {
+            *self.provider_cost_usd.get_or_insert(0.0) += cost;
+        }
     }
 
     /// Clear session usage while preserving the model's resolved pricing.
@@ -49,10 +56,14 @@ impl CostTracker {
         self.output_tokens = 0;
         self.cache_read_tokens = 0;
         self.cache_creation_tokens = 0;
+        self.provider_cost_usd = None;
     }
 
-    /// Estimated cost in USD based on model pricing.
+    /// Actual provider-reported cost when available, otherwise an estimate.
     pub fn total_cost_usd(&self) -> f64 {
+        if let Some(cost) = self.provider_cost_usd {
+            return cost;
+        }
         let Some(pricing) = self.pricing else {
             return 0.0;
         };
@@ -67,8 +78,9 @@ impl CostTracker {
 
     pub fn format_summary(&self) -> String {
         let cost = self
-            .pricing
-            .map(|_| format!("${:.4}", self.total_cost_usd()))
+            .provider_cost_usd
+            .map(format_cost)
+            .or_else(|| self.pricing.map(|_| format_cost(self.total_cost_usd())))
             .unwrap_or_else(|| "unavailable".to_string());
         format!(
             "Cost: {} | Tokens: {}in / {}out{}",
@@ -81,6 +93,14 @@ impl CostTracker {
                 String::new()
             }
         )
+    }
+}
+
+fn format_cost(cost: f64) -> String {
+    if cost > 0.0 && cost < 0.0001 {
+        format!("${cost:.8}")
+    } else {
+        format!("${cost:.4}")
     }
 }
 
@@ -133,12 +153,14 @@ mod tests {
             output_tokens: 500,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         tracker.add_usage(&Usage {
             input_tokens: 2000,
             output_tokens: 300,
             cache_read_tokens: 100,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         assert_eq!(tracker.input_tokens, 3000);
         assert_eq!(tracker.output_tokens, 800);
@@ -159,6 +181,7 @@ mod tests {
             output_tokens: 500_000,
             cache_read_tokens: 100,
             cache_creation_tokens: 50,
+            provider_cost_usd: None,
         });
 
         tracker.reset_usage();
@@ -174,6 +197,7 @@ mod tests {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         assert_eq!(tracker.total_cost_usd(), 2.0);
     }
@@ -186,6 +210,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         // sonnet: $3/M input + $15/M output = $18
         assert!((tracker.total_cost_usd() - 18.0).abs() < 0.01);
@@ -199,6 +224,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         // opus: $15/M input + $75/M output = $90
         assert!((tracker.total_cost_usd() - 90.0).abs() < 0.01);
@@ -212,6 +238,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         // haiku: $0.25/M input + $1.25/M output = $1.50
         assert!((tracker.total_cost_usd() - 1.50).abs() < 0.01);
@@ -225,7 +252,75 @@ mod tests {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
+        assert_eq!(tracker.total_cost_usd(), 0.0);
+        assert!(tracker.format_summary().contains("unavailable"));
+    }
+
+    #[test]
+    fn provider_reported_cost_works_without_known_pricing_and_accumulates() {
+        let mut tracker = CostTracker::new("openrouter/unknown-model");
+        tracker.add_usage(&Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_cost_usd: Some(0.0012),
+        });
+        tracker.add_usage(&Usage {
+            input_tokens: 200,
+            output_tokens: 40,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_cost_usd: Some(0.0034),
+        });
+
+        assert!((tracker.total_cost_usd() - 0.0046).abs() < f64::EPSILON);
+        assert!(tracker.format_summary().contains("$0.0046"));
+    }
+
+    #[test]
+    fn provider_reported_cost_takes_precedence_over_estimate() {
+        let mut tracker = CostTracker::new("claude-sonnet-4-20250514");
+        tracker.add_usage(&Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_cost_usd: Some(1.25),
+        });
+
+        assert_eq!(tracker.total_cost_usd(), 1.25);
+    }
+
+    #[test]
+    fn tiny_reported_cost_remains_visible() {
+        let mut tracker = CostTracker::new("unknown-model");
+        tracker.add_usage(&Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_cost_usd: Some(0.00003125),
+        });
+
+        assert!(tracker.format_summary().contains("$0.00003125"));
+    }
+
+    #[test]
+    fn reset_usage_clears_provider_reported_cost() {
+        let mut tracker = CostTracker::new("unknown-model");
+        tracker.add_usage(&Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_cost_usd: Some(0.0012),
+        });
+
+        tracker.reset_usage();
+
         assert_eq!(tracker.total_cost_usd(), 0.0);
         assert!(tracker.format_summary().contains("unavailable"));
     }
@@ -238,6 +333,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         assert!((tracker.total_cost_usd() - 35.0).abs() < 0.01);
     }
@@ -256,6 +352,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         assert!((tracker.total_cost_usd() - 3.0).abs() < 0.01);
     }
@@ -268,6 +365,7 @@ mod tests {
             output_tokens: 0,
             cache_read_tokens: 1_000_000,
             cache_creation_tokens: 1_000_000,
+            provider_cost_usd: None,
         });
         // sonnet cache: $0.3/M read + $3.75/M write = $4.05
         assert!((tracker.total_cost_usd() - 4.05).abs() < 0.01);
@@ -281,6 +379,7 @@ mod tests {
             output_tokens: 200,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         let summary = tracker.format_summary();
         assert!(summary.contains("500in"));
@@ -296,6 +395,7 @@ mod tests {
             output_tokens: 50,
             cache_read_tokens: 300,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         let summary = tracker.format_summary();
         assert!(summary.contains("300cache"));
@@ -309,6 +409,7 @@ mod tests {
             output_tokens: 50,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         let summary = tracker.format_summary();
         assert!(!summary.contains("cache"));

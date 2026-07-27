@@ -1081,6 +1081,7 @@ mod tests {
             output_tokens: 200,
             cache_read_tokens: 100,
             cache_creation_tokens: 50,
+            provider_cost_usd: None,
         });
         engine
             .steering_queue()
@@ -1117,6 +1118,7 @@ mod tests {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            provider_cost_usd: None,
         });
         assert_eq!(engine.cost.total_cost_usd(), 2.0);
     }
