@@ -138,8 +138,8 @@ impl Tool for BashTool {
         let stdout = stdout_task.await.unwrap_or_default();
         let stderr = stderr_task.await.unwrap_or_default();
 
-        let stdout_s = String::from_utf8_lossy(&stdout);
-        let stderr_s = String::from_utf8_lossy(&stderr);
+        let stdout_s = render_output(&stdout, "stdout");
+        let stderr_s = render_output(&stderr, "stderr");
 
         let mut content = String::new();
         if !stdout_s.is_empty() {
@@ -191,6 +191,13 @@ impl Tool for BashTool {
     }
 }
 
+fn render_output(bytes: &[u8], stream: &str) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) if !bytes.contains(&0) => text.to_string(),
+        _ => format!("[binary {stream} suppressed: {} bytes]", bytes.len()),
+    }
+}
+
 enum Outcome {
     Finished(std::io::Result<std::process::ExitStatus>),
     Cancelled,
@@ -235,6 +242,46 @@ mod tests {
             .await
             .unwrap();
         assert!(result.content.contains("err"));
+    }
+
+    #[test]
+    fn preserves_utf8_output() {
+        assert_eq!(render_output("héllo\n".as_bytes(), "stdout"), "héllo\n");
+    }
+
+    #[test]
+    fn suppresses_invalid_utf8_output() {
+        assert_eq!(
+            render_output(&[0xff, 0xfe, 0xfd], "stdout"),
+            "[binary stdout suppressed: 3 bytes]"
+        );
+    }
+
+    #[test]
+    fn suppresses_nul_containing_output() {
+        assert_eq!(
+            render_output(b"text\0more", "stderr"),
+            "[binary stderr suppressed: 9 bytes]"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn binary_stdout_does_not_hide_text_stderr() {
+        let result = BashTool
+            .execute(
+                json!({"command": "printf '\\377'; printf 'warning' >&2"}),
+                token(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(
+            result.content,
+            "[binary stdout suppressed: 1 bytes]\nwarning"
+        );
+        assert!(!result.content.contains('\u{fffd}'));
     }
 
     #[tokio::test]
