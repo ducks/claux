@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fmt::Write;
 
-use super::{Tool, ToolOutput};
+use super::{interrupted_output, Tool, ToolOutput};
 
 pub struct EditTool;
 
@@ -64,8 +64,11 @@ impl Tool for EditTool {
     async fn execute(
         &self,
         input: Value,
-        _cancel: tokio_util::sync::CancellationToken,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ToolOutput> {
+        if cancel.is_cancelled() {
+            return Ok(interrupted_output());
+        }
         let params: Params = serde_json::from_value(input)?;
         let path = crate::tools::read::expand_tilde(&params.file_path);
 
@@ -101,6 +104,12 @@ impl Tool for EditTool {
             content.replacen(&params.old_string, &params.new_string, 1)
         };
 
+        // Cancellation can race with the read and replacement work. The
+        // final check is the mutation boundary: once it passes, report the
+        // completed write rather than pretending it was rolled back.
+        if cancel.is_cancelled() {
+            return Ok(interrupted_output());
+        }
         std::fs::write(&path, &new_content)?;
 
         // Show context around the edit
@@ -240,5 +249,29 @@ mod tests {
             .unwrap();
 
         assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn cancelled_edit_does_not_modify_the_file() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "keep this").unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = EditTool
+            .execute(
+                json!({
+                    "file_path": tmp.path().to_str().unwrap(),
+                    "old_string": "keep",
+                    "new_string": "replace"
+                }),
+                cancel,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(result.content, "Interrupted by user.");
+        assert_eq!(std::fs::read_to_string(tmp.path()).unwrap(), "keep this");
     }
 }
