@@ -130,18 +130,26 @@ impl Provider for OpenAIResponsesProvider {
         };
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("API error ({status}): {error_text}");
+            return Err(super::error::http_error(response, &self.provider_name, &self.model).await);
         }
 
         let stream_cancel = cancel.child_token();
         let reader_cancel = stream_cancel.clone();
         let error_tx = tx.clone();
         let cursor = self.cursor.clone();
+        let provider_name = self.provider_name.clone();
+        let model = self.model.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                read_responses_sse(response, tx, reader_cancel, cursor, next_message_index).await
+            if let Err(error) = read_responses_sse(
+                response,
+                tx,
+                reader_cancel,
+                cursor,
+                next_message_index,
+                &provider_name,
+                &model,
+            )
+            .await
             {
                 let message = format!("OpenAI Responses stream error: {error}");
                 tracing::error!("{message}");
@@ -239,6 +247,8 @@ async fn read_responses_sse(
     cancel: CancellationToken,
     cursor: Arc<Mutex<ResponseCursor>>,
     next_message_index: usize,
+    provider: &str,
+    model: &str,
 ) -> Result<()> {
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
@@ -282,10 +292,17 @@ async fn read_responses_sse(
                 completed = true;
             }
 
-            for api_event in translate_event(&event) {
+            let terminal_error = matches!(
+                event["type"].as_str(),
+                Some("response.failed" | "response.incomplete" | "error" | "response.error")
+            );
+            for api_event in translate_event(&event, provider, model) {
                 if tx.send(api_event).await.is_err() {
                     return Ok(());
                 }
+            }
+            if terminal_error {
+                return Ok(());
             }
         }
     }
@@ -297,7 +314,7 @@ async fn read_responses_sse(
     }
 }
 
-fn translate_event(event: &Value) -> Vec<ApiEvent> {
+fn translate_event(event: &Value, provider: &str, model: &str) -> Vec<ApiEvent> {
     match event["type"].as_str().unwrap_or_default() {
         "response.output_text.delta" => event["delta"]
             .as_str()
@@ -344,20 +361,13 @@ fn translate_event(event: &Value) -> Vec<ApiEvent> {
             ]
         }
         "response.failed" | "response.incomplete" => {
-            let response = &event["response"];
-            let message = response["error"]["message"]
-                .as_str()
-                .or_else(|| response["incomplete_details"]["reason"].as_str())
-                .unwrap_or("OpenAI response did not complete");
-            vec![ApiEvent::Error(message.to_string())]
+            vec![ApiEvent::Error(super::error::stream_error(
+                event, provider, model,
+            ))]
         }
-        "error" => {
-            let message = event["message"]
-                .as_str()
-                .or_else(|| event["error"]["message"].as_str())
-                .unwrap_or("OpenAI Responses API error");
-            vec![ApiEvent::Error(message.to_string())]
-        }
+        "error" | "response.error" => vec![ApiEvent::Error(super::error::stream_error(
+            event, provider, model,
+        ))],
         _ => Vec::new(),
     }
 }
@@ -423,36 +433,48 @@ mod tests {
 
     #[test]
     fn translates_text_tool_and_usage_events() {
-        let text = translate_event(&json!({
-            "type": "response.output_text.delta",
-            "delta": "hello"
-        }));
+        let text = translate_event(
+            &json!({
+                "type": "response.output_text.delta",
+                "delta": "hello"
+            }),
+            "openai",
+            "model",
+        );
         assert!(matches!(&text[0], ApiEvent::Text(value) if value == "hello"));
 
-        let tool = translate_event(&json!({
-            "type": "response.output_item.done",
-            "item": {
-                "type": "function_call",
-                "call_id": "call_7",
-                "name": "Read",
-                "arguments": "{\"file_path\":\"/tmp/a\"}"
-            }
-        }));
+        let tool = translate_event(
+            &json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_7",
+                    "name": "Read",
+                    "arguments": "{\"file_path\":\"/tmp/a\"}"
+                }
+            }),
+            "openai",
+            "model",
+        );
         assert!(matches!(
             &tool[0],
             ApiEvent::ToolUse { id, name, .. } if id == "call_7" && name == "Read"
         ));
 
-        let completed = translate_event(&json!({
-            "type": "response.completed",
-            "response": {
-                "usage": {
-                    "input_tokens": 12,
-                    "output_tokens": 4,
-                    "input_tokens_details": {"cached_tokens": 3}
+        let completed = translate_event(
+            &json!({
+                "type": "response.completed",
+                "response": {
+                    "usage": {
+                        "input_tokens": 12,
+                        "output_tokens": 4,
+                        "input_tokens_details": {"cached_tokens": 3}
+                    }
                 }
-            }
-        }));
+            }),
+            "openai",
+            "model",
+        );
         assert!(matches!(
             &completed[0],
             ApiEvent::Usage(Usage {
@@ -463,5 +485,52 @@ mod tests {
             })
         ));
         assert!(matches!(completed[1], ApiEvent::Done));
+
+        let failed = translate_event(
+            &json!({
+                "type": "response.failed",
+                "response": {
+                    "error": {"code": "server_error", "message": "Rate limited"},
+                    "error_type": "rate_limit_exceeded"
+                }
+            }),
+            "openrouter",
+            "moonshotai/kimi-k3",
+        );
+        assert!(matches!(
+            &failed[0],
+            ApiEvent::Error(error)
+                if error.contains("429 Too Many Requests")
+                    && error.contains("moonshotai/kimi-k3")
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_emits_one_actionable_error() {
+        let response = crate::test_support::sse_response(
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"upstream limit\"}}}\n\n",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_responses_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            Arc::new(Mutex::new(ResponseCursor::default())),
+            0,
+            "openrouter",
+            "deepseek/deepseek-r1",
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(ApiEvent::Error(error))
+                if error.contains("429 Too Many Requests")
+                    && error.contains("deepseek/deepseek-r1")
+        ));
+        assert!(rx.recv().await.is_none());
     }
 }

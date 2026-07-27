@@ -94,9 +94,7 @@ impl Provider for AnthropicProvider {
         };
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("API error ({status}): {error_text}");
+            return Err(super::error::http_error(response, "anthropic", &self.model).await);
         }
 
         let stream_cancel = cancel.child_token();
