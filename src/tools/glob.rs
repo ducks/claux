@@ -120,6 +120,10 @@ mod tests {
     use std::fs;
     use tokio_util::sync::CancellationToken;
 
+    fn normalized(content: &str) -> String {
+        content.replace('\\', "/")
+    }
+
     fn fixture() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
@@ -141,10 +145,11 @@ mod tests {
             )
             .await
             .unwrap();
+        let content = normalized(&output.content);
 
-        assert!(output.content.contains("src/lib.rs"));
-        assert!(!output.content.contains(".github"));
-        assert!(!output.content.contains("target/debug"));
+        assert!(content.contains("src/lib.rs"));
+        assert!(!content.contains(".github"));
+        assert!(!content.contains("target/debug"));
     }
 
     #[tokio::test]
@@ -162,9 +167,10 @@ mod tests {
             )
             .await
             .unwrap();
+        let content = normalized(&output.content);
 
-        assert!(output.content.contains(".github/workflows/ci.yml"));
-        assert!(output.content.contains("target/debug/app"));
+        assert!(content.contains(".github/workflows/ci.yml"));
+        assert!(content.contains("target/debug/app"));
     }
 
     #[tokio::test]
@@ -181,6 +187,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(output.content.contains("workflows/ci.yml"));
+        assert!(normalized(&output.content).contains("workflows/ci.yml"));
     }
 }

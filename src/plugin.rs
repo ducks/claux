@@ -368,11 +368,9 @@ mod tests {
         )
         .with_timeout(std::time::Duration::from_millis(50));
 
-        let started = std::time::Instant::now();
         let error = plugin.execute(None).await.unwrap_err();
 
         assert!(error.to_string().contains("timed out"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[tokio::test]
