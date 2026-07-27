@@ -217,6 +217,16 @@ pub async fn run(
                                 }
                                 println!("\n  \x1b[2m[{n}]\x1b[0m");
                             }
+                            StreamEvent::Retry(n) => {
+                                if in_tool {
+                                    println!();
+                                    in_tool = false;
+                                }
+                                println!(
+                                    "\n  \x1b[2m[discarding rejected response: {n}]\x1b[0m"
+                                );
+                                first_text = true;
+                            }
                             StreamEvent::SteeringSent(t) => {
                                 if in_tool {
                                     println!();

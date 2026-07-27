@@ -454,6 +454,15 @@ async fn drive_streaming<B: ratatui::backend::Backend>(
                                 .push_str(&crate::utils::sanitize_terminal_text(&t));
                             app.thinking = false;
                         }
+                        StreamEvent::Retry(n) => {
+                            // The rejected provider attempt is not part of
+                            // conversation history. Its text was never
+                            // flushed because malformed tool batches emit no
+                            // ToolStart events.
+                            app.stream_buffer.clear();
+                            app.thinking = true;
+                            app.add_message("system", &n);
+                        }
                         StreamEvent::Notice(n) => {
                             flush_stream_buffer(app);
                             app.add_message("system", &n);

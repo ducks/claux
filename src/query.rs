@@ -43,6 +43,10 @@ pub struct Engine {
 /// Events sent from the engine to the UI during streaming.
 pub enum StreamEvent {
     Text(String),
+    /// The current provider attempt was rejected before any tools ran.
+    /// UIs must discard uncommitted text from that attempt before showing
+    /// the retry notice.
+    Retry(String),
     /// Engine status line (compaction). Display-only: never part of the
     /// assistant's response text.
     Notice(String),
@@ -472,6 +476,25 @@ impl Engine {
         err.contains("max_output_tokens") || err.contains("max_tokens_exceeded")
     }
 
+    /// OpenAI-compatible providers report malformed accumulated tool-call
+    /// arguments through this error. The provider parser is deliberately
+    /// atomic, so matching this error means no tool calls from the rejected
+    /// response have been emitted or executed.
+    fn is_malformed_tool_arguments(err: &str) -> bool {
+        err.to_ascii_lowercase()
+            .contains("invalid arguments for tool call")
+    }
+
+    fn malformed_tool_retry_prompt(err: &str) -> String {
+        let detail = crate::utils::truncate_str(err, 512);
+        format!(
+            "Your previous response was rejected before any tools executed because one or more \
+             tool calls contained invalid JSON arguments ({detail}). Reissue the entire intended \
+             tool-call batch with valid JSON arguments. Do not assume any tool from the rejected \
+             response ran."
+        )
+    }
+
     /// Content used when pairing a tool_use whose execution was cut off by
     /// turn cancellation.
     pub const INTERRUPTED_BY_USER: &'static str = "Interrupted by user.";
@@ -493,8 +516,10 @@ impl Engine {
         let collector = tokio::spawn(async move {
             let mut text = String::new();
             while let Some(event) = rx.recv().await {
-                if let StreamEvent::Text(t) = event {
-                    text.push_str(&t);
+                match event {
+                    StreamEvent::Text(t) => text.push_str(&t),
+                    StreamEvent::Retry(_) => text.clear(),
+                    _ => {}
                 }
             }
             text
@@ -548,6 +573,9 @@ impl Engine {
 
         let mut recovery_attempts = 0;
         const MAX_RECOVERY: u32 = 3;
+        let mut malformed_tool_retries = 0;
+        const MAX_MALFORMED_TOOL_RETRIES: u32 = 1;
+        let mut retry_prompt: Option<String> = None;
 
         loop {
             // Deliver any steering messages queued since the last API call,
@@ -562,11 +590,16 @@ impl Engine {
             }
 
             let tool_defs = self.tools.definitions();
+            let effective_system_prompt = retry_prompt
+                .as_ref()
+                .map(|prompt| format!("{}\n\n{prompt}", self.system_prompt));
             let stream_result = self
                 .provider
                 .stream(
                     &self.messages,
-                    &self.system_prompt,
+                    effective_system_prompt
+                        .as_deref()
+                        .unwrap_or(&self.system_prompt),
                     &tool_defs,
                     self.max_tokens,
                     cancel.clone(),
@@ -581,6 +614,19 @@ impl Engine {
                         return Ok(());
                     }
                     let err_str = e.to_string();
+                    if Self::is_malformed_tool_arguments(&err_str)
+                        && malformed_tool_retries < MAX_MALFORMED_TOOL_RETRIES
+                    {
+                        malformed_tool_retries += 1;
+                        retry_prompt = Some(Self::malformed_tool_retry_prompt(&err_str));
+                        let _ = tx
+                            .send(StreamEvent::Retry(
+                                "model returned malformed tool arguments; retrying once"
+                                    .to_string(),
+                            ))
+                            .await;
+                        continue;
+                    }
                     if Self::is_max_output_tokens(&err_str) && self.max_tokens < 64_000 {
                         self.max_tokens = (self.max_tokens * 2).min(64_000);
                         continue;
@@ -641,6 +687,21 @@ impl Engine {
                     }
                     ApiEvent::Done => break,
                     ApiEvent::Error(e) => {
+                        if Self::is_malformed_tool_arguments(&e)
+                            && tool_uses.is_empty()
+                            && malformed_tool_retries < MAX_MALFORMED_TOOL_RETRIES
+                        {
+                            malformed_tool_retries += 1;
+                            retry_prompt = Some(Self::malformed_tool_retry_prompt(&e));
+                            let _ = tx
+                                .send(StreamEvent::Retry(
+                                    "model returned malformed tool arguments; retrying once"
+                                        .to_string(),
+                                ))
+                                .await;
+                            had_error = true;
+                            break;
+                        }
                         if Self::is_max_output_tokens(&e) && self.max_tokens < 64_000 {
                             self.max_tokens = (self.max_tokens * 2).min(64_000);
                             had_error = true;
@@ -666,6 +727,11 @@ impl Engine {
             if had_error {
                 continue;
             }
+
+            // A complete response ends the retry scope. Any correction was
+            // request-local and must not become conversation history.
+            malformed_tool_retries = 0;
+            retry_prompt = None;
 
             // Record assistant message
             let mut blocks = Vec::new();
@@ -942,7 +1008,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::ToolDefinition;
+    use crate::api::{MessageContent, ToolDefinition};
     use crate::permissions::PermissionMode;
     use crate::plugin::Plugin;
     use std::collections::HashMap;
@@ -1004,6 +1070,55 @@ mod tests {
         }
     }
 
+    struct MalformedToolProvider {
+        calls: Arc<AtomicUsize>,
+        systems: Arc<Mutex<Vec<String>>>,
+        recover: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for MalformedToolProvider {
+        fn name(&self) -> &str {
+            "malformed-tool"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            self.systems.lock().unwrap().push(system.to_string());
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = mpsc::channel(10);
+            if attempt == 0 {
+                tx.send(ApiEvent::Text("rejected preamble".to_string()))
+                    .await
+                    .unwrap();
+            }
+            if self.recover && attempt > 0 {
+                tx.send(ApiEvent::Text("recovered response".to_string()))
+                    .await
+                    .unwrap();
+                tx.send(ApiEvent::Done).await.unwrap();
+            } else {
+                tx.send(ApiEvent::Error(
+                    "OpenAI SSE stream error: invalid arguments for tool call Read \
+                     (call_3): EOF while parsing a value"
+                        .to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+            drop(tx);
+            Ok(ProviderStream::new(rx, cancel.child_token()))
+        }
+    }
+
     struct ResetTrackingProvider {
         resets: Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -1028,6 +1143,79 @@ mod tests {
             "Maximum Context Length exceeded"
         ));
         assert!(Engine::is_prompt_too_long("CONTEXT_LENGTH_EXCEEDED"));
+    }
+
+    #[test]
+    fn malformed_tool_argument_errors_are_classified_narrowly() {
+        assert!(Engine::is_malformed_tool_arguments(
+            "OpenAI SSE stream error: invalid arguments for tool call Read (call_3)"
+        ));
+        assert!(!Engine::is_malformed_tool_arguments(
+            "invalid arguments for request"
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_arguments_retry_once_without_persisting_rejected_text() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let systems = Arc::new(Mutex::new(Vec::new()));
+        let provider = Box::new(MalformedToolProvider {
+            calls: calls.clone(),
+            systems: systems.clone(),
+            recover: true,
+        });
+        let mut engine =
+            Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Default);
+        engine.set_system_prompt("base system prompt".to_string());
+
+        let response = engine
+            .submit("hello", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(response, "recovered response");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let systems = systems.lock().unwrap();
+        assert_eq!(systems[0], "base system prompt");
+        assert!(systems[1].starts_with("base system prompt\n\n"));
+        assert!(systems[1].contains("before any tools executed"));
+        assert!(systems[1].contains("Reissue the entire intended tool-call batch"));
+
+        assert_eq!(engine.messages().len(), 2);
+        let MessageContent::Blocks(blocks) = &engine.messages()[1].content else {
+            panic!("expected assistant blocks");
+        };
+        assert!(matches!(
+            blocks.as_slice(),
+            [ContentBlock::Text { text }] if text == "recovered response"
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_arguments_stop_after_one_retry() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Box::new(MalformedToolProvider {
+            calls: calls.clone(),
+            systems: Arc::new(Mutex::new(Vec::new())),
+            recover: false,
+        });
+        let mut engine =
+            Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Default);
+
+        let error = engine
+            .submit("hello", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(error
+            .to_string()
+            .contains("invalid arguments for tool call"));
+        assert_eq!(
+            engine.messages().len(),
+            1,
+            "rejected assistant attempts must not enter conversation history"
+        );
     }
 
     #[async_trait::async_trait]
