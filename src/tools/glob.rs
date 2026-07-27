@@ -12,6 +12,10 @@ struct Params {
     pattern: String,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    include_hidden: bool,
+    #[serde(default)]
+    include_build_dirs: bool,
 }
 
 #[async_trait]
@@ -35,6 +39,14 @@ impl Tool for GlobTool {
                 "path": {
                     "type": "string",
                     "description": "Base directory to search in"
+                },
+                "include_hidden": {
+                    "type": "boolean",
+                    "description": "Include hidden files and directories (default: false)"
+                },
+                "include_build_dirs": {
+                    "type": "boolean",
+                    "description": "Include target build directories (default: false)"
                 }
             },
             "required": ["pattern"]
@@ -66,8 +78,12 @@ impl Tool for GlobTool {
         let mut paths: Vec<String> = Vec::new();
         for entry in glob::glob(&pattern)?.flatten() {
             let path_str = entry.to_string_lossy().to_string();
-            // Skip hidden files and build directories
-            if !path_str.contains("/.") && !path_str.contains("/target/") {
+            if !super::search_filter::is_excluded(
+                &entry,
+                &base,
+                params.include_hidden,
+                params.include_build_dirs,
+            ) {
                 paths.push(path_str);
             }
         }
@@ -95,5 +111,76 @@ impl Tool for GlobTool {
             content: paths.join("\n"),
             is_error: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tokio_util::sync::CancellationToken;
+
+    fn fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+        fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join(".github/workflows/ci.yml"), "ci").unwrap();
+        fs::write(dir.path().join("target/debug/app"), "binary").unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "fn main() {}").unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn broad_search_excludes_hidden_and_build_directories() {
+        let dir = fixture();
+        let output = GlobTool
+            .execute(
+                json!({"pattern": "**/*", "path": dir.path()}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.content.contains("src/lib.rs"));
+        assert!(!output.content.contains(".github"));
+        assert!(!output.content.contains("target/debug"));
+    }
+
+    #[tokio::test]
+    async fn flags_include_hidden_and_build_directories() {
+        let dir = fixture();
+        let output = GlobTool
+            .execute(
+                json!({
+                    "pattern": "**/*",
+                    "path": dir.path(),
+                    "include_hidden": true,
+                    "include_build_dirs": true
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.content.contains(".github/workflows/ci.yml"));
+        assert!(output.content.contains("target/debug/app"));
+    }
+
+    #[tokio::test]
+    async fn explicit_hidden_base_is_searched_without_a_flag() {
+        let dir = fixture();
+        let output = GlobTool
+            .execute(
+                json!({
+                    "pattern": "**/*",
+                    "path": dir.path().join(".github")
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.content.contains("workflows/ci.yml"));
     }
 }

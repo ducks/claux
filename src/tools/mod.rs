@@ -5,6 +5,7 @@ mod glob;
 mod grep;
 pub(crate) mod mcp;
 pub(crate) mod read;
+mod search_filter;
 pub(crate) mod todo;
 mod web_fetch;
 mod write;
