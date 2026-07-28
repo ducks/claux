@@ -59,6 +59,7 @@ pub struct HomeScreen {
     models: Vec<ResolvedModel>,
     selected_model: usize,
     model_cursor: usize,
+    model_searching: bool,
     notice: Option<String>,
     /// Empty projects created by the user (no sessions yet)
     empty_projects: Vec<String>,
@@ -78,6 +79,7 @@ impl HomeScreen {
             models,
             selected_model: 0,
             model_cursor: 0,
+            model_searching: false,
             notice: None,
             empty_projects: Vec::new(),
         };
@@ -126,6 +128,7 @@ impl HomeScreen {
         self.mode = Mode::SelectModel;
         self.input.clear();
         self.cursor = 0;
+        self.model_searching = false;
         self.model_cursor = self
             .filtered_model_indices()
             .iter()
@@ -306,6 +309,16 @@ impl HomeScreen {
 
     fn handle_model_picker_key(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Esc if self.model_searching => {
+                self.model_searching = false;
+                self.input.clear();
+                self.cursor = 0;
+                self.model_cursor = self
+                    .filtered_model_indices()
+                    .iter()
+                    .position(|index| *index == self.selected_model)
+                    .unwrap_or(0);
+            }
             KeyCode::Esc => {
                 self.mode = Mode::Browse;
                 self.input.clear();
@@ -324,6 +337,15 @@ impl HomeScreen {
                     self.cursor = 0;
                 }
             }
+            KeyCode::Up | KeyCode::Char('k') if !self.model_searching && self.model_cursor > 0 => {
+                self.model_cursor -= 1;
+            }
+            KeyCode::Down | KeyCode::Char('j') if !self.model_searching => {
+                let count = self.filtered_model_indices().len();
+                if self.model_cursor + 1 < count {
+                    self.model_cursor += 1;
+                }
+            }
             KeyCode::Up if self.model_cursor > 0 => {
                 self.model_cursor -= 1;
             }
@@ -333,11 +355,16 @@ impl HomeScreen {
                     self.model_cursor += 1;
                 }
             }
-            KeyCode::Backspace if self.cursor > 0 => {
+            KeyCode::Char('/') if !self.model_searching => {
+                self.model_searching = true;
+                self.input.clear();
+                self.cursor = 0;
+            }
+            KeyCode::Backspace if self.model_searching && self.cursor > 0 => {
                 super::input::backspace(&mut self.input, &mut self.cursor);
                 self.model_cursor = 0;
             }
-            KeyCode::Char(character) => {
+            KeyCode::Char(character) if self.model_searching => {
                 super::input::insert(&mut self.input, &mut self.cursor, character);
                 self.model_cursor = 0;
             }
@@ -479,7 +506,11 @@ impl HomeScreen {
         // Input / help area
         match &self.mode {
             Mode::SelectModel => {
-                let prompt = format!("Search: {}", self.input);
+                let prompt = if self.model_searching {
+                    format!("/{}", self.input)
+                } else {
+                    "Press / to search configured models".to_string()
+                };
                 let input_widget = Paragraph::new(prompt)
                     .style(Style::default().fg(self.theme.fg))
                     .block(
@@ -489,8 +520,10 @@ impl HomeScreen {
                             .title(" Provider / Model "),
                     );
                 f.render_widget(input_widget, chunks[2]);
-                let cursor_width = super::input::display_width_before(&self.input, self.cursor);
-                f.set_cursor_position((chunks[2].x + 9 + cursor_width as u16, chunks[2].y + 1));
+                if self.model_searching {
+                    let cursor_width = super::input::display_width_before(&self.input, self.cursor);
+                    f.set_cursor_position((chunks[2].x + 2 + cursor_width as u16, chunks[2].y + 1));
+                }
             }
             Mode::NewSession => {
                 let prompt = format!(
@@ -569,7 +602,11 @@ impl HomeScreen {
         let status_text = self.notice.as_deref().map_or_else(
             || {
                 if self.mode == Mode::SelectModel {
-                    " Type to search · ↑/↓ select · Enter confirm · Esc cancel ".to_string()
+                    if self.model_searching {
+                        " Search · ↑/↓ select · Enter confirm · Esc clear ".to_string()
+                    } else {
+                        " j/k or ↑/↓ select · / search · Enter confirm · Esc cancel ".to_string()
+                    }
                 } else {
                     format!(
                         " {} · {} ",
@@ -819,6 +856,7 @@ display_name = "Kimi K3"
 
         screen.handle_browse_key(key('n')).unwrap();
         assert_eq!(screen.mode, Mode::SelectModel);
+        screen.handle_model_picker_key(key('/'));
         for character in "kimi".chars() {
             screen.handle_model_picker_key(key(character));
         }
@@ -846,6 +884,7 @@ display_name = "Kimi K3"
         let mut screen = HomeScreen::new(db, Theme::dark(), provider_models());
         screen.begin_model_selection();
 
+        screen.handle_model_picker_key(key('/'));
         for character in "openrouter".chars() {
             screen.handle_model_picker_key(key(character));
         }
@@ -854,8 +893,34 @@ display_name = "Kimi K3"
         assert_eq!(screen.models[matches[0]].binding.profile, "kimi");
 
         screen.handle_model_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(screen.mode, Mode::SelectModel);
+        assert!(!screen.model_searching);
+        assert!(screen.input.is_empty());
+
+        screen.handle_model_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(screen.mode, Mode::Browse);
         assert!(screen.input.is_empty());
+    }
+
+    #[test]
+    fn model_picker_uses_vim_navigation_until_search_starts() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Db::open(&temp.path().join("test.db")).unwrap();
+        let mut screen = HomeScreen::new(db, Theme::dark(), provider_models());
+        screen.begin_model_selection();
+        let initial = screen.model_cursor;
+
+        screen.handle_model_picker_key(key('x'));
+        assert!(screen.input.is_empty());
+        screen.handle_model_picker_key(key('j'));
+        assert_eq!(screen.model_cursor, initial + 1);
+        screen.handle_model_picker_key(key('k'));
+        assert_eq!(screen.model_cursor, initial);
+
+        screen.handle_model_picker_key(key('/'));
+        screen.handle_model_picker_key(key('k'));
+        assert_eq!(screen.input, "k");
+        assert!(screen.model_searching);
     }
 }
 
