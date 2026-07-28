@@ -396,9 +396,9 @@ impl Engine {
             );
 
             // If snip freed enough, we're done
-            if new_tokens < self.context_window * 70 / 100 {
+            if new_tokens < old_tokens && new_tokens < self.context_window * 70 / 100 {
                 let new_count = snipped.len();
-                self.messages = snipped;
+                self.commit_compacted_messages(snipped);
                 return Ok(format!(
                     "Snipped {} old messages (~{} tokens freed)",
                     old_count - new_count + 1, // +1 for snip marker
@@ -454,14 +454,23 @@ impl Engine {
             anyhow::bail!("Compact error: API stream ended without completion");
         }
 
-        self.messages = vec![
+        self.commit_compacted_messages(vec![
             Message::user("Here is a summary of our conversation so far:"),
             Message::assistant_text(&summary),
-        ];
+        ]);
 
         Ok(format!(
             "Compacted {old_count} messages into summary.\n\n\x1b[2m{summary}\x1b[0m"
         ))
+    }
+
+    /// Replacing history invalidates provider state indexed into the previous
+    /// message vector (notably OpenAI Responses' `previous_response_id`
+    /// cursor). Reset only at the successful mutation boundary so failed
+    /// compaction leaves both history and provider state usable.
+    fn commit_compacted_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+        self.provider.reset_session();
     }
 
     /// Check if an API error is a prompt-too-long error (413 or specific error message).
@@ -1124,6 +1133,43 @@ mod tests {
 
     struct ResetTrackingProvider {
         resets: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct CompactionTrackingProvider {
+        resets: Arc<AtomicUsize>,
+        complete: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CompactionTrackingProvider {
+        fn name(&self) -> &str {
+            "compaction-tracking"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        fn reset_session(&mut self) {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            let (tx, rx) = mpsc::channel(2);
+            tx.send(ApiEvent::Text("compacted summary".to_string()))
+                .await
+                .unwrap();
+            if self.complete {
+                tx.send(ApiEvent::Done).await.unwrap();
+            }
+            drop(tx);
+            Ok(ProviderStream::new(rx, cancel.child_token()))
+        }
     }
 
     #[test]
@@ -1803,12 +1849,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_summary_preserves_history_after_snipping_candidate() {
-        let mut engine = Engine::for_tests(
-            Box::new(TruncatedProvider),
-            SteeringQueue::default(),
-            PermissionMode::Bypass,
+    async fn snip_compaction_resets_provider_cursor_after_rewriting_history() {
+        let resets = Arc::new(AtomicUsize::new(0));
+        let provider = Box::new(ResetTrackingProvider {
+            resets: resets.clone(),
+        });
+        let mut engine =
+            Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Bypass);
+
+        let old_content = "old context ".repeat(1_000);
+        engine.messages_mut().extend([
+            Message::user(&old_content),
+            Message::assistant_text(&old_content),
+            Message::assistant_blocks(vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "Read".to_string(),
+                input: serde_json::json!({"file_path": "README.md"}),
+            }]),
+            Message::tool_results(vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: "contents".to_string(),
+                is_error: None,
+            }]),
+        ]);
+        for index in 4..13 {
+            engine
+                .messages_mut()
+                .push(Message::user(&format!("recent message {index}")));
+        }
+
+        engine.compact().await.unwrap();
+
+        assert_eq!(
+            engine.messages().len(),
+            12,
+            "tool-result boundary backoff reproduces the stale cursor index shape"
         );
+        assert_eq!(resets.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn summary_compaction_resets_provider_cursor_after_rewriting_history() {
+        let resets = Arc::new(AtomicUsize::new(0));
+        let provider = Box::new(CompactionTrackingProvider {
+            resets: resets.clone(),
+            complete: true,
+        });
+        let mut engine =
+            Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Bypass);
+        let large_message = "context ".repeat(10_000);
+        for index in 0..13 {
+            engine
+                .messages_mut()
+                .push(Message::user(&format!("{index}: {large_message}")));
+        }
+
+        engine.compact().await.unwrap();
+
+        assert_eq!(engine.messages().len(), 2);
+        assert_eq!(resets.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn snip_candidate_that_increases_tokens_is_not_committed() {
+        let resets = Arc::new(AtomicUsize::new(0));
+        let provider = Box::new(CompactionTrackingProvider {
+            resets: resets.clone(),
+            complete: true,
+        });
+        let mut engine =
+            Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Bypass);
+        for index in 0..13 {
+            engine
+                .messages_mut()
+                .push(Message::user(&index.to_string()));
+        }
+
+        engine.compact().await.unwrap();
+
+        assert_eq!(
+            engine.messages().len(),
+            2,
+            "a larger snip candidate should fall back to summary compaction"
+        );
+        assert_eq!(resets.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_summary_preserves_history_after_snipping_candidate() {
+        let resets = Arc::new(AtomicUsize::new(0));
+        let provider = Box::new(CompactionTrackingProvider {
+            resets: resets.clone(),
+            complete: false,
+        });
+        let mut engine =
+            Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Bypass);
         let large_message = "context ".repeat(10_000);
         for index in 0..13 {
             engine
@@ -1824,6 +1959,11 @@ mod tests {
             serde_json::to_value(engine.messages()).unwrap(),
             original,
             "failed summarization must not commit the snipped candidate"
+        );
+        assert_eq!(
+            resets.load(Ordering::SeqCst),
+            0,
+            "failed compaction must preserve provider continuation state"
         );
     }
 
