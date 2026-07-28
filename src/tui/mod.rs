@@ -117,9 +117,48 @@ pub async fn run(
                         &db,
                         terminal_guard.terminal_mut(),
                         theme,
+                        &models,
                     )
                     .await?;
                     engine_binding = engine.model_binding().cloned();
+                }
+                Action::SwitchModel {
+                    session_id,
+                    selector,
+                } => {
+                    let session = db.get_session(&session_id)?.ok_or_else(|| {
+                        anyhow::anyhow!("session {session_id} no longer exists")
+                    })?;
+                    match config.resolve_model(&selector) {
+                        Ok(resolved) => {
+                            match crate::build_engine(config, &resolved, plugins.clone()).await {
+                                Ok(new_engine) => {
+                                    // Only persist the selection after its
+                                    // provider and credentials validate. A
+                                    // typo or unavailable key must not strand
+                                    // an otherwise usable saved session.
+                                    db.update_session_binding(&session_id, &resolved.binding)?;
+                                    engine = Some(new_engine);
+                                    engine_binding = Some(resolved.binding);
+                                    next_action = Action::Chat { session_id };
+                                }
+                                Err(error) => {
+                                    home_notice = Some(format!(
+                                        "Cannot switch '{}': {error}",
+                                        session.name.as_deref().unwrap_or(&session.id)
+                                    ));
+                                    next_action = Action::Home;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            home_notice = Some(format!(
+                                "Cannot switch '{}': {error}",
+                                session.name.as_deref().unwrap_or(&session.id)
+                            ));
+                            next_action = Action::Home;
+                        }
+                    }
                 }
                 Action::Quit => return Ok(()),
             }

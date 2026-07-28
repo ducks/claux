@@ -311,20 +311,6 @@ impl Engine {
         &self.model
     }
 
-    pub fn set_model(&mut self, model: &str) {
-        self.model = model.to_string();
-        if let Some(binding) = &mut self.model_binding {
-            binding.model = model.to_string();
-            binding.display_name = model.to_string();
-            binding.profile = format!("adhoc:{model}");
-            binding.reasoning_effort = None;
-        }
-        self.provider.set_model(model);
-        self.tools.set_model(model);
-        self.cost = CostTracker::new(model);
-        self.context_window = crate::model::built_in_metadata(model).context_window;
-    }
-
     pub fn set_model_binding(&mut self, binding: ModelBinding) {
         self.model_binding = Some(binding);
     }

@@ -151,6 +151,59 @@ pub async fn run(
                         None => println!("Session not found: {prefix}"),
                     }
                 }
+                CommandResult::Async(commands::AsyncCommand::Model(selector)) => {
+                    let Some(selector) = selector else {
+                        println!(
+                            "{}",
+                            commands::format_model_choices(
+                                engine.model_binding(),
+                                &config.selectable_models()?,
+                            )
+                        );
+                        continue;
+                    };
+
+                    match config.resolve_model(&selector) {
+                        Ok(next_model) => {
+                            let messages = engine.messages().to_vec();
+                            let rebuilt = async {
+                                let mut next_engine =
+                                    crate::build_engine(config, &next_model, plugins.clone())
+                                        .await?;
+                                let system_prompt = context::build_system_prompt_for_model(
+                                    &next_model.binding.model,
+                                    Some(&plugins),
+                                    &HookTrigger::OnContextBuild,
+                                    next_model.binding.provider_kind == ProviderKind::Anthropic,
+                                )
+                                .await?;
+                                next_engine.set_system_prompt(system_prompt);
+                                next_engine.set_messages(messages);
+                                Ok::<_, anyhow::Error>(next_engine)
+                            }
+                            .await;
+                            match rebuilt {
+                                Ok(next_engine) => {
+                                    engine = next_engine;
+                                    resolved_model = next_model;
+                                    session::save_model_binding(
+                                        &session_path,
+                                        &resolved_model.binding,
+                                    )?;
+                                    println!(
+                                        "Model set to \x1b[33m{}\x1b[0m via {}",
+                                        resolved_model.binding.display_name,
+                                        resolved_model.binding.provider_name
+                                    );
+                                }
+                                Err(error) => {
+                                    eprintln!("\x1b[31mError: {error}\x1b[0m");
+                                }
+                            }
+                        }
+                        Err(error) => eprintln!("\x1b[31mError: {error}\x1b[0m"),
+                    }
+                }
                 CommandResult::Async(async_cmd) => {
                     match commands::execute_async(async_cmd, &mut engine).await {
                         Ok(output) => println!("{output}"),

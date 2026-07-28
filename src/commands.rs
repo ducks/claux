@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use crate::config::{ModelBinding, ResolvedModel};
 use crate::query::Engine;
 use crate::session;
 use crate::theme::ThemeName;
@@ -79,7 +80,9 @@ pub async fn execute_async(cmd: AsyncCommand, engine: &mut Engine) -> Result<Str
         AsyncCommand::Diff => Ok(engine.last_turn_diff()),
         AsyncCommand::UndoTurn => engine.undo_last_turn(),
         AsyncCommand::Resume(id) => execute_resume(id, engine),
-        AsyncCommand::Model(new_model) => execute_model(new_model, engine),
+        AsyncCommand::Model(_) => {
+            anyhow::bail!("model switching must be resolved through a configured model profile")
+        }
         AsyncCommand::Theme(theme_name) => execute_theme(theme_name, engine).await,
     }
 }
@@ -141,22 +144,33 @@ fn execute_resume(id: Option<String>, engine: &mut Engine) -> Result<String> {
     }
 }
 
-fn execute_model(new_model: Option<String>, engine: &mut Engine) -> Result<String> {
-    match new_model {
-        Some(model) => {
-            engine.set_model(&model);
-            Ok(format!("Model set to \x1b[33m{model}\x1b[0m"))
+/// Format configured model profiles for frontends that handle provider-safe
+/// switching themselves.
+pub fn format_model_choices(current: Option<&ModelBinding>, models: &[ResolvedModel]) -> String {
+    let mut models = models.iter().collect::<Vec<_>>();
+    models.sort_by_key(|resolved| {
+        (
+            resolved.binding.provider_name.to_ascii_lowercase(),
+            resolved.binding.display_name.to_ascii_lowercase(),
+        )
+    });
+
+    let mut output = String::from("Configured models:");
+    let mut provider = None::<&str>;
+    for resolved in models {
+        let binding = &resolved.binding;
+        if provider != Some(binding.provider_name.as_str()) {
+            provider = Some(binding.provider_name.as_str());
+            output.push_str(&format!("\n\n{}:", binding.provider_name));
         }
-        None => Ok(format!(
-            "Current model: \x1b[33m{}\x1b[0m\n\n\
-             Available:\n  \
-             claude-opus-4-8\n  \
-             claude-sonnet-5\n  \
-             claude-haiku-4-5-20251001\n\n\
-             Use /model <name> to switch (any provider model id works).",
-            engine.model()
-        )),
+        let marker = if current == Some(binding) { " *" } else { "" };
+        output.push_str(&format!(
+            "\n  {}{marker} — {} ({})",
+            binding.profile, binding.display_name, binding.model
+        ));
     }
+    output.push_str("\n\nUse /model <profile> to switch.");
+    output
 }
 
 async fn execute_theme(theme_name: Option<String>, engine: &mut Engine) -> Result<String> {
@@ -205,7 +219,7 @@ fn help_text() -> String {
   /compact        Summarize conversation to free context
   /diff           Show the last turn's file changes
   /undo-turn      Safely undo the last turn's file changes
-  /model [name]   Show or switch model
+  /model [profile] Show configured models or switch profile
   /theme [name]   Show or switch theme (dark, light, ansi)
   /resume [id]    List or resume past sessions
   /clear          Clear screen
@@ -277,14 +291,47 @@ mod tests {
     }
 
     #[test]
-    fn model_with_args() {
+    fn model_with_profile() {
         if let Some(CommandResult::Async(AsyncCommand::Model(Some(m)))) =
-            parse_command("/model claude-opus-4-20250514")
+            parse_command("/model kimi")
         {
-            assert_eq!(m, "claude-opus-4-20250514");
+            assert_eq!(m, "kimi");
         } else {
             panic!("expected Model(Some)");
         }
+    }
+
+    #[test]
+    fn model_choices_are_grouped_and_mark_current_profile() {
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[providers.a]
+type = "anthropic"
+name = "Anthropic"
+
+[providers.b]
+type = "openai"
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+
+[model_profiles.sonnet]
+provider = "a"
+model = "claude-sonnet"
+
+[model_profiles.kimi]
+provider = "b"
+model = "moonshotai/kimi-k3"
+"#,
+        )
+        .unwrap();
+        let models = config.selectable_models().unwrap();
+        let current = &config.resolve_model("kimi").unwrap().binding;
+
+        let output = format_model_choices(Some(current), &models);
+
+        assert!(output.contains("Anthropic:\n  sonnet"));
+        assert!(output.contains("OpenRouter:\n  kimi *"));
+        assert!(output.contains("Use /model <profile> to switch."));
     }
 
     #[test]

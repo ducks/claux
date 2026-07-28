@@ -9,6 +9,7 @@ use std::io::Stdout;
 use std::sync::{Arc, Mutex};
 
 use crate::commands::{self, CommandResult};
+use crate::config::ResolvedModel;
 use crate::db::Db;
 use crate::permissions::PermissionResponse;
 use crate::query::{Engine, SteeringQueue, StreamEvent};
@@ -241,6 +242,7 @@ pub async fn run(
     db: &Db,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     theme: Theme,
+    models: &[ResolvedModel],
 ) -> Result<Action> {
     // Clear engine state and load this session's messages. repair_history
     // makes old or crash-interrupted saves API-valid (tool_use/tool_result
@@ -299,6 +301,23 @@ pub async fn run(
                         return Ok(Action::Home);
                     }
                     CommandResult::Async(async_cmd) => match async_cmd {
+                        commands::AsyncCommand::Model(selector) => match selector {
+                            Some(selector) => {
+                                // The top-level TUI owns provider construction.
+                                // Return there so switching profiles rebuilds
+                                // the engine instead of merely changing a model
+                                // string on the current provider.
+                                db.replace_messages(session_id, engine.messages())?;
+                                return Ok(Action::SwitchModel {
+                                    session_id: session_id.to_string(),
+                                    selector,
+                                });
+                            }
+                            None => app.add_message(
+                                "system",
+                                &commands::format_model_choices(engine.model_binding(), models),
+                            ),
+                        },
                         commands::AsyncCommand::Theme(theme_name) => match theme_name {
                             Some(name) => {
                                 let theme = match name.to_lowercase().as_str() {

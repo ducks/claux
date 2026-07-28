@@ -8,6 +8,11 @@
 pub enum Action {
     /// Switch to the chat screen with the given session ID
     Chat { session_id: String },
+    /// Resolve a configured model profile and reopen this chat with it.
+    SwitchModel {
+        session_id: String,
+        selector: String,
+    },
     /// Return to the home screen
     Home,
     /// Quit the application

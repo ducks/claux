@@ -11,7 +11,7 @@ A terminal-based AI coding assistant written in Rust. Streams responses, execute
 - **Session persistence** — SQLite-backed with search; full transcripts including tool calls and results, so `/resume` and `--resume` restore exactly what the model saw. Histories from older versions are repaired on load
 - **Safe turn checkpoints** — `/diff` shows exactly what the last turn changed; `/undo-turn` restores it only when no file has been edited since, so later human work is never overwritten
 - **Compaction** — `/compact` summarizes conversation to free context
-- **Model selection** — choose one configured model/provider for each new TUI session; `/model <name>` can switch model IDs on the active provider
+- **Model selection** — search configured models by provider, profile, or model when starting a TUI session; `/model <profile>` safely switches providers while preserving the chat
 - **Sub-agents** — Agent tool spawns scoped sub-conversations. Sub-agents inherit the parent session's permission mode, so a sub-agent can't act with more authority than you granted the session. Because sub-agents run non-interactively, any tool the mode would prompt for is denied rather than auto-run (Plan denies all writes; Bypass allows all)
 - **Auto-compact** — triggers when conversation gets large
 - **Cost tracking** — per-model token usage and USD estimates
@@ -155,7 +155,7 @@ claux --resume 20260401-143022
 | `/compact` | Summarize conversation to free context |
 | `/diff` | Show file changes made by the last turn |
 | `/undo-turn` | Safely undo the last turn's file changes |
-| `/model [name]` | Show or switch model |
+| `/model [profile]` | Show configured models or safely switch provider/model profile |
 | `/resume [id]` | List or resume past sessions |
 | `/clear` | Clear screen |
 | `/exit` | Exit |

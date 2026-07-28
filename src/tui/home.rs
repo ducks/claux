@@ -24,6 +24,8 @@ use super::screen::Action;
 enum Mode {
     /// Browsing projects/sessions
     Browse,
+    /// Searching configured provider/model profiles for a new session.
+    SelectModel,
     /// Typing a name for a new session
     NewSession,
     /// Typing a name for a new project
@@ -56,6 +58,7 @@ pub struct HomeScreen {
     theme: Theme,
     models: Vec<ResolvedModel>,
     selected_model: usize,
+    model_cursor: usize,
     notice: Option<String>,
     /// Empty projects created by the user (no sessions yet)
     empty_projects: Vec<String>,
@@ -74,6 +77,7 @@ impl HomeScreen {
             theme,
             models,
             selected_model: 0,
+            model_cursor: 0,
             notice: None,
             empty_projects: Vec::new(),
         };
@@ -89,15 +93,44 @@ impl HomeScreen {
         self.notice = Some(notice.into());
     }
 
-    fn select_next_model(&mut self) {
-        self.selected_model = (self.selected_model + 1) % self.models.len();
+    fn filtered_model_indices(&self) -> Vec<usize> {
+        let query = self.input.trim().to_ascii_lowercase();
+        let mut matches = self
+            .models
+            .iter()
+            .enumerate()
+            .filter(|(_, model)| {
+                query.is_empty()
+                    || [
+                        model.binding.profile.as_str(),
+                        model.binding.display_name.as_str(),
+                        model.binding.provider_name.as_str(),
+                        model.binding.model.as_str(),
+                    ]
+                    .iter()
+                    .any(|field| field.to_ascii_lowercase().contains(&query))
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|index| {
+            let binding = &self.models[*index].binding;
+            (
+                binding.provider_name.to_ascii_lowercase(),
+                binding.display_name.to_ascii_lowercase(),
+            )
+        });
+        matches
     }
 
-    fn select_previous_model(&mut self) {
-        self.selected_model = self
-            .selected_model
-            .checked_sub(1)
-            .unwrap_or(self.models.len() - 1);
+    fn begin_model_selection(&mut self) {
+        self.mode = Mode::SelectModel;
+        self.input.clear();
+        self.cursor = 0;
+        self.model_cursor = self
+            .filtered_model_indices()
+            .iter()
+            .position(|index| *index == self.selected_model)
+            .unwrap_or(0);
     }
 
     /// Reload sessions from DB and rebuild the tree.
@@ -186,6 +219,9 @@ impl HomeScreen {
                                 return Ok(action);
                             }
                         }
+                        Mode::SelectModel => {
+                            self.handle_model_picker_key(key);
+                        }
                         Mode::NewSession | Mode::NewProject => {
                             if let Some(action) = self.handle_prompt_key(key)? {
                                 return Ok(action);
@@ -240,9 +276,7 @@ impl HomeScreen {
             }
 
             (_, KeyCode::Char('n')) => {
-                self.mode = Mode::NewSession;
-                self.input.clear();
-                self.cursor = 0;
+                self.begin_model_selection();
             }
 
             (_, KeyCode::Char('p')) => {
@@ -268,6 +302,47 @@ impl HomeScreen {
         }
 
         Ok(None)
+    }
+
+    fn handle_model_picker_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Browse;
+                self.input.clear();
+                self.cursor = 0;
+                self.model_cursor = 0;
+            }
+            KeyCode::Enter => {
+                if let Some(index) = self
+                    .filtered_model_indices()
+                    .get(self.model_cursor)
+                    .copied()
+                {
+                    self.selected_model = index;
+                    self.mode = Mode::NewSession;
+                    self.input.clear();
+                    self.cursor = 0;
+                }
+            }
+            KeyCode::Up if self.model_cursor > 0 => {
+                self.model_cursor -= 1;
+            }
+            KeyCode::Down => {
+                let count = self.filtered_model_indices().len();
+                if self.model_cursor + 1 < count {
+                    self.model_cursor += 1;
+                }
+            }
+            KeyCode::Backspace if self.cursor > 0 => {
+                super::input::backspace(&mut self.input, &mut self.cursor);
+                self.model_cursor = 0;
+            }
+            KeyCode::Char(character) => {
+                super::input::insert(&mut self.input, &mut self.cursor, character);
+                self.model_cursor = 0;
+            }
+            _ => {}
+        }
     }
 
     fn handle_delete_confirmation(&mut self, key: KeyEvent) -> Result<()> {
@@ -335,12 +410,6 @@ impl HomeScreen {
             KeyCode::Backspace if self.cursor > 0 => {
                 super::input::backspace(&mut self.input, &mut self.cursor);
             }
-            KeyCode::Tab | KeyCode::Right if self.mode == Mode::NewSession => {
-                self.select_next_model();
-            }
-            KeyCode::BackTab | KeyCode::Left if self.mode == Mode::NewSession => {
-                self.select_previous_model();
-            }
             KeyCode::Char(c) => {
                 super::input::insert(&mut self.input, &mut self.cursor, c);
             }
@@ -392,8 +461,138 @@ impl HomeScreen {
         );
         f.render_widget(header, chunks[0]);
 
-        // Tree view
-        let mut lines: Vec<Line> = Vec::new();
+        // Tree view, or the provider/model picker while creating a chat.
+        let (lines, panel_title) = if self.mode == Mode::SelectModel {
+            (self.model_picker_lines(), " Choose a Model ")
+        } else {
+            (self.session_tree_lines(), " Sessions ")
+        };
+
+        let tree_widget = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(self.theme.border))
+                .title(panel_title),
+        );
+        f.render_widget(tree_widget, chunks[1]);
+
+        // Input / help area
+        match &self.mode {
+            Mode::SelectModel => {
+                let prompt = format!("Search: {}", self.input);
+                let input_widget = Paragraph::new(prompt)
+                    .style(Style::default().fg(self.theme.fg))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(self.theme.info))
+                            .title(" Provider / Model "),
+                    );
+                f.render_widget(input_widget, chunks[2]);
+                let cursor_width = super::input::display_width_before(&self.input, self.cursor);
+                f.set_cursor_position((chunks[2].x + 9 + cursor_width as u16, chunks[2].y + 1));
+            }
+            Mode::NewSession => {
+                let prompt = format!(
+                    "Name: {}  Model: {} · {}",
+                    self.input,
+                    self.selected_model().binding.display_name,
+                    self.selected_model().binding.provider_name,
+                );
+                let input_widget = Paragraph::new(prompt)
+                    .style(Style::default().fg(self.theme.fg))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(self.theme.info))
+                            .title(" New Session "),
+                    );
+                f.render_widget(input_widget, chunks[2]);
+                let cursor_width = super::input::display_width_before(&self.input, self.cursor);
+                f.set_cursor_position((chunks[2].x + 7 + cursor_width as u16, chunks[2].y + 1));
+            }
+            Mode::NewProject => {
+                let prompt = format!("Project name: {}", self.input);
+                let input_widget = Paragraph::new(prompt)
+                    .style(Style::default().fg(self.theme.fg))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(self.theme.info))
+                            .title(" New Project "),
+                    );
+                f.render_widget(input_widget, chunks[2]);
+                let cursor_width = super::input::display_width_before(&self.input, self.cursor);
+                f.set_cursor_position((chunks[2].x + 15 + cursor_width as u16, chunks[2].y + 1));
+            }
+            Mode::ConfirmDelete { display_name, .. } => {
+                let prompt = Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!(" Delete \"{display_name}\"? "),
+                        Style::default()
+                            .fg(self.theme.error)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("(y)es / (n)o", Style::default().fg(self.theme.dim)),
+                ]))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(self.theme.error))
+                        .title(" Confirm Delete "),
+                );
+                f.render_widget(prompt, chunks[2]);
+            }
+            Mode::Browse => {
+                let help = Paragraph::new(Line::from(vec![
+                    Span::styled(" n", Style::default().fg(self.theme.info)),
+                    Span::styled(":new  ", Style::default().fg(self.theme.dim)),
+                    Span::styled("p", Style::default().fg(self.theme.info)),
+                    Span::styled(":project  ", Style::default().fg(self.theme.dim)),
+                    Span::styled("d", Style::default().fg(self.theme.info)),
+                    Span::styled(":delete  ", Style::default().fg(self.theme.dim)),
+                    Span::styled("Enter", Style::default().fg(self.theme.info)),
+                    Span::styled(":open  ", Style::default().fg(self.theme.dim)),
+                    Span::styled("q", Style::default().fg(self.theme.info)),
+                    Span::styled(":quit", Style::default().fg(self.theme.dim)),
+                ]))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(self.theme.border)),
+                );
+                f.render_widget(help, chunks[2]);
+            }
+        }
+
+        // Status
+        let status_text = self.notice.as_deref().map_or_else(
+            || {
+                if self.mode == Mode::SelectModel {
+                    " Type to search · ↑/↓ select · Enter confirm · Esc cancel ".to_string()
+                } else {
+                    format!(
+                        " {} · {} ",
+                        self.selected_model().binding.display_name,
+                        self.selected_model().binding.provider_name
+                    )
+                }
+            },
+            |notice| format!(" {notice} "),
+        );
+        let status = Paragraph::new(Line::from(vec![Span::styled(
+            status_text,
+            Style::default().fg(if self.notice.is_some() {
+                self.theme.error
+            } else {
+                self.theme.dim
+            }),
+        )]));
+        f.render_widget(status, chunks[3]);
+    }
+
+    fn session_tree_lines(&self) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
         for (i, item) in self.tree.iter().enumerate() {
             let selected = i == self.selected;
             let highlight = if selected {
@@ -473,109 +672,52 @@ impl HomeScreen {
                 Style::default().fg(self.theme.dim),
             )));
         }
+        lines
+    }
 
-        let tree_widget = Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(self.theme.border))
-                .title(" Sessions "),
-        );
-        f.render_widget(tree_widget, chunks[1]);
-
-        // Input / help area
-        match &self.mode {
-            Mode::NewSession => {
-                let prompt = format!(
-                    "Name: {}  Model: {} (Tab to change)",
-                    self.input,
-                    self.selected_model().binding.display_name
-                );
-                let input_widget = Paragraph::new(prompt)
-                    .style(Style::default().fg(self.theme.fg))
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(self.theme.info))
-                            .title(" New Session "),
-                    );
-                f.render_widget(input_widget, chunks[2]);
-                let cursor_width = super::input::display_width_before(&self.input, self.cursor);
-                f.set_cursor_position((chunks[2].x + 7 + cursor_width as u16, chunks[2].y + 1));
-            }
-            Mode::NewProject => {
-                let prompt = format!("Project name: {}", self.input);
-                let input_widget = Paragraph::new(prompt)
-                    .style(Style::default().fg(self.theme.fg))
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(self.theme.info))
-                            .title(" New Project "),
-                    );
-                f.render_widget(input_widget, chunks[2]);
-                let cursor_width = super::input::display_width_before(&self.input, self.cursor);
-                f.set_cursor_position((chunks[2].x + 15 + cursor_width as u16, chunks[2].y + 1));
-            }
-            Mode::ConfirmDelete { display_name, .. } => {
-                let prompt = Paragraph::new(Line::from(vec![
-                    Span::styled(
-                        format!(" Delete \"{display_name}\"? "),
-                        Style::default()
-                            .fg(self.theme.error)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("(y)es / (n)o", Style::default().fg(self.theme.dim)),
-                ]))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(self.theme.error))
-                        .title(" Confirm Delete "),
-                );
-                f.render_widget(prompt, chunks[2]);
-            }
-            Mode::Browse => {
-                let help = Paragraph::new(Line::from(vec![
-                    Span::styled(" n", Style::default().fg(self.theme.info)),
-                    Span::styled(":new  ", Style::default().fg(self.theme.dim)),
-                    Span::styled("p", Style::default().fg(self.theme.info)),
-                    Span::styled(":project  ", Style::default().fg(self.theme.dim)),
-                    Span::styled("d", Style::default().fg(self.theme.info)),
-                    Span::styled(":delete  ", Style::default().fg(self.theme.dim)),
-                    Span::styled("Enter", Style::default().fg(self.theme.info)),
-                    Span::styled(":open  ", Style::default().fg(self.theme.dim)),
-                    Span::styled("q", Style::default().fg(self.theme.info)),
-                    Span::styled(":quit", Style::default().fg(self.theme.dim)),
-                ]))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(self.theme.border)),
-                );
-                f.render_widget(help, chunks[2]);
-            }
+    fn model_picker_lines(&self) -> Vec<Line<'static>> {
+        let matches = self.filtered_model_indices();
+        if matches.is_empty() {
+            return vec![Line::from(Span::styled(
+                "  No configured models match. Press Esc and run `claux config init` to add one.",
+                Style::default().fg(self.theme.dim),
+            ))];
         }
 
-        // Status
-        let status_text = self.notice.as_deref().map_or_else(
-            || {
-                format!(
-                    " {} · {} ",
-                    self.selected_model().binding.display_name,
-                    self.selected_model().binding.provider_name
-                )
-            },
-            |notice| format!(" {notice} "),
-        );
-        let status = Paragraph::new(Line::from(vec![Span::styled(
-            status_text,
-            Style::default().fg(if self.notice.is_some() {
-                self.theme.error
+        let mut lines = Vec::new();
+        let mut last_provider: Option<String> = None;
+        for (position, index) in matches.into_iter().enumerate() {
+            let binding = &self.models[index].binding;
+            if last_provider.as_deref() != Some(binding.provider_name.as_str()) {
+                if last_provider.is_some() {
+                    lines.push(Line::from(""));
+                }
+                lines.push(Line::from(Span::styled(
+                    format!(" {} ", binding.provider_name),
+                    Style::default()
+                        .fg(self.theme.info)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                last_provider = Some(binding.provider_name.clone());
+            }
+
+            let selected = position == self.model_cursor;
+            let style = if selected {
+                Style::default()
+                    .fg(self.theme.fg)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
-                self.theme.dim
-            }),
-        )]));
-        f.render_widget(status, chunks[3]);
+                Style::default().fg(self.theme.fg)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("   {} ", binding.display_name), style),
+                Span::styled(
+                    format!(" {} · {} ", binding.model, binding.profile),
+                    Style::default().fg(self.theme.dim),
+                ),
+            ]));
+        }
+        lines
     }
 }
 
@@ -589,6 +731,35 @@ mod tests {
             .iter()
             .map(|name| config.resolve_model(name).unwrap())
             .collect()
+    }
+
+    fn provider_models() -> Vec<ResolvedModel> {
+        let config: crate::config::Config = toml::from_str(
+            r#"
+default_profile = "sonnet"
+
+[providers.anthropic]
+type = "anthropic"
+name = "Anthropic"
+
+[providers.openrouter]
+type = "openai"
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+
+[model_profiles.sonnet]
+provider = "anthropic"
+model = "claude-sonnet"
+display_name = "Claude Sonnet"
+
+[model_profiles.kimi]
+provider = "openrouter"
+model = "moonshotai/kimi-k3"
+display_name = "Kimi K3"
+"#,
+        )
+        .unwrap();
+        config.selectable_models().unwrap()
     }
 
     fn screen_with_session() -> (HomeScreen, tempfile::TempDir) {
@@ -644,9 +815,15 @@ mod tests {
     fn new_session_uses_selected_model() {
         let temp = tempfile::tempdir().unwrap();
         let db = Db::open(&temp.path().join("test.db")).unwrap();
-        let mut screen = HomeScreen::new(db, Theme::dark(), models(&["model-a", "model-b"]));
-        screen.mode = Mode::NewSession;
-        screen.select_next_model();
+        let mut screen = HomeScreen::new(db, Theme::dark(), provider_models());
+
+        screen.handle_browse_key(key('n')).unwrap();
+        assert_eq!(screen.mode, Mode::SelectModel);
+        for character in "kimi".chars() {
+            screen.handle_model_picker_key(key(character));
+        }
+        screen.handle_model_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(screen.mode, Mode::NewSession);
 
         let action = screen
             .handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -655,10 +832,30 @@ mod tests {
         let Action::Chat { session_id } = action else {
             panic!("expected chat action");
         };
-        assert_eq!(
-            screen.db.get_session(&session_id).unwrap().unwrap().model,
-            "model-b"
-        );
+        let session = screen.db.get_session(&session_id).unwrap().unwrap();
+        assert_eq!(session.model, "moonshotai/kimi-k3");
+        let binding = session.model_binding.unwrap();
+        assert_eq!(binding.profile, "kimi");
+        assert_eq!(binding.provider, "openrouter");
+    }
+
+    #[test]
+    fn model_picker_searches_provider_and_can_be_cancelled() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Db::open(&temp.path().join("test.db")).unwrap();
+        let mut screen = HomeScreen::new(db, Theme::dark(), provider_models());
+        screen.begin_model_selection();
+
+        for character in "openrouter".chars() {
+            screen.handle_model_picker_key(key(character));
+        }
+        let matches = screen.filtered_model_indices();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(screen.models[matches[0]].binding.profile, "kimi");
+
+        screen.handle_model_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(screen.mode, Mode::Browse);
+        assert!(screen.input.is_empty());
     }
 }
 
@@ -726,6 +923,12 @@ mod tuishot_shots {
         )]
         NewSession,
 
+        #[tuishot(
+            name = "home-model-picker",
+            description = "Searching configured provider and model profiles"
+        )]
+        ModelPicker,
+
         #[tuishot(name = "home-new-project", description = "Creating a new project")]
         NewProject,
     }
@@ -749,6 +952,9 @@ mod tuishot_shots {
                     screen.mode = Mode::NewSession;
                     screen.input = String::from("refactor queue");
                     screen.cursor = crate::tui::input::char_count(&screen.input);
+                }
+                HomeShot::ModelPicker => {
+                    screen.begin_model_selection();
                 }
                 HomeShot::NewProject => {
                     screen.mode = Mode::NewProject;

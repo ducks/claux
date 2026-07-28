@@ -85,10 +85,6 @@ impl Tool for AgentTool {
         false
     }
 
-    fn set_model(&mut self, model: &str) {
-        self.model = model.to_string();
-    }
-
     fn summarize(&self, input: &Value) -> String {
         input["description"]
             .as_str()
@@ -172,22 +168,6 @@ mod tests {
     use super::*;
     use crate::api::{ApiEvent, Message, ToolDefinition};
     use tokio::sync::mpsc;
-
-    #[test]
-    fn model_change_propagates_to_agent_tool() {
-        let factory: ProviderFactory = Box::new(|| panic!("provider should not be created"));
-        let mut tool = AgentTool::new(
-            factory,
-            "model-a".to_string(),
-            PermissionMode::Plan,
-            Arc::new(SandboxPolicy::unrestricted_for_tests()),
-            Arc::new(CommandSandbox::unrestricted_for_tests()),
-        );
-
-        Tool::set_model(&mut tool, "model-b");
-
-        assert_eq!(tool.model, "model-b");
-    }
 
     /// Provider that, on the sub-agent's first turn, requests a Write to a
     /// concrete path, then ends the turn. Lets us prove the sub-agent's
