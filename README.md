@@ -203,8 +203,18 @@ model = "gpt-5.6-sol"
 display_name = "OpenAI Coder"
 reasoning_effort = "medium"
 
+# Optional per-profile metadata overrides. These take precedence over built-in
+# model knowledge and the legacy model_pricing table.
+# context_window = 1050000
+# [model_profiles.openai-coder.pricing]
+# input = 5.0
+# output = 30.0
+# cache_read = 0.5
+# cache_write = 6.25
+
 # Optional pricing overrides, in USD per million tokens. Built-in prices are
-# used for known models; unknown models display "Cost: unavailable".
+# used for known models; unknown models display "Cost: unavailable". This
+# model-ID keyed form remains supported for shared or legacy configuration.
 # [model_pricing."gpt-5.6-sol"]
 # input = 5.0
 # output = 30.0

@@ -11,6 +11,7 @@ mod cost;
 mod db;
 #[cfg(test)]
 mod evals;
+mod model;
 mod onboarding;
 mod permissions;
 mod plugin;
@@ -252,7 +253,7 @@ async fn build_engine(
     engine.set_plugins(plugins);
     engine.set_auto_compact_threshold(config.auto_compact_threshold);
     engine.set_max_tokens(config.max_tokens);
-    engine.set_model_pricing(config.model_pricing.get(model).copied());
+    engine.set_model_metadata(resolved.metadata);
     Ok(engine)
 }
 

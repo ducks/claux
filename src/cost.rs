@@ -1,16 +1,5 @@
 use crate::api::types::Usage;
-use serde::{Deserialize, Serialize};
-
-/// Model prices in USD per million tokens.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct ModelPricing {
-    pub input: f64,
-    pub output: f64,
-    #[serde(default)]
-    pub cache_read: f64,
-    #[serde(default)]
-    pub cache_write: f64,
-}
+pub use crate::model::ModelPricing;
 
 /// Tracks token usage and estimated cost for a session.
 #[derive(Debug, Default)]
@@ -26,7 +15,7 @@ pub struct CostTracker {
 impl CostTracker {
     pub fn new(model: &str) -> Self {
         Self {
-            pricing: built_in_pricing(model),
+            pricing: crate::model::built_in_metadata(model).pricing,
             ..Default::default()
         }
     }
@@ -101,35 +90,6 @@ fn format_cost(cost: f64) -> String {
         format!("${cost:.8}")
     } else {
         format!("${cost:.4}")
-    }
-}
-
-fn pricing(input: f64, output: f64, cache_read: f64, cache_write: f64) -> ModelPricing {
-    ModelPricing {
-        input,
-        output,
-        cache_read,
-        cache_write,
-    }
-}
-
-fn built_in_pricing(model: &str) -> Option<ModelPricing> {
-    if model == "gpt-5.6" || model.contains("gpt-5.6-sol") {
-        Some(pricing(5.0, 30.0, 0.5, 6.25))
-    } else if model.contains("gpt-5.6-terra") {
-        Some(pricing(2.5, 15.0, 0.25, 3.125))
-    } else if model.contains("gpt-5.6-luna") {
-        Some(pricing(1.0, 6.0, 0.1, 1.25))
-    } else if model.contains("gpt-5.3-codex") || model.contains("gpt-5.2-codex") {
-        Some(pricing(1.75, 14.0, 0.175, 2.1875))
-    } else if model.contains("opus") {
-        Some(pricing(15.0, 75.0, 1.5, 18.75))
-    } else if model.contains("sonnet") {
-        Some(pricing(3.0, 15.0, 0.3, 3.75))
-    } else if model.contains("haiku") {
-        Some(pricing(0.25, 1.25, 0.025, 0.3))
-    } else {
-        None
     }
 }
 

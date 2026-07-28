@@ -157,28 +157,9 @@ pub fn should_compact(messages: &[Message], context_window: usize) -> CompactStr
 }
 
 /// Context window sizes for known models.
+#[cfg(test)]
 pub fn context_window_for_model(model: &str) -> usize {
-    if model.contains("gpt-5.6") {
-        1_050_000
-    } else if model.contains("gpt-5.3-codex")
-        || model.contains("gpt-5.2-codex")
-        || model.contains("gpt-5.1-codex")
-        || model.contains("gpt-5-codex")
-    {
-        400_000
-    } else if ["opus", "sonnet", "haiku"]
-        .iter()
-        .any(|family| model.contains(family))
-    {
-        200_000
-    } else if model.contains("gpt-4o") || model.contains("gpt-4") {
-        128_000
-    } else if model.contains("gpt-3.5") {
-        16_000
-    } else {
-        // Conservative default for unknown models
-        128_000
-    }
+    crate::model::built_in_metadata(model).context_window
 }
 
 #[cfg(test)]

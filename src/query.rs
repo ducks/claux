@@ -31,6 +31,7 @@ pub struct Engine {
     model: String,
     model_binding: Option<ModelBinding>,
     max_tokens: u32,
+    context_window: usize,
     auto_compact_threshold: f64,
     steering: SteeringQueue,
     plugins: Option<Arc<PluginRegistry>>,
@@ -99,6 +100,7 @@ impl Engine {
             model: model.to_string(),
             model_binding: None,
             max_tokens: 16384,
+            context_window: crate::model::built_in_metadata(model).context_window,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             plugins: None,
@@ -126,6 +128,7 @@ impl Engine {
             model: "test".to_string(),
             model_binding: None,
             max_tokens: 1000,
+            context_window: crate::model::built_in_metadata("test").context_window,
             auto_compact_threshold: 0.8,
             steering,
             plugins: None,
@@ -272,8 +275,9 @@ impl Engine {
         self.max_tokens = max_tokens.max(1);
     }
 
-    pub fn set_model_pricing(&mut self, pricing: Option<crate::cost::ModelPricing>) {
-        self.cost.set_pricing_override(pricing);
+    pub fn set_model_metadata(&mut self, metadata: crate::model::ModelMetadata) {
+        self.context_window = metadata.context_window;
+        self.cost.set_pricing_override(metadata.pricing);
     }
 
     pub fn set_system_prompt(&mut self, prompt: String) {
@@ -318,6 +322,7 @@ impl Engine {
         self.provider.set_model(model);
         self.tools.set_model(model);
         self.cost = CostTracker::new(model);
+        self.context_window = crate::model::built_in_metadata(model).context_window;
     }
 
     pub fn set_model_binding(&mut self, binding: ModelBinding) {
@@ -346,9 +351,8 @@ impl Engine {
             return Ok(false);
         }
 
-        let ctx_window = compact::context_window_for_model(&self.model);
         let current_tokens = compact::estimate_tokens(&self.messages);
-        let threshold_tokens = (ctx_window as f64 * self.auto_compact_threshold) as usize;
+        let threshold_tokens = (self.context_window as f64 * self.auto_compact_threshold) as usize;
 
         if current_tokens > threshold_tokens {
             tracing::info!(
@@ -356,7 +360,7 @@ impl Engine {
                 current_tokens,
                 threshold_tokens,
                 self.auto_compact_threshold * 100.0,
-                ctx_window
+                self.context_window
             );
 
             let result = self.compact().await?;
@@ -392,8 +396,7 @@ impl Engine {
             );
 
             // If snip freed enough, we're done
-            let ctx_window = compact::context_window_for_model(&self.model);
-            if new_tokens < ctx_window * 70 / 100 {
+            if new_tokens < self.context_window * 70 / 100 {
                 let new_count = snipped.len();
                 self.messages = snipped;
                 return Ok(format!(
@@ -1311,6 +1314,34 @@ mod tests {
         assert_eq!(engine.cost.total_cost_usd(), 2.0);
     }
 
+    #[test]
+    fn resolved_model_metadata_configures_compaction_and_cost() {
+        let mut engine = Engine::for_tests(
+            Box::new(MockProvider),
+            SteeringQueue::default(),
+            PermissionMode::Default,
+        );
+        engine.set_model_metadata(crate::model::ModelMetadata {
+            context_window: 64_000,
+            pricing: Some(crate::cost::ModelPricing {
+                input: 2.0,
+                output: 4.0,
+                cache_read: 0.5,
+                cache_write: 1.0,
+            }),
+        });
+        engine.cost.add_usage(&crate::api::types::Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_cost_usd: None,
+        });
+
+        assert_eq!(engine.context_window, 64_000);
+        assert_eq!(engine.cost.total_cost_usd(), 2.0);
+    }
+
     #[tokio::test]
     async fn test_parallel_tool_execution() {
         // Create a mock engine with read-only tools
@@ -1327,6 +1358,7 @@ mod tests {
             model: "test".to_string(),
             model_binding: None,
             max_tokens: 1000,
+            context_window: 128_000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             plugins: None,
@@ -1403,6 +1435,7 @@ mod tests {
             model: "test".to_string(),
             model_binding: None,
             max_tokens: 1000,
+            context_window: 128_000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             plugins: None,
@@ -1847,6 +1880,7 @@ mod tests {
             model: "test".to_string(),
             model_binding: None,
             max_tokens: 1000,
+            context_window: 128_000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             plugins: None,
@@ -1908,6 +1942,7 @@ mod tests {
             model: "test".to_string(),
             model_binding: None,
             max_tokens: 1000,
+            context_window: 128_000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             plugins: None,

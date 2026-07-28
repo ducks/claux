@@ -67,6 +67,12 @@ pub struct ModelProfile {
     pub display_name: Option<String>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// Override the built-in context window for this provider/model profile.
+    #[serde(default)]
+    pub context_window: Option<usize>,
+    /// Override built-in pricing in USD per million tokens.
+    #[serde(default)]
+    pub pricing: Option<ModelPricing>,
 }
 
 /// Credential-free provider/model identity persisted with each session.
@@ -87,6 +93,7 @@ pub struct ModelBinding {
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
     pub binding: ModelBinding,
+    pub metadata: crate::model::ModelMetadata,
     pub api_key: Option<String>,
     pub api_key_cmd: Option<String>,
 }
@@ -464,11 +471,15 @@ impl Config {
             .providers
             .get(&binding.provider)
             .filter(|provider| provider.kind == binding.provider_kind);
+        let profile = self.model_profiles.get(&binding.profile).filter(|profile| {
+            profile.provider == binding.provider && profile.model == binding.model
+        });
         let (api_key, api_key_cmd) = provider
             .map(|provider| (provider.api_key.clone(), provider.api_key_cmd.clone()))
             .unwrap_or((None, None));
         Ok(ResolvedModel {
             binding: binding.clone(),
+            metadata: self.resolve_metadata(profile, &binding.model),
             api_key,
             api_key_cmd,
         })
@@ -517,6 +528,7 @@ impl Config {
                     .unwrap_or_else(|| default_env.to_string()),
                 reasoning_effort: profile.reasoning_effort.clone(),
             },
+            metadata: self.resolve_metadata(Some(profile), &profile.model),
             api_key: provider.api_key.clone(),
             api_key_cmd: provider.api_key_cmd.clone(),
         })
@@ -562,9 +574,24 @@ impl Config {
                 api_key_env: key_env,
                 reasoning_effort: self.openai_reasoning_effort.clone(),
             },
+            metadata: self.resolve_metadata(None, model),
             api_key: key,
             api_key_cmd: key_cmd,
         })
+    }
+
+    fn resolve_metadata(
+        &self,
+        profile: Option<&ModelProfile>,
+        model: &str,
+    ) -> crate::model::ModelMetadata {
+        let legacy_pricing = self.model_pricing.get(model).copied();
+        crate::model::built_in_metadata(model).with_overrides(
+            profile.and_then(|profile| profile.context_window),
+            profile
+                .and_then(|profile| profile.pricing)
+                .or(legacy_pricing),
+        )
     }
 
     /// Whether the configured OpenAI-compatible endpoint is a hosted
@@ -769,6 +796,7 @@ mod tests {
             [model_profiles.local]
             provider = "local"
             model = "coder"
+            context_window = 64000
             "#,
         )
         .unwrap();
@@ -776,6 +804,11 @@ mod tests {
         binding.base_url = Some("http://saved.invalid/v1".to_string());
         config.providers.get_mut("local").unwrap().base_url =
             Some("http://changed.invalid/v1".to_string());
+        config
+            .model_profiles
+            .get_mut("local")
+            .unwrap()
+            .context_window = Some(32_000);
 
         let restored = config.resolve_binding(&binding).unwrap();
         assert_eq!(
@@ -783,6 +816,7 @@ mod tests {
             Some("http://saved.invalid/v1")
         );
         assert_eq!(restored.api_key.as_deref(), Some("new-secret"));
+        assert_eq!(restored.metadata.context_window, 32_000);
         assert!(!serde_json::to_string(&binding)
             .unwrap()
             .contains("new-secret"));
@@ -846,6 +880,63 @@ mod tests {
         assert_eq!(pricing.input, 0.5);
         assert_eq!(pricing.output, 1.5);
         assert_eq!(pricing.cache_read, 0.0);
+    }
+
+    #[test]
+    fn profile_metadata_overrides_built_ins_and_legacy_pricing() {
+        let config: Config = toml::from_str(
+            r#"
+            [providers.openrouter]
+            type = "openai"
+            base_url = "https://openrouter.ai/api/v1"
+
+            [model_pricing."claude-sonnet"]
+            input = 0.8
+            output = 1.8
+
+            [model_profiles.custom]
+            provider = "openrouter"
+            model = "claude-sonnet"
+            context_window = 64000
+
+            [model_profiles.custom.pricing]
+            input = 0.5
+            output = 1.5
+            cache_read = 0.05
+            cache_write = 0.625
+            "#,
+        )
+        .unwrap();
+
+        let resolved = config.resolve_model("custom").unwrap();
+        assert_eq!(resolved.metadata.context_window, 64_000);
+        assert_eq!(
+            resolved.metadata.pricing,
+            Some(ModelPricing {
+                input: 0.5,
+                output: 1.5,
+                cache_read: 0.05,
+                cache_write: 0.625,
+            })
+        );
+    }
+
+    #[test]
+    fn legacy_pricing_combines_with_built_in_context_window() {
+        let config: Config = toml::from_str(
+            r#"
+            model = "claude-sonnet"
+
+            [model_pricing."claude-sonnet"]
+            input = 0.8
+            output = 1.8
+            "#,
+        )
+        .unwrap();
+
+        let resolved = config.resolve_model("claude-sonnet").unwrap();
+        assert_eq!(resolved.metadata.context_window, 200_000);
+        assert_eq!(resolved.metadata.pricing.unwrap().input, 0.8);
     }
 
     #[test]
