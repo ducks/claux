@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use super::{Tool, ToolOutput, ToolRegistry};
 use crate::api::Provider;
+use crate::command_sandbox::CommandSandbox;
 use crate::context;
 use crate::permissions::{PermissionChecker, PermissionMode};
 use crate::query::Engine;
@@ -23,6 +24,7 @@ pub struct AgentTool {
     /// deny-all-writes and Bypass's allow-all are honored exactly.
     permission_mode: PermissionMode,
     sandbox_policy: Arc<SandboxPolicy>,
+    command_sandbox: Arc<CommandSandbox>,
 }
 
 impl AgentTool {
@@ -31,12 +33,14 @@ impl AgentTool {
         model: String,
         permission_mode: PermissionMode,
         sandbox_policy: Arc<SandboxPolicy>,
+        command_sandbox: Arc<CommandSandbox>,
     ) -> Self {
         Self {
             make_provider,
             model,
             permission_mode,
             sandbox_policy,
+            command_sandbox,
         }
     }
 }
@@ -110,7 +114,8 @@ impl Tool for AgentTool {
 
         let mut provider = (self.make_provider)();
         provider.set_model(&self.model);
-        let tools = ToolRegistry::without_agent(self.sandbox_policy.clone());
+        let tools =
+            ToolRegistry::without_agent(self.sandbox_policy.clone(), self.command_sandbox.clone());
         // Inherit the parent's permission mode. Previously hardcoded to
         // Bypass, which let a sub-agent run Bash/Write/Edit with no prompts
         // regardless of the mode the user chose - approving the Agent tool
@@ -176,6 +181,7 @@ mod tests {
             "model-a".to_string(),
             PermissionMode::Plan,
             Arc::new(SandboxPolicy::unrestricted_for_tests()),
+            Arc::new(CommandSandbox::unrestricted_for_tests()),
         );
 
         Tool::set_model(&mut tool, "model-b");
@@ -233,7 +239,13 @@ mod tests {
                 path: path_str.clone(),
             })
         });
-        let tool = AgentTool::new(factory, "test".into(), mode, sandbox_policy);
+        let tool = AgentTool::new(
+            factory,
+            "test".into(),
+            mode,
+            sandbox_policy,
+            Arc::new(CommandSandbox::unrestricted_for_tests()),
+        );
         tool.execute(
             json!({ "prompt": "write the file" }),
             tokio_util::sync::CancellationToken::new(),

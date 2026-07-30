@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "claux")]
@@ -52,6 +53,14 @@ pub enum CliCommand {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    /// Internal entry point used to apply an operating-system sandbox.
+    #[command(name = "__sandbox-exec", hide = true)]
+    SandboxExec {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        command: String,
     },
 }
 

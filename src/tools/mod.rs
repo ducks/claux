@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::ToolDefinition;
+use crate::command_sandbox::CommandSandbox;
 use crate::sandbox::SandboxPolicy;
 
 /// Output from a tool execution.
@@ -80,6 +81,7 @@ impl ToolRegistry {
         model: String,
         permission_mode: crate::permissions::PermissionMode,
         sandbox_policy: Arc<SandboxPolicy>,
+        command_sandbox: Arc<CommandSandbox>,
     ) -> Self {
         let todo_state = todo::new_todo_state();
         Self {
@@ -89,13 +91,14 @@ impl ToolRegistry {
                 Box::new(edit::EditTool::new(sandbox_policy.clone())),
                 Box::new(glob::GlobTool::new(sandbox_policy.clone())),
                 Box::new(grep::GrepTool::new(sandbox_policy.clone())),
-                Box::new(bash::BashTool),
+                Box::new(bash::BashTool::new(command_sandbox.clone())),
                 Box::new(web_fetch::WebFetchTool::new()),
                 Box::new(agent::AgentTool::new(
                     factory,
                     model,
                     permission_mode,
                     sandbox_policy,
+                    command_sandbox,
                 )),
                 Box::new(todo::TodoWriteTool::new(todo_state)),
             ],
@@ -103,7 +106,10 @@ impl ToolRegistry {
     }
 
     /// Create a registry without Agent (for sub-agents to prevent recursion).
-    pub fn without_agent(sandbox_policy: Arc<SandboxPolicy>) -> Self {
+    pub fn without_agent(
+        sandbox_policy: Arc<SandboxPolicy>,
+        command_sandbox: Arc<CommandSandbox>,
+    ) -> Self {
         let todo_state = todo::new_todo_state();
         Self {
             tools: vec![
@@ -112,7 +118,7 @@ impl ToolRegistry {
                 Box::new(edit::EditTool::new(sandbox_policy.clone())),
                 Box::new(glob::GlobTool::new(sandbox_policy.clone())),
                 Box::new(grep::GrepTool::new(sandbox_policy)),
-                Box::new(bash::BashTool),
+                Box::new(bash::BashTool::new(command_sandbox)),
                 Box::new(web_fetch::WebFetchTool::new()),
                 Box::new(todo::TodoWriteTool::new(todo_state)),
             ],
@@ -127,7 +133,10 @@ impl ToolRegistry {
 
     #[cfg(test)]
     pub fn without_agent_for_tests() -> Self {
-        Self::without_agent(Arc::new(SandboxPolicy::unrestricted_for_tests()))
+        Self::without_agent(
+            Arc::new(SandboxPolicy::unrestricted_for_tests()),
+            Arc::new(CommandSandbox::unrestricted_for_tests()),
+        )
     }
 
     /// Add external tools (e.g. from MCP servers).
@@ -249,6 +258,7 @@ mod tests {
             "model".into(),
             crate::permissions::PermissionMode::Default,
             Arc::new(SandboxPolicy::unrestricted_for_tests()),
+            Arc::new(CommandSandbox::unrestricted_for_tests()),
         );
         let defs = reg.definitions();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
@@ -263,9 +273,10 @@ mod tests {
         std::fs::write(workspace.join("inside.txt"), "inside").unwrap();
         let outside = parent.path().join("outside.txt");
         std::fs::write(&outside, "outside").unwrap();
-        let registry = ToolRegistry::without_agent(Arc::new(
-            SandboxPolicy::workspace_only(&workspace).unwrap(),
-        ));
+        let registry = ToolRegistry::without_agent(
+            Arc::new(SandboxPolicy::workspace_only(&workspace).unwrap()),
+            Arc::new(CommandSandbox::unrestricted_for_tests()),
+        );
         let cancel = CancellationToken::new();
 
         let inside_read = registry
@@ -305,8 +316,10 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         let outside = parent.path().join("outside.txt");
         std::fs::write(&outside, "outside").unwrap();
-        let registry =
-            ToolRegistry::without_agent(Arc::new(SandboxPolicy::unrestricted(&workspace).unwrap()));
+        let registry = ToolRegistry::without_agent(
+            Arc::new(SandboxPolicy::unrestricted(&workspace).unwrap()),
+            Arc::new(CommandSandbox::unrestricted_for_tests()),
+        );
 
         let read = registry
             .execute(
@@ -333,9 +346,10 @@ mod tests {
     #[tokio::test]
     async fn glob_rejects_patterns_that_escape_the_workspace() {
         let workspace = tempfile::tempdir().unwrap();
-        let registry = ToolRegistry::without_agent(Arc::new(
-            SandboxPolicy::workspace_only(workspace.path()).unwrap(),
-        ));
+        let registry = ToolRegistry::without_agent(
+            Arc::new(SandboxPolicy::workspace_only(workspace.path()).unwrap()),
+            Arc::new(CommandSandbox::unrestricted_for_tests()),
+        );
 
         let output = registry
             .execute(
@@ -363,9 +377,10 @@ mod tests {
         std::fs::create_dir(&outside).unwrap();
         std::fs::write(outside.join("secret.txt"), "secret").unwrap();
         symlink(&outside, workspace.join("escape")).unwrap();
-        let registry = ToolRegistry::without_agent(Arc::new(
-            SandboxPolicy::workspace_only(&workspace).unwrap(),
-        ));
+        let registry = ToolRegistry::without_agent(
+            Arc::new(SandboxPolicy::workspace_only(&workspace).unwrap()),
+            Arc::new(CommandSandbox::unrestricted_for_tests()),
+        );
 
         let read = registry
             .execute(

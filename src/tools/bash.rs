@@ -8,13 +8,23 @@ use process_wrap::tokio::{CommandWrap, KillOnDrop};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 use super::{Tool, ToolOutput};
+use crate::command_sandbox::CommandSandbox;
 
-pub struct BashTool;
+pub struct BashTool {
+    sandbox: Arc<CommandSandbox>,
+}
+
+impl BashTool {
+    pub fn new(sandbox: Arc<CommandSandbox>) -> Self {
+        Self { sandbox }
+    }
+}
 
 #[derive(Deserialize)]
 struct Params {
@@ -77,13 +87,9 @@ impl Tool for BashTool {
         let timeout_ms = params.timeout.unwrap_or(120_000).min(600_000);
         let timeout = Duration::from_millis(timeout_ms);
 
-        let mut command = CommandWrap::with_new("sh", |command| {
-            command
-                .arg("-c")
-                .arg(&params.command)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-        });
+        let mut inner = self.sandbox.command(&params.command)?;
+        inner.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut command = CommandWrap::from(inner);
         // Commands commonly create descendants (shell pipelines, test runners,
         // build systems). Put the whole tree in one killable unit so cancelling
         // the tool cannot leave grandchildren alive with our pipes still open.
@@ -212,9 +218,13 @@ mod tests {
         CancellationToken::new()
     }
 
+    fn tool() -> BashTool {
+        BashTool::new(Arc::new(CommandSandbox::unrestricted_for_tests()))
+    }
+
     #[tokio::test]
     async fn bash_echo() {
-        let tool = BashTool;
+        let tool = tool();
         let result = tool
             .execute(json!({"command": "echo hello"}), token())
             .await
@@ -225,7 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_exit_code() {
-        let tool = BashTool;
+        let tool = tool();
         let result = tool
             .execute(json!({"command": "exit 1"}), token())
             .await
@@ -236,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_captures_stderr() {
-        let tool = BashTool;
+        let tool = tool();
         let result = tool
             .execute(json!({"command": "echo err >&2"}), token())
             .await
@@ -268,7 +278,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn binary_stdout_does_not_hide_text_stderr() {
-        let result = BashTool
+        let result = tool()
             .execute(
                 json!({"command": "printf '\\377'; printf 'warning' >&2"}),
                 token(),
@@ -286,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_timeout() {
-        let tool = BashTool;
+        let tool = tool();
         let result = tool
             .execute(json!({"command": "sleep 10", "timeout": 100}), token())
             .await
@@ -297,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_cancellation() {
-        let tool = BashTool;
+        let tool = tool();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
