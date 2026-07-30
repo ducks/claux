@@ -36,6 +36,9 @@ async fn main() -> Result<()> {
     if let Some(cli::CliCommand::SandboxExec { workspace, command }) = &args.command {
         return command_sandbox::run_helper(workspace, command);
     }
+    if matches!(args.command, Some(cli::CliCommand::SandboxProbe)) {
+        return command_sandbox::run_probe();
+    }
 
     // Init logging
     let filter = if args.debug {
@@ -74,7 +77,9 @@ async fn main() -> Result<()> {
                 }
                 return Ok(());
             }
-            cli::CliCommand::SandboxExec { .. } => unreachable!("handled before logging"),
+            cli::CliCommand::SandboxExec { .. } | cli::CliCommand::SandboxProbe => {
+                unreachable!("handled before logging")
+            }
         }
     }
 
