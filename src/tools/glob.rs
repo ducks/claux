@@ -2,10 +2,20 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 use super::{Tool, ToolOutput};
+use crate::sandbox::SandboxPolicy;
 
-pub struct GlobTool;
+pub struct GlobTool {
+    sandbox_policy: Arc<SandboxPolicy>,
+}
+
+impl GlobTool {
+    pub fn new(sandbox_policy: Arc<SandboxPolicy>) -> Self {
+        Self { sandbox_policy }
+    }
+}
 
 #[derive(Deserialize)]
 struct Params {
@@ -72,11 +82,25 @@ impl Tool for GlobTool {
     ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let base = params.path.as_deref().unwrap_or(".");
-        let base = crate::tools::read::expand_tilde(base);
+        let requested_base = crate::tools::read::expand_tilde(base);
+        let base = match self.sandbox_policy.authorize_read(&requested_base) {
+            Ok(path) => path,
+            Err(error) => return Ok(super::sandbox_denied_output(error)),
+        };
+        if let Err(error) = self
+            .sandbox_policy
+            .authorize_search_pattern(&params.pattern)
+        {
+            return Ok(super::sandbox_denied_output(error));
+        }
         let pattern = format!("{}/{}", base.display(), params.pattern);
 
         let mut paths: Vec<String> = Vec::new();
         for entry in glob::glob(&pattern)?.flatten() {
+            let entry = match self.sandbox_policy.authorize_read(&entry) {
+                Ok(path) => path,
+                Err(_) => continue,
+            };
             let path_str = entry.to_string_lossy().to_string();
             if !super::search_filter::is_excluded(
                 &entry,
@@ -120,6 +144,10 @@ mod tests {
     use std::fs;
     use tokio_util::sync::CancellationToken;
 
+    fn tool() -> GlobTool {
+        GlobTool::new(Arc::new(SandboxPolicy::unrestricted_for_tests()))
+    }
+
     fn normalized(content: &str) -> String {
         content.replace('\\', "/")
     }
@@ -138,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn broad_search_excludes_hidden_and_build_directories() {
         let dir = fixture();
-        let output = GlobTool
+        let output = tool()
             .execute(
                 json!({"pattern": "**/*", "path": dir.path()}),
                 CancellationToken::new(),
@@ -155,7 +183,7 @@ mod tests {
     #[tokio::test]
     async fn flags_include_hidden_and_build_directories() {
         let dir = fixture();
-        let output = GlobTool
+        let output = tool()
             .execute(
                 json!({
                     "pattern": "**/*",
@@ -176,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_hidden_base_is_searched_without_a_flag() {
         let dir = fixture();
-        let output = GlobTool
+        let output = tool()
             .execute(
                 json!({
                     "pattern": "**/*",

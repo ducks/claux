@@ -4,10 +4,20 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fmt::Write;
 use std::io::BufRead;
+use std::sync::Arc;
 
 use super::{interrupted_output, Tool, ToolOutput};
+use crate::sandbox::SandboxPolicy;
 
-pub struct ReadTool;
+pub struct ReadTool {
+    sandbox_policy: Arc<SandboxPolicy>,
+}
+
+impl ReadTool {
+    pub fn new(sandbox_policy: Arc<SandboxPolicy>) -> Self {
+        Self { sandbox_policy }
+    }
+}
 
 const MAX_READ_LINES: usize = 2_000;
 
@@ -69,22 +79,31 @@ impl Tool for ReadTool {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
-        tokio::task::spawn_blocking(move || read_file(params, cancel)).await?
+        let sandbox_policy = self.sandbox_policy.clone();
+        tokio::task::spawn_blocking(move || read_file(params, cancel, &sandbox_policy)).await?
     }
 }
 
-fn read_file(params: Params, cancel: tokio_util::sync::CancellationToken) -> Result<ToolOutput> {
+fn read_file(
+    params: Params,
+    cancel: tokio_util::sync::CancellationToken,
+    sandbox_policy: &SandboxPolicy,
+) -> Result<ToolOutput> {
     if cancel.is_cancelled() {
         return Ok(interrupted_output());
     }
 
-    let path = expand_tilde(&params.file_path);
-    if !path.exists() {
+    let requested = expand_tilde(&params.file_path);
+    if !requested.exists() {
         return Ok(ToolOutput {
             content: format!("File does not exist: {}", params.file_path),
             is_error: true,
         });
     }
+    let path = match sandbox_policy.authorize_read(&requested) {
+        Ok(path) => path,
+        Err(error) => return Ok(super::sandbox_denied_output(error)),
+    };
     if !path.is_file() {
         return Ok(ToolOutput {
             content: format!("Not a file: {}", params.file_path),
@@ -148,6 +167,10 @@ mod tests {
     use std::io::Write;
     use tokio_util::sync::CancellationToken;
 
+    fn tool() -> ReadTool {
+        ReadTool::new(Arc::new(SandboxPolicy::unrestricted_for_tests()))
+    }
+
     #[tokio::test]
     async fn read_existing_file() {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -155,8 +178,7 @@ mod tests {
         writeln!(tmp, "line two").unwrap();
         writeln!(tmp, "line three").unwrap();
 
-        let tool = ReadTool;
-        let result = tool
+        let result = tool()
             .execute(
                 json!({"file_path": tmp.path().to_str().unwrap()}),
                 CancellationToken::new(),
@@ -177,8 +199,7 @@ mod tests {
             writeln!(tmp, "line {i}").unwrap();
         }
 
-        let tool = ReadTool;
-        let result = tool
+        let result = tool()
             .execute(
                 json!({
                     "file_path": tmp.path().to_str().unwrap(),
@@ -198,8 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_nonexistent_file() {
-        let tool = ReadTool;
-        let result = tool
+        let result = tool()
             .execute(
                 json!({"file_path": "/tmp/definitely_does_not_exist_12345"}),
                 CancellationToken::new(),
@@ -216,7 +236,7 @@ mod tests {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         writeln!(tmp, "only line").unwrap();
 
-        let result = ReadTool
+        let result = tool()
             .execute(
                 json!({"file_path": tmp.path(), "offset": 99}),
                 CancellationToken::new(),
@@ -235,7 +255,7 @@ mod tests {
             writeln!(tmp, "line {line}").unwrap();
         }
 
-        let result = ReadTool
+        let result = tool()
             .execute(
                 json!({"file_path": tmp.path(), "limit": 10_000}),
                 CancellationToken::new(),
@@ -253,7 +273,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let result = ReadTool
+        let result = tool()
             .execute(json!({"file_path": "/etc/hosts"}), cancel)
             .await
             .unwrap();

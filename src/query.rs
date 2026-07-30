@@ -115,7 +115,7 @@ impl Engine {
     ) -> Self {
         Self {
             provider,
-            tools: ToolRegistry::without_agent(),
+            tools: ToolRegistry::without_agent_for_tests(),
             permissions: PermissionChecker::new(mode),
             messages: vec![],
             system_prompt: String::new(),
@@ -1064,7 +1064,7 @@ mod tests {
         });
         let mut engine = Engine::new(
             provider,
-            ToolRegistry::without_agent(),
+            ToolRegistry::without_agent_for_tests(),
             PermissionChecker::new(PermissionMode::Default),
             "private-model",
         );
@@ -1127,7 +1127,7 @@ mod tests {
     async fn test_parallel_tool_execution() {
         // Create a mock engine with read-only tools
         let provider = Box::new(MockProvider);
-        let tools = ToolRegistry::without_agent();
+        let tools = ToolRegistry::without_agent_for_tests();
         let permissions = PermissionChecker::new(PermissionMode::Bypass);
 
         let mut engine = Engine {
@@ -1203,7 +1203,7 @@ mod tests {
     #[tokio::test]
     async fn test_mixed_readonly_and_write_tools() {
         let provider = Box::new(MockProvider);
-        let tools = ToolRegistry::without_agent();
+        let tools = ToolRegistry::without_agent_for_tests();
         let permissions = PermissionChecker::new(PermissionMode::Bypass);
 
         let mut engine = Engine {
@@ -1647,7 +1647,7 @@ mod tests {
         // model can recover from. Aborting the turn here left a dangling
         // tool_use in history, which the API rejects on the next request.
         let provider = Box::new(MockProvider);
-        let tools = ToolRegistry::without_agent();
+        let tools = ToolRegistry::without_agent_for_tests();
         let permissions = PermissionChecker::new(PermissionMode::Bypass);
 
         let mut engine = Engine {
@@ -1708,7 +1708,7 @@ mod tests {
         // on, so a tool that would normally ask for confirmation must be denied,
         // not silently auto-allowed.
         let provider = Box::new(MockProvider);
-        let tools = ToolRegistry::without_agent();
+        let tools = ToolRegistry::without_agent_for_tests();
         let permissions = PermissionChecker::new(PermissionMode::Default);
 
         let mut engine = Engine {

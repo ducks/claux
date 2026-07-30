@@ -13,9 +13,11 @@ mod write;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::ToolDefinition;
+use crate::sandbox::SandboxPolicy;
 
 /// Output from a tool execution.
 #[derive(Debug, Clone)]
@@ -27,6 +29,13 @@ pub struct ToolOutput {
 fn interrupted_output() -> ToolOutput {
     ToolOutput {
         content: "Interrupted by user.".to_string(),
+        is_error: true,
+    }
+}
+
+fn sandbox_denied_output(error: anyhow::Error) -> ToolOutput {
+    ToolOutput {
+        content: error.to_string(),
         is_error: true,
     }
 }
@@ -70,33 +79,39 @@ impl ToolRegistry {
         factory: agent::ProviderFactory,
         model: String,
         permission_mode: crate::permissions::PermissionMode,
+        sandbox_policy: Arc<SandboxPolicy>,
     ) -> Self {
         let todo_state = todo::new_todo_state();
         Self {
             tools: vec![
-                Box::new(read::ReadTool),
-                Box::new(write::WriteTool),
-                Box::new(edit::EditTool),
-                Box::new(glob::GlobTool),
-                Box::new(grep::GrepTool),
+                Box::new(read::ReadTool::new(sandbox_policy.clone())),
+                Box::new(write::WriteTool::new(sandbox_policy.clone())),
+                Box::new(edit::EditTool::new(sandbox_policy.clone())),
+                Box::new(glob::GlobTool::new(sandbox_policy.clone())),
+                Box::new(grep::GrepTool::new(sandbox_policy.clone())),
                 Box::new(bash::BashTool),
                 Box::new(web_fetch::WebFetchTool::new()),
-                Box::new(agent::AgentTool::new(factory, model, permission_mode)),
+                Box::new(agent::AgentTool::new(
+                    factory,
+                    model,
+                    permission_mode,
+                    sandbox_policy,
+                )),
                 Box::new(todo::TodoWriteTool::new(todo_state)),
             ],
         }
     }
 
     /// Create a registry without Agent (for sub-agents to prevent recursion).
-    pub fn without_agent() -> Self {
+    pub fn without_agent(sandbox_policy: Arc<SandboxPolicy>) -> Self {
         let todo_state = todo::new_todo_state();
         Self {
             tools: vec![
-                Box::new(read::ReadTool),
-                Box::new(write::WriteTool),
-                Box::new(edit::EditTool),
-                Box::new(glob::GlobTool),
-                Box::new(grep::GrepTool),
+                Box::new(read::ReadTool::new(sandbox_policy.clone())),
+                Box::new(write::WriteTool::new(sandbox_policy.clone())),
+                Box::new(edit::EditTool::new(sandbox_policy.clone())),
+                Box::new(glob::GlobTool::new(sandbox_policy.clone())),
+                Box::new(grep::GrepTool::new(sandbox_policy)),
                 Box::new(bash::BashTool),
                 Box::new(web_fetch::WebFetchTool::new()),
                 Box::new(todo::TodoWriteTool::new(todo_state)),
@@ -107,7 +122,12 @@ impl ToolRegistry {
     /// Create a basic registry (no Agent).
     #[cfg(test)]
     pub fn new() -> Self {
-        Self::without_agent()
+        Self::without_agent_for_tests()
+    }
+
+    #[cfg(test)]
+    pub fn without_agent_for_tests() -> Self {
+        Self::without_agent(Arc::new(SandboxPolicy::unrestricted_for_tests()))
     }
 
     /// Add external tools (e.g. from MCP servers).
@@ -190,6 +210,7 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn registry_has_core_tools() {
@@ -206,7 +227,7 @@ mod tests {
 
     #[test]
     fn registry_without_agent_has_no_agent() {
-        let reg = ToolRegistry::without_agent();
+        let reg = ToolRegistry::without_agent_for_tests();
         let defs = reg.definitions();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(!names.contains(&"Agent"));
@@ -227,10 +248,148 @@ mod tests {
             factory,
             "model".into(),
             crate::permissions::PermissionMode::Default,
+            Arc::new(SandboxPolicy::unrestricted_for_tests()),
         );
         let defs = reg.definitions();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"Agent"));
+    }
+
+    #[tokio::test]
+    async fn native_tools_enforce_workspace_roots() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("inside.txt"), "inside").unwrap();
+        let outside = parent.path().join("outside.txt");
+        std::fs::write(&outside, "outside").unwrap();
+        let registry = ToolRegistry::without_agent(Arc::new(
+            SandboxPolicy::workspace_only(&workspace).unwrap(),
+        ));
+        let cancel = CancellationToken::new();
+
+        let inside_read = registry
+            .execute(
+                "Read",
+                json!({"file_path": workspace.join("inside.txt")}),
+                cancel.clone(),
+            )
+            .await;
+        assert!(!inside_read.is_error);
+
+        let outside_read = registry
+            .execute("Read", json!({"file_path": &outside}), cancel.clone())
+            .await;
+        assert!(outside_read.is_error);
+        assert!(outside_read.content.contains("sandbox denied read"));
+
+        let outside_write = registry
+            .execute(
+                "Write",
+                json!({
+                    "file_path": parent.path().join("created-outside.txt"),
+                    "content": "must not be written"
+                }),
+                cancel,
+            )
+            .await;
+        assert!(outside_write.is_error);
+        assert!(outside_write.content.contains("sandbox denied write"));
+        assert!(!parent.path().join("created-outside.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn unrestricted_native_tools_allow_paths_outside_the_workspace() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let outside = parent.path().join("outside.txt");
+        std::fs::write(&outside, "outside").unwrap();
+        let registry =
+            ToolRegistry::without_agent(Arc::new(SandboxPolicy::unrestricted(&workspace).unwrap()));
+
+        let read = registry
+            .execute(
+                "Read",
+                json!({"file_path": &outside}),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(!read.is_error);
+        assert!(read.content.contains("outside"));
+
+        let created = parent.path().join("created-outside.txt");
+        let write = registry
+            .execute(
+                "Write",
+                json!({"file_path": &created, "content": "created"}),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(!write.is_error);
+        assert_eq!(std::fs::read_to_string(created).unwrap(), "created");
+    }
+
+    #[tokio::test]
+    async fn glob_rejects_patterns_that_escape_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::without_agent(Arc::new(
+            SandboxPolicy::workspace_only(workspace.path()).unwrap(),
+        ));
+
+        let output = registry
+            .execute(
+                "Glob",
+                json!({"pattern": "../**/*", "path": workspace.path()}),
+                CancellationToken::new(),
+            )
+            .await;
+
+        assert!(output.is_error);
+        assert!(output
+            .content
+            .contains("search pattern escapes the authorized base"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_tools_reject_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("workspace");
+        let outside = parent.path().join("outside");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        symlink(&outside, workspace.join("escape")).unwrap();
+        let registry = ToolRegistry::without_agent(Arc::new(
+            SandboxPolicy::workspace_only(&workspace).unwrap(),
+        ));
+
+        let read = registry
+            .execute(
+                "Read",
+                json!({"file_path": workspace.join("escape/secret.txt")}),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(read.is_error);
+        assert!(read.content.contains("sandbox denied read"));
+
+        let write = registry
+            .execute(
+                "Write",
+                json!({
+                    "file_path": workspace.join("escape/new.txt"),
+                    "content": "must not be written"
+                }),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(write.is_error);
+        assert!(write.content.contains("sandbox denied write"));
+        assert!(!outside.join("new.txt").exists());
     }
 
     #[test]

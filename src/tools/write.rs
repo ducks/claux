@@ -2,10 +2,20 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 use super::{interrupted_output, Tool, ToolOutput};
+use crate::sandbox::SandboxPolicy;
 
-pub struct WriteTool;
+pub struct WriteTool {
+    sandbox_policy: Arc<SandboxPolicy>,
+}
+
+impl WriteTool {
+    pub fn new(sandbox_policy: Arc<SandboxPolicy>) -> Self {
+        Self { sandbox_policy }
+    }
+}
 
 #[derive(Deserialize)]
 struct Params {
@@ -57,7 +67,11 @@ impl Tool for WriteTool {
             return Ok(interrupted_output());
         }
         let params: Params = serde_json::from_value(input)?;
-        let path = crate::tools::read::expand_tilde(&params.file_path);
+        let requested = crate::tools::read::expand_tilde(&params.file_path);
+        let path = match self.sandbox_policy.authorize_write(&requested) {
+            Ok(path) => path,
+            Err(error) => return Ok(super::sandbox_denied_output(error)),
+        };
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -81,12 +95,16 @@ mod tests {
     use super::*;
     use tokio_util::sync::CancellationToken;
 
+    fn tool() -> WriteTool {
+        WriteTool::new(Arc::new(SandboxPolicy::unrestricted_for_tests()))
+    }
+
     #[tokio::test]
     async fn write_creates_the_file() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("nested/file.txt");
 
-        let result = WriteTool
+        let result = tool()
             .execute(
                 json!({
                     "file_path": path.to_str().unwrap(),
@@ -108,7 +126,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let result = WriteTool
+        let result = tool()
             .execute(
                 json!({
                     "file_path": path.to_str().unwrap(),

@@ -94,6 +94,7 @@ fn add_model_profile(
     let mut document = if existing.trim().is_empty() {
         let mut document = "# claux configuration\n".parse::<DocumentMut>()?;
         document["permission_mode"] = value("default");
+        document["native_tool_filesystem_policy"] = value("workspace_only");
         document["max_tokens"] = value(16384);
         document["auto_compact_threshold"] = value(0.8);
         document
@@ -372,6 +373,10 @@ pub async fn doctor(config: &Config, offline: bool) -> DoctorReport {
     if !(0.0..=1.0).contains(&config.auto_compact_threshold) {
         report.fail("auto_compact_threshold must be between 0 and 1".to_string());
     }
+    report.ok(format!(
+        "native tool filesystem policy: {} (Bash and MCP are not contained)",
+        config.native_tool_filesystem_policy
+    ));
 
     match Command::available("git") {
         true => report.ok("git executable found".to_string()),
@@ -631,6 +636,10 @@ mod tests {
             assert_eq!(parsed.model_profiles.len(), 1);
             assert_eq!(parsed.providers.len(), 1);
             assert!(parsed.default_profile.is_some());
+            assert_eq!(
+                parsed.native_tool_filesystem_policy,
+                crate::sandbox::NativeToolFilesystemPolicy::WorkspaceOnly
+            );
         }
     }
 
@@ -730,6 +739,9 @@ mod tests {
         };
         let report = doctor(&config, true).await;
         assert!(report.text.contains("skipped (--offline)"));
+        assert!(report.text.contains(
+            "native tool filesystem policy: workspace_only (Bash and MCP are not contained)"
+        ));
     }
 
     #[tokio::test]

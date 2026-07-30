@@ -3,10 +3,20 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fmt::Write;
+use std::sync::Arc;
 
 use super::{interrupted_output, Tool, ToolOutput};
+use crate::sandbox::SandboxPolicy;
 
-pub struct EditTool;
+pub struct EditTool {
+    sandbox_policy: Arc<SandboxPolicy>,
+}
+
+impl EditTool {
+    pub fn new(sandbox_policy: Arc<SandboxPolicy>) -> Self {
+        Self { sandbox_policy }
+    }
+}
 
 #[derive(Deserialize)]
 struct Params {
@@ -70,14 +80,18 @@ impl Tool for EditTool {
             return Ok(interrupted_output());
         }
         let params: Params = serde_json::from_value(input)?;
-        let path = crate::tools::read::expand_tilde(&params.file_path);
+        let requested = crate::tools::read::expand_tilde(&params.file_path);
 
-        if !path.exists() {
+        if !requested.exists() {
             return Ok(ToolOutput {
                 content: format!("File does not exist: {}", params.file_path),
                 is_error: true,
             });
         }
+        let path = match self.sandbox_policy.authorize_write(&requested) {
+            Ok(path) => path,
+            Err(error) => return Ok(super::sandbox_denied_output(error)),
+        };
 
         let content = std::fs::read_to_string(&path)?;
         let count = content.matches(&params.old_string).count();
@@ -142,13 +156,16 @@ mod tests {
     use super::*;
     use tokio_util::sync::CancellationToken;
 
+    fn tool() -> EditTool {
+        EditTool::new(Arc::new(SandboxPolicy::unrestricted_for_tests()))
+    }
+
     #[tokio::test]
     async fn edit_replaces_string() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "hello world").unwrap();
 
-        let tool = EditTool;
-        let result = tool
+        let result = tool()
             .execute(
                 json!({
                     "file_path": tmp.path().to_str().unwrap(),
@@ -170,8 +187,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "hello world").unwrap();
 
-        let tool = EditTool;
-        let result = tool
+        let result = tool()
             .execute(
                 json!({
                     "file_path": tmp.path().to_str().unwrap(),
@@ -192,8 +208,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "aaa bbb aaa").unwrap();
 
-        let tool = EditTool;
-        let result = tool
+        let result = tool()
             .execute(
                 json!({
                     "file_path": tmp.path().to_str().unwrap(),
@@ -214,8 +229,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "aaa bbb aaa").unwrap();
 
-        let tool = EditTool;
-        let result = tool
+        let result = tool()
             .execute(
                 json!({
                     "file_path": tmp.path().to_str().unwrap(),
@@ -235,8 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_nonexistent_file() {
-        let tool = EditTool;
-        let result = tool
+        let result = tool()
             .execute(
                 json!({
                     "file_path": "/tmp/definitely_does_not_exist_12345",
@@ -258,7 +271,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let result = EditTool
+        let result = tool()
             .execute(
                 json!({
                     "file_path": tmp.path().to_str().unwrap(),
