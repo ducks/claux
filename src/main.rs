@@ -2,6 +2,7 @@ mod api;
 mod bootstrap;
 mod checkpoint;
 mod cli;
+mod command_sandbox;
 mod commands;
 mod compact;
 mod config;
@@ -31,6 +32,10 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = cli::Cli::parse();
+
+    if let Some(cli::CliCommand::SandboxExec { workspace, command }) = &args.command {
+        return command_sandbox::run_helper(workspace, command);
+    }
 
     // Init logging
     let filter = if args.debug {
@@ -69,6 +74,7 @@ async fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            cli::CliCommand::SandboxExec { .. } => unreachable!("handled before logging"),
         }
     }
 
@@ -222,11 +228,16 @@ async fn build_engine(
         config.native_tool_filesystem_policy,
         std::env::current_dir()?,
     )?);
+    let command_sandbox = Arc::new(command_sandbox::CommandSandbox::new(
+        config.bash_filesystem_policy,
+        std::env::current_dir()?,
+    )?);
     let mut tool_registry = tools::ToolRegistry::new_with_agent_factory(
         agent_factory,
         model.clone(),
         config.permission_mode,
         sandbox_policy,
+        command_sandbox,
     );
     tool_registry.add_tools(bootstrap::connect_mcp_tools(config).await);
 

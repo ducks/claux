@@ -73,6 +73,9 @@ rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 # MCP (Model Context Protocol) client
 rmcp = { version = "1.7", features = ["client", "transport-child-process"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.4"
+
 [dev-dependencies]
 tempfile = "3.0"
 tuishot = { git = "https://github.com/ducks/tuishot" }

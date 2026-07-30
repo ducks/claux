@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::command_sandbox::BashFilesystemPolicy;
 use crate::cost::ModelPricing;
 use crate::permissions::PermissionMode;
 use crate::sandbox::NativeToolFilesystemPolicy;
@@ -172,6 +173,10 @@ pub struct Config {
     /// Bash and MCP tools are governed by separate permission boundaries.
     #[serde(default)]
     pub native_tool_filesystem_policy: NativeToolFilesystemPolicy,
+
+    /// Operating-system filesystem containment for Bash commands.
+    #[serde(default)]
+    pub bash_filesystem_policy: BashFilesystemPolicy,
 
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
@@ -363,6 +368,7 @@ impl Default for Config {
             api_key_cmd: None,
             permission_mode: PermissionMode::Default,
             native_tool_filesystem_policy: NativeToolFilesystemPolicy::default(),
+            bash_filesystem_policy: BashFilesystemPolicy::default(),
             max_tokens: default_max_tokens(),
             auto_compact_threshold: default_auto_compact_threshold(),
             openai_base_url: None,
@@ -662,6 +668,27 @@ fn apply_project_overrides(config: &mut Config, project: &toml::Value, trusted: 
             }
         }
     }
+    if let Some(policy) = project
+        .get("bash_filesystem_policy")
+        .and_then(|value| value.as_str())
+    {
+        if let Ok(requested) = serde_json::from_value::<BashFilesystemPolicy>(
+            serde_json::Value::String(policy.to_string()),
+        ) {
+            if config
+                .bash_filesystem_policy
+                .permits_project_override(requested, trusted)
+            {
+                config.bash_filesystem_policy = requested;
+            } else {
+                tracing::warn!(
+                    "Ignoring project bash_filesystem_policy={policy:?}: it would loosen the \
+                     global policy; pass --trust-project or add this directory to \
+                     trusted_projects"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -879,6 +906,44 @@ mod tests {
         assert_eq!(
             config.native_tool_filesystem_policy,
             NativeToolFilesystemPolicy::Unrestricted
+        );
+    }
+
+    #[test]
+    fn untrusted_project_bash_policy_can_only_tighten() {
+        let mut config = Config {
+            bash_filesystem_policy: BashFilesystemPolicy::Auto,
+            ..Config::default()
+        };
+        let project: toml::Value =
+            toml::from_str("bash_filesystem_policy = \"unrestricted\"").unwrap();
+
+        apply_project_overrides(&mut config, &project, false);
+        assert_eq!(config.bash_filesystem_policy, BashFilesystemPolicy::Auto);
+
+        let project: toml::Value =
+            toml::from_str("bash_filesystem_policy = \"workspace_write\"").unwrap();
+        apply_project_overrides(&mut config, &project, false);
+        assert_eq!(
+            config.bash_filesystem_policy,
+            BashFilesystemPolicy::WorkspaceWrite
+        );
+    }
+
+    #[test]
+    fn trusted_project_bash_policy_may_loosen() {
+        let mut config = Config {
+            bash_filesystem_policy: BashFilesystemPolicy::WorkspaceWrite,
+            ..Config::default()
+        };
+        let project: toml::Value =
+            toml::from_str("bash_filesystem_policy = \"unrestricted\"").unwrap();
+
+        apply_project_overrides(&mut config, &project, true);
+
+        assert_eq!(
+            config.bash_filesystem_policy,
+            BashFilesystemPolicy::Unrestricted
         );
     }
 

@@ -173,8 +173,9 @@ Global: `~/.config/claux/config.toml`
 default_profile = "sonnet"
 permission_mode = "default"  # default | accept-edits | bypass | plan
 native_tool_filesystem_policy = "workspace_only" # workspace_only | unrestricted
+bash_filesystem_policy = "auto" # auto | workspace_write | unrestricted
 
-# Project-local .claux.toml files may tighten permission and native-tool
+# Project-local .claux.toml files may tighten permission and filesystem
 # policies without trust, but cannot loosen them unless their directory is
 # listed here or --trust-project is passed for the invocation.
 # Project-local .mcp.json uses the same boundary.
@@ -224,9 +225,31 @@ Set the global value to `unrestricted` when native tools must work across the
 filesystem. A project-local `.claux.toml` may tighten this policy without trust,
 but may only loosen it for a trusted project.
 
-This is application-level containment for native file tools, not an operating
-system sandbox. Bash commands and MCP tools are not contained by this setting;
-they continue to use Claux's permission prompts and project-trust boundary.
+This is application-level containment for native file tools. MCP tools are not
+contained by this setting and continue to use Claux's project-trust boundary.
+
+### Bash filesystem policy
+
+`bash_filesystem_policy` controls operating-system containment for commands
+spawned by the Bash tool:
+
+- `auto` (the default) uses Linux Landlock workspace-write containment when
+  available and preserves unrestricted behavior on platforms without a backend.
+- `workspace_write` requires Linux Landlock and fails closed when the kernel
+  cannot completely enforce the policy.
+- `unrestricted` runs Bash with the user's normal filesystem access.
+
+Workspace-write commands can read the filesystem but may only write beneath the
+directory where Claux started, system temporary directories, `/dev/null`, and
+the repository's Git metadata. Allowing temporary paths keeps compilers and
+other development tools functional. Symlink traversal does not grant access to
+targets outside these writable roots.
+
+The Bash permission prompt and `permission_mode` remain separate from
+containment: approving a command authorizes it to run, but does not disable the
+sandbox. Claux never retries a sandbox-denied command unrestricted. A trusted
+project may explicitly select `unrestricted`; an untrusted project may only
+tighten the global policy.
 
 ## Hooks
 

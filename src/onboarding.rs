@@ -95,6 +95,7 @@ fn add_model_profile(
         let mut document = "# claux configuration\n".parse::<DocumentMut>()?;
         document["permission_mode"] = value("default");
         document["native_tool_filesystem_policy"] = value("workspace_only");
+        document["bash_filesystem_policy"] = value("auto");
         document["max_tokens"] = value(16384);
         document["auto_compact_threshold"] = value(0.8);
         document
@@ -374,8 +375,12 @@ pub async fn doctor(config: &Config, offline: bool) -> DoctorReport {
         report.fail("auto_compact_threshold must be between 0 and 1".to_string());
     }
     report.ok(format!(
-        "native tool filesystem policy: {} (Bash and MCP are not contained)",
+        "native tool filesystem policy: {} (MCP is not contained)",
         config.native_tool_filesystem_policy
+    ));
+    report.ok(format!(
+        "Bash filesystem policy: {}",
+        config.bash_filesystem_policy.platform_summary()
     ));
 
     match Command::available("git") {
@@ -640,6 +645,10 @@ mod tests {
                 parsed.native_tool_filesystem_policy,
                 crate::sandbox::NativeToolFilesystemPolicy::WorkspaceOnly
             );
+            assert_eq!(
+                parsed.bash_filesystem_policy,
+                crate::command_sandbox::BashFilesystemPolicy::Auto
+            );
         }
     }
 
@@ -739,8 +748,13 @@ mod tests {
         };
         let report = doctor(&config, true).await;
         assert!(report.text.contains("skipped (--offline)"));
+        assert!(report
+            .text
+            .contains("native tool filesystem policy: workspace_only (MCP is not contained)"));
+        #[cfg(target_os = "linux")]
         assert!(report.text.contains(
-            "native tool filesystem policy: workspace_only (Bash and MCP are not contained)"
+            "Bash filesystem policy: workspace_write (Landlock; temporary and Git metadata paths \
+             remain writable)"
         ));
     }
 
