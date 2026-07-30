@@ -1,4 +1,7 @@
-.PHONY: help version-bump release build test clean clippy fmt fmt-check lint install-hooks
+.PHONY: help version-bump wait-for-ci release build test clean clippy fmt fmt-check lint install-hooks
+
+CI_DISCOVERY_ATTEMPTS ?= 360
+CI_POLL_SECONDS ?= 5
 
 # Auto-generate version from today's date with auto-incrementing patch
 # Format: YYYYMMDD.0.X where X increments if releasing multiple times per day
@@ -46,23 +49,48 @@ version-bump:
 	@echo "Version bumped to $(VERSION)"
 	@echo "Commit created"
 
-# Merge to main, tag, push, and publish to crates.io
+# Wait for the push-triggered CI run for an exact commit. This is deliberately
+# separate from the tag-triggered release workflow: a release tag should not
+# exist until the cross-platform test and build matrix has passed.
+wait-for-ci:
+	@command -v gh >/dev/null || { echo "gh is required to verify release CI"; exit 1; }
+	@gh auth status >/dev/null
+	@sha="$${CI_SHA:-$$(git rev-parse HEAD)}"; \
+	attempt=0; \
+	run_id=""; \
+	echo "Waiting for CI to start for $$sha..."; \
+	while [ -z "$$run_id" ] && [ "$$attempt" -lt "$(CI_DISCOVERY_ATTEMPTS)" ]; do \
+		run_id="$$(gh run list --workflow ci.yml --commit "$$sha" --event push --limit 1 --json databaseId --jq '.[0].databaseId // empty')"; \
+		if [ -z "$$run_id" ]; then \
+			attempt=$$((attempt + 1)); \
+			sleep "$(CI_POLL_SECONDS)"; \
+		fi; \
+	done; \
+	if [ -z "$$run_id" ]; then \
+		echo "Timed out waiting for CI run for $$sha"; \
+		exit 1; \
+	fi; \
+	echo "Watching CI run $$run_id..."; \
+	gh run watch "$$run_id" --exit-status
+
+# Merge to main, push, wait for cross-platform CI, then tag and publish.
 release: version-bump
 	@echo "Merging into main..."
 	@git checkout main
 	@git merge --no-ff release/v$(VERSION) -m "Merge branch 'release/v$(VERSION)'"
-	@echo "Creating tag v$(VERSION) on main..."
-	@git tag -a v$(VERSION) -m "Release v$(VERSION)"
-	@echo "Pushing to origin..."
+	@echo "Pushing release commit to origin..."
 	@git push origin main
+	@$(MAKE) wait-for-ci CI_SHA=$$(git rev-parse HEAD)
+	@echo "Creating tag v$(VERSION) after CI passed..."
+	@git tag -a v$(VERSION) -m "Release v$(VERSION)"
 	@git push origin v$(VERSION)
 	@echo "Publishing to crates.io..."
 	@cargo publish
 	@echo ""
 	@echo "Released v$(VERSION)"
 	@echo "  - Merged release/v$(VERSION) into main"
-	@echo "  - Tagged v$(VERSION)"
-	@echo "  - Pushed to GitHub"
+	@echo "  - Passed cross-platform CI"
+	@echo "  - Tagged and pushed v$(VERSION)"
 	@echo "  - Published to crates.io"
 
 # Build release binary
