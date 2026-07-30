@@ -234,7 +234,8 @@ contained by this setting and continue to use Claux's project-trust boundary.
 spawned by the Bash tool:
 
 - `auto` (the default) uses Linux Landlock workspace-write containment when
-  available and preserves unrestricted behavior on platforms without a backend.
+  fully available. Otherwise it emits a warning and preserves unrestricted
+  behavior.
 - `workspace_write` requires Linux Landlock and fails closed when the kernel
   cannot completely enforce the policy.
 - `unrestricted` runs Bash with the user's normal filesystem access.
@@ -244,6 +245,8 @@ directory where Claux started, system temporary directories, `/dev/null`, and
 the repository's Git metadata. Allowing temporary paths keeps compilers and
 other development tools functional. Symlink traversal does not grant access to
 targets outside these writable roots.
+
+Run `claux doctor` to see the effective Bash policy on the current system.
 
 The Bash permission prompt and `permission_mode` remain separate from
 containment: approving a command authorizes it to run, but does not disable the

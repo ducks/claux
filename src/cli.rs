@@ -62,6 +62,9 @@ pub enum CliCommand {
         #[arg(long)]
         command: String,
     },
+    /// Internal entry point used to verify Landlock enforcement.
+    #[command(name = "__sandbox-probe", hide = true)]
+    SandboxProbe,
 }
 
 #[derive(Subcommand)]

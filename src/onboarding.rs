@@ -378,10 +378,24 @@ pub async fn doctor(config: &Config, offline: bool) -> DoctorReport {
         "native tool filesystem policy: {} (MCP is not contained)",
         config.native_tool_filesystem_policy
     ));
-    report.ok(format!(
-        "Bash filesystem policy: {}",
-        config.bash_filesystem_policy.platform_summary()
-    ));
+    let bash_diagnostic = config.bash_filesystem_policy.diagnose();
+    if !bash_diagnostic.healthy {
+        report.fail(format!(
+            "Bash filesystem policy: {} ({})",
+            bash_diagnostic.summary,
+            bash_diagnostic.issue.as_deref().unwrap_or("unavailable")
+        ));
+    } else if let Some(issue) = bash_diagnostic.issue {
+        report.warn(format!(
+            "Bash filesystem policy: {} ({issue})",
+            bash_diagnostic.summary
+        ));
+    } else {
+        report.ok(format!(
+            "Bash filesystem policy: {}",
+            bash_diagnostic.summary
+        ));
+    }
 
     match Command::available("git") {
         true => report.ok("git executable found".to_string()),
@@ -744,6 +758,7 @@ mod tests {
     async fn offline_doctor_skips_network() {
         let config = Config {
             api_key_env: "CLAUX_TEST_MISSING_AUTH".to_string(),
+            bash_filesystem_policy: crate::command_sandbox::BashFilesystemPolicy::Unrestricted,
             ..Config::default()
         };
         let report = doctor(&config, true).await;
@@ -751,11 +766,7 @@ mod tests {
         assert!(report
             .text
             .contains("native tool filesystem policy: workspace_only (MCP is not contained)"));
-        #[cfg(target_os = "linux")]
-        assert!(report.text.contains(
-            "Bash filesystem policy: workspace_write (Landlock; temporary and Git metadata paths \
-             remain writable)"
-        ));
+        assert!(report.text.contains("Bash filesystem policy: unrestricted"));
     }
 
     #[tokio::test]

@@ -14,6 +14,20 @@ fn run_sandboxed(workspace: &std::path::Path, command: &str) -> std::process::Ou
 }
 
 #[test]
+fn landlock_probe_verifies_real_enforcement() {
+    let output = Command::new(env!("CARGO_BIN_EXE_claux"))
+        .arg("__sandbox-probe")
+        .output()
+        .expect("sandbox probe should start");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn workspace_write_allows_writes_inside_the_workspace() {
     let workspace = tempfile::tempdir().unwrap();
     let target = workspace.path().join("inside.txt");

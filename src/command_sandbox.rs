@@ -8,6 +8,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 use tokio::process::Command;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -26,18 +28,8 @@ impl BashFilesystemPolicy {
         trusted || policy_rank(requested) <= policy_rank(self)
     }
 
-    pub fn platform_summary(self) -> &'static str {
-        match self {
-            Self::Unrestricted => "unrestricted",
-            Self::Auto if cfg!(target_os = "linux") => {
-                "workspace_write (Landlock; temporary and Git metadata paths remain writable)"
-            }
-            Self::Auto => "unrestricted (automatic backend unavailable on this platform)",
-            Self::WorkspaceWrite if cfg!(target_os = "linux") => {
-                "workspace_write (Landlock; temporary and Git metadata paths remain writable)"
-            }
-            Self::WorkspaceWrite => "workspace_write (unsupported on this platform)",
-        }
+    pub fn diagnose(self) -> BashPolicyDiagnostic {
+        diagnose_with_availability(self, landlock_availability())
     }
 }
 
@@ -61,12 +53,20 @@ fn policy_rank(policy: BashFilesystemPolicy) -> u8 {
 
 #[derive(Clone, Debug)]
 pub struct CommandSandbox {
-    policy: BashFilesystemPolicy,
+    effective_policy: BashFilesystemPolicy,
     workspace_root: PathBuf,
 }
 
 impl CommandSandbox {
     pub fn new(policy: BashFilesystemPolicy, workspace_root: impl AsRef<Path>) -> Result<Self> {
+        Self::new_with_availability(policy, workspace_root, landlock_availability())
+    }
+
+    fn new_with_availability(
+        policy: BashFilesystemPolicy,
+        workspace_root: impl AsRef<Path>,
+        availability: LandlockAvailability,
+    ) -> Result<Self> {
         let workspace_root = workspace_root.as_ref().canonicalize().with_context(|| {
             format!(
                 "could not resolve command sandbox workspace {}",
@@ -79,8 +79,20 @@ impl CommandSandbox {
                 workspace_root.display()
             );
         }
+        let diagnostic = diagnose_with_availability(policy, availability);
+        if !diagnostic.healthy {
+            bail!(
+                "{}",
+                diagnostic
+                    .issue
+                    .expect("unhealthy diagnostics have an issue")
+            );
+        }
+        if let Some(issue) = diagnostic.issue {
+            tracing::warn!("{issue}");
+        }
         Ok(Self {
-            policy,
+            effective_policy: diagnostic.effective_policy,
             workspace_root,
         })
     }
@@ -108,23 +120,146 @@ impl CommandSandbox {
             return Ok(command);
         }
 
-        #[cfg(not(target_os = "linux"))]
-        if self.policy == BashFilesystemPolicy::WorkspaceWrite {
-            bail!("bash workspace-write sandboxing is currently only supported on Linux");
-        }
-
         let mut command = Command::new("sh");
         command.arg("-c").arg(shell_command);
         Ok(command)
     }
 
     fn uses_workspace_write(&self) -> bool {
-        match self.policy {
-            BashFilesystemPolicy::WorkspaceWrite => cfg!(target_os = "linux"),
-            BashFilesystemPolicy::Auto => cfg!(target_os = "linux"),
+        match self.effective_policy {
+            BashFilesystemPolicy::WorkspaceWrite => true,
+            BashFilesystemPolicy::Auto => {
+                unreachable!("auto is resolved when the command sandbox is created")
+            }
             BashFilesystemPolicy::Unrestricted => false,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+// Availability variants are platform-specific in production but all are used
+// by the platform-independent policy tests.
+#[allow(dead_code)]
+enum LandlockAvailability {
+    Available,
+    UnsupportedPlatform,
+    Unavailable(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BashPolicyDiagnostic {
+    pub summary: String,
+    pub issue: Option<String>,
+    pub healthy: bool,
+    effective_policy: BashFilesystemPolicy,
+}
+
+fn diagnose_with_availability(
+    policy: BashFilesystemPolicy,
+    availability: LandlockAvailability,
+) -> BashPolicyDiagnostic {
+    const WORKSPACE_WRITE_SUMMARY: &str =
+        "workspace_write (Landlock; temporary and Git metadata paths remain writable)";
+
+    match (policy, availability) {
+        (BashFilesystemPolicy::Unrestricted, _) => BashPolicyDiagnostic {
+            summary: "unrestricted".to_string(),
+            issue: None,
+            healthy: true,
+            effective_policy: BashFilesystemPolicy::Unrestricted,
+        },
+        (BashFilesystemPolicy::Auto, LandlockAvailability::Available)
+        | (BashFilesystemPolicy::WorkspaceWrite, LandlockAvailability::Available) => {
+            BashPolicyDiagnostic {
+                summary: WORKSPACE_WRITE_SUMMARY.to_string(),
+                issue: None,
+                healthy: true,
+                effective_policy: BashFilesystemPolicy::WorkspaceWrite,
+            }
+        }
+        (BashFilesystemPolicy::Auto, LandlockAvailability::UnsupportedPlatform) => {
+            BashPolicyDiagnostic {
+                summary: "unrestricted (no sandbox backend for this platform)".to_string(),
+                issue: None,
+                healthy: true,
+                effective_policy: BashFilesystemPolicy::Unrestricted,
+            }
+        }
+        (BashFilesystemPolicy::Auto, LandlockAvailability::Unavailable(reason)) => {
+            BashPolicyDiagnostic {
+                summary: "unrestricted (automatic Landlock fallback)".to_string(),
+                issue: Some(format!(
+                    "Landlock workspace-write sandbox unavailable; Bash will run unrestricted: \
+                     {reason}"
+                )),
+                healthy: true,
+                effective_policy: BashFilesystemPolicy::Unrestricted,
+            }
+        }
+        (BashFilesystemPolicy::WorkspaceWrite, LandlockAvailability::UnsupportedPlatform) => {
+            BashPolicyDiagnostic {
+                summary: "workspace_write (unavailable)".to_string(),
+                issue: Some(
+                    "bash_filesystem_policy=workspace_write is currently only supported on Linux"
+                        .to_string(),
+                ),
+                healthy: false,
+                effective_policy: BashFilesystemPolicy::WorkspaceWrite,
+            }
+        }
+        (BashFilesystemPolicy::WorkspaceWrite, LandlockAvailability::Unavailable(reason)) => {
+            BashPolicyDiagnostic {
+                summary: "workspace_write (unavailable)".to_string(),
+                issue: Some(format!(
+                    "bash_filesystem_policy=workspace_write requires complete Landlock ABI V3 \
+                     enforcement: {reason}"
+                )),
+                healthy: false,
+                effective_policy: BashFilesystemPolicy::WorkspaceWrite,
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn landlock_availability() -> LandlockAvailability {
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            return LandlockAvailability::Unavailable(format!(
+                "could not locate the claux executable: {error}"
+            ));
+        }
+    };
+    match std::process::Command::new(executable)
+        .arg("__sandbox-probe")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) if output.status.success() => LandlockAvailability::Available,
+        Ok(output) => {
+            let reason = String::from_utf8_lossy(&output.stderr);
+            let reason = reason
+                .trim()
+                .strip_prefix("Error: ")
+                .unwrap_or(reason.trim());
+            LandlockAvailability::Unavailable(if reason.is_empty() {
+                format!("probe exited with {}", output.status)
+            } else {
+                reason.to_string()
+            })
+        }
+        Err(error) => {
+            LandlockAvailability::Unavailable(format!("could not run Landlock probe: {error}"))
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn landlock_availability() -> LandlockAvailability {
+    LandlockAvailability::UnsupportedPlatform
 }
 
 #[cfg(target_os = "linux")]
@@ -139,9 +274,19 @@ pub fn run_helper(workspace_root: &Path, shell_command: &str) -> Result<()> {
     Err(error).context("could not execute sandboxed shell command")
 }
 
+#[cfg(target_os = "linux")]
+pub fn run_probe() -> Result<()> {
+    apply_landlock(&std::env::current_dir()?)
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn run_helper(_workspace_root: &Path, _shell_command: &str) -> Result<()> {
     bail!("bash workspace-write sandboxing is currently only supported on Linux")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn run_probe() -> Result<()> {
+    bail!("Landlock is only available on Linux")
 }
 
 #[cfg(target_os = "linux")]
@@ -308,12 +453,83 @@ mod tests {
         );
     }
 
+    #[test]
+    fn auto_falls_back_with_a_warning_when_landlock_is_unavailable() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sandbox = CommandSandbox::new_with_availability(
+            BashFilesystemPolicy::Auto,
+            workspace.path(),
+            LandlockAvailability::Unavailable("kernel is too old".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sandbox
+                .command("echo hello")
+                .unwrap()
+                .as_std()
+                .get_program(),
+            "sh"
+        );
+        assert_eq!(
+            diagnose_with_availability(
+                BashFilesystemPolicy::Auto,
+                LandlockAvailability::Unavailable("kernel is too old".to_string())
+            ),
+            BashPolicyDiagnostic {
+                summary: "unrestricted (automatic Landlock fallback)".to_string(),
+                issue: Some(
+                    "Landlock workspace-write sandbox unavailable; Bash will run unrestricted: \
+                     kernel is too old"
+                        .to_string()
+                ),
+                healthy: true,
+                effective_policy: BashFilesystemPolicy::Unrestricted,
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_workspace_write_fails_closed_when_landlock_is_unavailable() {
+        let workspace = tempfile::tempdir().unwrap();
+        let error = CommandSandbox::new_with_availability(
+            BashFilesystemPolicy::WorkspaceWrite,
+            workspace.path(),
+            LandlockAvailability::Unavailable("kernel is too old".to_string()),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("requires complete Landlock ABI V3 enforcement"));
+    }
+
+    #[test]
+    fn auto_is_quietly_unrestricted_on_platforms_without_a_backend() {
+        assert_eq!(
+            diagnose_with_availability(
+                BashFilesystemPolicy::Auto,
+                LandlockAvailability::UnsupportedPlatform
+            ),
+            BashPolicyDiagnostic {
+                summary: "unrestricted (no sandbox backend for this platform)".to_string(),
+                issue: None,
+                healthy: true,
+                effective_policy: BashFilesystemPolicy::Unrestricted,
+            }
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn workspace_write_commands_use_the_helper() {
         let workspace = tempfile::tempdir().unwrap();
-        let sandbox =
-            CommandSandbox::new(BashFilesystemPolicy::WorkspaceWrite, workspace.path()).unwrap();
+        let sandbox = CommandSandbox::new_with_availability(
+            BashFilesystemPolicy::WorkspaceWrite,
+            workspace.path(),
+            LandlockAvailability::Available,
+        )
+        .unwrap();
         let command = sandbox.command("echo hello").unwrap();
         let arguments = command
             .as_std()
