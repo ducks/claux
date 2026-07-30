@@ -15,6 +15,7 @@ mod permissions;
 mod plugin;
 mod query;
 mod repl;
+mod sandbox;
 mod session;
 #[cfg(test)]
 mod test_support;
@@ -217,10 +218,15 @@ async fn build_engine(
     let agent_factory: tools::agent::ProviderFactory = Box::new(move || {
         build_provider(&resolved_for_factory).expect("failed to build agent provider")
     });
+    let sandbox_policy = Arc::new(sandbox::SandboxPolicy::from_native_tool_policy(
+        config.native_tool_filesystem_policy,
+        std::env::current_dir()?,
+    )?);
     let mut tool_registry = tools::ToolRegistry::new_with_agent_factory(
         agent_factory,
         model.clone(),
         config.permission_mode,
+        sandbox_policy,
     );
     tool_registry.add_tools(bootstrap::connect_mcp_tools(config).await);
 

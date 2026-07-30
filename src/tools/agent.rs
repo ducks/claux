@@ -2,12 +2,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 use super::{Tool, ToolOutput, ToolRegistry};
 use crate::api::Provider;
 use crate::context;
 use crate::permissions::{PermissionChecker, PermissionMode};
 use crate::query::Engine;
+use crate::sandbox::SandboxPolicy;
 
 /// Factory function to create a provider for sub-agents.
 pub type ProviderFactory = Box<dyn Fn() -> Box<dyn Provider> + Send + Sync>;
@@ -20,6 +22,7 @@ pub struct AgentTool {
     /// mode would prompt for is denied rather than auto-run — but Plan's
     /// deny-all-writes and Bypass's allow-all are honored exactly.
     permission_mode: PermissionMode,
+    sandbox_policy: Arc<SandboxPolicy>,
 }
 
 impl AgentTool {
@@ -27,11 +30,13 @@ impl AgentTool {
         make_provider: ProviderFactory,
         model: String,
         permission_mode: PermissionMode,
+        sandbox_policy: Arc<SandboxPolicy>,
     ) -> Self {
         Self {
             make_provider,
             model,
             permission_mode,
+            sandbox_policy,
         }
     }
 }
@@ -105,7 +110,7 @@ impl Tool for AgentTool {
 
         let mut provider = (self.make_provider)();
         provider.set_model(&self.model);
-        let tools = ToolRegistry::without_agent();
+        let tools = ToolRegistry::without_agent(self.sandbox_policy.clone());
         // Inherit the parent's permission mode. Previously hardcoded to
         // Bypass, which let a sub-agent run Bash/Write/Edit with no prompts
         // regardless of the mode the user chose - approving the Agent tool
@@ -166,7 +171,12 @@ mod tests {
     #[test]
     fn model_change_propagates_to_agent_tool() {
         let factory: ProviderFactory = Box::new(|| panic!("provider should not be created"));
-        let mut tool = AgentTool::new(factory, "model-a".to_string(), PermissionMode::Plan);
+        let mut tool = AgentTool::new(
+            factory,
+            "model-a".to_string(),
+            PermissionMode::Plan,
+            Arc::new(SandboxPolicy::unrestricted_for_tests()),
+        );
 
         Tool::set_model(&mut tool, "model-b");
 
@@ -212,14 +222,18 @@ mod tests {
         }
     }
 
-    async fn run_subagent_write(mode: PermissionMode, path: &std::path::Path) {
+    async fn run_subagent_write(
+        mode: PermissionMode,
+        path: &std::path::Path,
+        sandbox_policy: Arc<SandboxPolicy>,
+    ) {
         let path_str = path.to_str().unwrap().to_string();
         let factory: ProviderFactory = Box::new(move || {
             Box::new(PathWriteProvider {
                 path: path_str.clone(),
             })
         });
-        let tool = AgentTool::new(factory, "test".into(), mode);
+        let tool = AgentTool::new(factory, "test".into(), mode, sandbox_policy);
         tool.execute(
             json!({ "prompt": "write the file" }),
             tokio_util::sync::CancellationToken::new(),
@@ -233,7 +247,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("should-not-exist.txt");
 
-        run_subagent_write(PermissionMode::Plan, &target).await;
+        run_subagent_write(
+            PermissionMode::Plan,
+            &target,
+            Arc::new(SandboxPolicy::unrestricted_for_tests()),
+        )
+        .await;
 
         assert!(
             !target.exists(),
@@ -246,7 +265,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("written.txt");
 
-        run_subagent_write(PermissionMode::Bypass, &target).await;
+        run_subagent_write(
+            PermissionMode::Bypass,
+            &target,
+            Arc::new(SandboxPolicy::unrestricted_for_tests()),
+        )
+        .await;
 
         assert!(
             target.exists(),
@@ -255,6 +279,26 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
             "written by sub-agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_inherits_native_tool_filesystem_policy() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let target = parent.path().join("must-not-exist.txt");
+
+        run_subagent_write(
+            PermissionMode::Bypass,
+            &target,
+            Arc::new(SandboxPolicy::workspace_only(&workspace).unwrap()),
+        )
+        .await;
+
+        assert!(
+            !target.exists(),
+            "sub-agent must not write outside its inherited workspace policy"
         );
     }
 }

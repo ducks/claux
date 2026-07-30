@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::cost::ModelPricing;
 use crate::permissions::PermissionMode;
+use crate::sandbox::NativeToolFilesystemPolicy;
 
 mod trust;
 
@@ -166,6 +167,11 @@ pub struct Config {
 
     #[serde(default)]
     pub permission_mode: PermissionMode,
+
+    /// Filesystem containment for built-in Read/Write/Edit/Glob/Grep tools.
+    /// Bash and MCP tools are governed by separate permission boundaries.
+    #[serde(default)]
+    pub native_tool_filesystem_policy: NativeToolFilesystemPolicy,
 
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
@@ -356,6 +362,7 @@ impl Default for Config {
             api_key_env: default_api_key_env(),
             api_key_cmd: None,
             permission_mode: PermissionMode::Default,
+            native_tool_filesystem_policy: NativeToolFilesystemPolicy::default(),
             max_tokens: default_max_tokens(),
             auto_compact_threshold: default_auto_compact_threshold(),
             openai_base_url: None,
@@ -634,6 +641,27 @@ fn apply_project_overrides(config: &mut Config, project: &toml::Value, trusted: 
             }
         }
     }
+    if let Some(policy) = project
+        .get("native_tool_filesystem_policy")
+        .and_then(|value| value.as_str())
+    {
+        if let Ok(requested) = serde_json::from_value::<NativeToolFilesystemPolicy>(
+            serde_json::Value::String(policy.to_string()),
+        ) {
+            if config
+                .native_tool_filesystem_policy
+                .permits_project_override(requested, trusted)
+            {
+                config.native_tool_filesystem_policy = requested;
+            } else {
+                tracing::warn!(
+                    "Ignoring project native_tool_filesystem_policy={policy:?}: it would loosen \
+                     the global policy; pass --trust-project or add this directory to \
+                     trusted_projects"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -810,6 +838,48 @@ mod tests {
         let project: toml::Value = toml::from_str("permission_mode = \"plan\"").unwrap();
         apply_project_overrides(&mut config, &project, false);
         assert_eq!(config.permission_mode, PermissionMode::Plan);
+    }
+
+    #[test]
+    fn untrusted_project_native_tool_policy_can_only_tighten() {
+        let mut config = Config {
+            native_tool_filesystem_policy: NativeToolFilesystemPolicy::WorkspaceOnly,
+            ..Config::default()
+        };
+        let project: toml::Value =
+            toml::from_str("native_tool_filesystem_policy = \"unrestricted\"").unwrap();
+
+        apply_project_overrides(&mut config, &project, false);
+        assert_eq!(
+            config.native_tool_filesystem_policy,
+            NativeToolFilesystemPolicy::WorkspaceOnly
+        );
+
+        config.native_tool_filesystem_policy = NativeToolFilesystemPolicy::Unrestricted;
+        let project: toml::Value =
+            toml::from_str("native_tool_filesystem_policy = \"workspace_only\"").unwrap();
+        apply_project_overrides(&mut config, &project, false);
+        assert_eq!(
+            config.native_tool_filesystem_policy,
+            NativeToolFilesystemPolicy::WorkspaceOnly
+        );
+    }
+
+    #[test]
+    fn trusted_project_native_tool_policy_may_loosen() {
+        let mut config = Config {
+            native_tool_filesystem_policy: NativeToolFilesystemPolicy::WorkspaceOnly,
+            ..Config::default()
+        };
+        let project: toml::Value =
+            toml::from_str("native_tool_filesystem_policy = \"unrestricted\"").unwrap();
+
+        apply_project_overrides(&mut config, &project, true);
+
+        assert_eq!(
+            config.native_tool_filesystem_policy,
+            NativeToolFilesystemPolicy::Unrestricted
+        );
     }
 
     #[test]

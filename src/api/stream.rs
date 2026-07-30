@@ -186,8 +186,8 @@ pub async fn read_sse_stream(
                     } else {
                         serde_json::from_str(&current_tool_input).with_context(|| {
                             format!(
-                                "invalid arguments for Anthropic tool call {} ({})",
-                                current_tool_name, current_tool_id
+                                "invalid arguments for Anthropic tool call {current_tool_name} \
+                                 ({current_tool_id})"
                             )
                         })?
                     };

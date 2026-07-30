@@ -172,10 +172,12 @@ Global: `~/.config/claux/config.toml`
 ```toml
 default_profile = "sonnet"
 permission_mode = "default"  # default | accept-edits | bypass | plan
+native_tool_filesystem_policy = "workspace_only" # workspace_only | unrestricted
 
-# Project-local .claux.toml files may tighten this mode without trust, but
-# cannot loosen it unless their directory is listed here or --trust-project
-# is passed for the invocation. Project-local .mcp.json uses the same boundary.
+# Project-local .claux.toml files may tighten permission and native-tool
+# policies without trust, but cannot loosen them unless their directory is
+# listed here or --trust-project is passed for the invocation.
+# Project-local .mcp.json uses the same boundary.
 trusted_projects = ["/absolute/path/to/a/trusted/project"]
 
 [providers.anthropic]
@@ -210,6 +212,21 @@ reasoning_effort = "medium"
 ```
 
 Per-project: `.claux.toml` in the project root (overrides global).
+
+### Native tool filesystem policy
+
+`native_tool_filesystem_policy` controls Claux's built-in Read, Write, Edit,
+Glob, and Grep tools. The default, `workspace_only`, resolves paths and symlinks
+before allowing access and rejects paths outside the directory where Claux was
+started. It also rejects search patterns which traverse to a parent directory.
+
+Set the global value to `unrestricted` when native tools must work across the
+filesystem. A project-local `.claux.toml` may tighten this policy without trust,
+but may only loosen it for a trusted project.
+
+This is application-level containment for native file tools, not an operating
+system sandbox. Bash commands and MCP tools are not contained by this setting;
+they continue to use Claux's permission prompts and project-trust boundary.
 
 ## Hooks
 

@@ -3,11 +3,21 @@ use async_trait::async_trait;
 use grep_searcher::{SearcherBuilder, Sink, SinkMatch};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 use super::{Tool, ToolOutput};
+use crate::sandbox::SandboxPolicy;
 
-pub struct GrepTool;
+pub struct GrepTool {
+    sandbox_policy: Arc<SandboxPolicy>,
+}
+
+impl GrepTool {
+    pub fn new(sandbox_policy: Arc<SandboxPolicy>) -> Self {
+        Self { sandbox_policy }
+    }
+}
 
 #[derive(Deserialize)]
 struct Params {
@@ -90,7 +100,11 @@ impl Tool for GrepTool {
     ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let base = params.path.as_deref().unwrap_or(".");
-        let base = crate::tools::read::expand_tilde(base);
+        let requested_base = crate::tools::read::expand_tilde(base);
+        let base = match self.sandbox_policy.authorize_read(&requested_base) {
+            Ok(path) => path,
+            Err(error) => return Ok(super::sandbox_denied_output(error)),
+        };
 
         let matcher = grep_regex::RegexMatcherBuilder::new().build(&params.pattern)?;
 
@@ -114,6 +128,10 @@ impl Tool for GrepTool {
             if !path.is_file() {
                 continue;
             }
+            let path = match self.sandbox_policy.authorize_read(path) {
+                Ok(path) => path,
+                Err(_) => continue,
+            };
 
             // Apply glob filter
             if let Some(ref glob_pat) = params.glob {
@@ -159,13 +177,13 @@ impl Tool for GrepTool {
             }
 
             let mut sink = CountSink {
-                path,
+                path: &path,
                 matches: &mut file_matches,
                 count: &mut match_count,
                 mode: &params.output_mode,
             };
 
-            let _ = searcher.search_path(&matcher, path, &mut sink);
+            let _ = searcher.search_path(&matcher, &path, &mut sink);
 
             if match_count > 0 {
                 match params.output_mode.as_str() {
@@ -197,6 +215,10 @@ mod tests {
     use std::fs;
     use tokio_util::sync::CancellationToken;
 
+    fn tool() -> GrepTool {
+        GrepTool::new(Arc::new(SandboxPolicy::unrestricted_for_tests()))
+    }
+
     fn normalized(content: &str) -> String {
         content.replace('\\', "/")
     }
@@ -215,7 +237,7 @@ mod tests {
     #[tokio::test]
     async fn broad_search_excludes_hidden_and_build_directories() {
         let dir = fixture();
-        let output = GrepTool
+        let output = tool()
             .execute(
                 json!({"pattern": "needle", "path": dir.path()}),
                 CancellationToken::new(),
@@ -232,7 +254,7 @@ mod tests {
     #[tokio::test]
     async fn flags_include_hidden_and_build_directories() {
         let dir = fixture();
-        let output = GrepTool
+        let output = tool()
             .execute(
                 json!({
                     "pattern": "needle",
@@ -253,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_hidden_base_is_searched_without_a_flag() {
         let dir = fixture();
-        let output = GrepTool
+        let output = tool()
             .execute(
                 json!({
                     "pattern": "needle",
