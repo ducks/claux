@@ -230,7 +230,7 @@ mod tests {
             policy
                 .authorize_write(workspace.path().join("new/file.rs"))
                 .unwrap(),
-            workspace.path().join("new/file.rs")
+            workspace.path().canonicalize().unwrap().join("new/file.rs")
         );
     }
 
