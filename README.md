@@ -44,17 +44,6 @@ cargo install --path .
 
 Requires Rust 1.88+. A `shell.nix` is included.
 
-## Releasing
-
-`make release` creates and merges the dated release branch, pushes the release
-commit to `main`, and waits for the exact commit's GitHub Actions CI run. The
-release tag and crates.io publication only happen after the Linux, macOS, and
-Windows test/build matrix succeeds.
-
-The release command requires an authenticated [GitHub CLI](https://cli.github.com/)
-with access to this repository. A failed or undiscoverable CI run stops the
-release before tagging or publishing.
-
 ## First run
 
 Create a starter configuration for Anthropic, OpenAI, OpenRouter, or Ollama,

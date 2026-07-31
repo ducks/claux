@@ -222,7 +222,10 @@ mod tests {
         std::fs::write(&file, "contents").unwrap();
         let policy = SandboxPolicy::workspace_only(workspace.path()).unwrap();
 
-        assert_eq!(policy.authorize_read(&file).unwrap(), file);
+        assert_eq!(
+            policy.authorize_read(&file).unwrap(),
+            file.canonicalize().unwrap()
+        );
         assert_eq!(
             policy
                 .authorize_write(workspace.path().join("new/file.rs"))
@@ -293,7 +296,10 @@ mod tests {
         std::fs::write(&outside, "outside").unwrap();
         let policy = SandboxPolicy::unrestricted(&workspace).unwrap();
 
-        assert_eq!(policy.authorize_read(&outside).unwrap(), outside);
+        assert_eq!(
+            policy.authorize_read(&outside).unwrap(),
+            outside.canonicalize().unwrap()
+        );
         assert!(policy
             .authorize_write(parent.path().join("created-outside.txt"))
             .is_ok());
