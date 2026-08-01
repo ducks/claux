@@ -12,6 +12,10 @@ pub struct Cli {
     #[arg(short = 'p', long = "print")]
     pub prompt: Option<String>,
 
+    /// Output format for one-shot mode
+    #[arg(long, value_enum, requires = "prompt")]
+    pub output_format: Option<OutputFormat>,
+
     /// Model to use
     #[arg(long)]
     pub model: Option<String>,
@@ -39,6 +43,13 @@ pub struct Cli {
     /// Use full-screen TUI instead of inline REPL
     #[arg(long)]
     pub tui: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -105,6 +116,27 @@ mod tests {
             cli.command,
             Some(CliCommand::Doctor { offline: true })
         ));
+    }
+
+    #[test]
+    fn parses_json_output_for_one_shot_mode() {
+        let cli =
+            Cli::try_parse_from(["claux", "--print", "hello", "--output-format", "json"]).unwrap();
+
+        assert_eq!(cli.output_format, Some(OutputFormat::Json));
+    }
+
+    #[test]
+    fn output_format_requires_one_shot_mode() {
+        let error = match Cli::try_parse_from(["claux", "--output-format", "json"]) {
+            Ok(_) => panic!("output format should require one-shot mode"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]

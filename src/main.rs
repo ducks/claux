@@ -13,6 +13,7 @@ mod db;
 mod evals;
 mod model;
 mod onboarding;
+mod output;
 mod permissions;
 mod plugin;
 mod query;
@@ -147,7 +148,14 @@ async fn main() -> Result<()> {
         let response = engine
             .submit(prompt, tokio_util::sync::CancellationToken::new())
             .await?;
-        print!("{response}");
+        match args.output_format.unwrap_or_default() {
+            cli::OutputFormat::Text => print!("{response}"),
+            cli::OutputFormat::Json => {
+                let output = output::OneShotOutput::new(&response, engine.model(), &engine.cost);
+                serde_json::to_writer(std::io::stdout().lock(), &output)?;
+                println!();
+            }
+        }
         return Ok(());
     }
 
