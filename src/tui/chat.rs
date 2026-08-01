@@ -224,6 +224,11 @@ impl ChatApp {
         }
     }
 
+    pub fn handle_paste(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        super::input::insert_text(&mut self.input, &mut self.cursor, &normalized);
+    }
+
     pub fn take_input(&mut self) -> Option<String> {
         if self.input.trim().is_empty() {
             return None;
@@ -398,15 +403,22 @@ pub async fn run(
 
         // Poll terminal events
         if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Enter && app.mode == Mode::Input {
-                    if let Some(input) = app.take_input() {
-                        pending_submit = Some(input);
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.code == KeyCode::Enter && app.mode == Mode::Input {
+                        if let Some(input) = app.take_input() {
+                            pending_submit = Some(input);
+                        }
+                    } else {
+                        app.handle_key(key);
                     }
-                } else {
-                    app.handle_key(key);
+                    needs_redraw = true;
                 }
-                needs_redraw = true;
+                Event::Paste(text) if app.mode == Mode::Input => {
+                    app.handle_paste(&text);
+                    needs_redraw = true;
+                }
+                _ => {}
             }
         }
 
@@ -849,6 +861,17 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
         assert_eq!(app.input, "a");
+    }
+
+    #[test]
+    fn bracketed_paste_preserves_large_multiline_text() {
+        let mut app = test_app();
+        let pasted = "first line\r\nsecond line\rthird line\n".repeat(256);
+
+        app.handle_paste(&pasted);
+
+        assert_eq!(app.input, pasted.replace("\r\n", "\n").replace('\r', "\n"));
+        assert_eq!(app.cursor, app.input.chars().count());
     }
 
     #[test]

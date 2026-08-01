@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::{
+    event::{DisableBracketedPaste, EnableBracketedPaste},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -20,7 +21,7 @@ pub struct TerminalGuard {
 impl TerminalGuard {
     pub fn enter() -> Result<Self> {
         enable_raw_mode()?;
-        if let Err(error) = execute!(stdout(), EnterAlternateScreen) {
+        if let Err(error) = execute!(stdout(), EnterAlternateScreen, EnableBracketedPaste) {
             let _ = disable_raw_mode();
             return Err(error.into());
         }
@@ -53,7 +54,7 @@ impl TerminalGuard {
         // Attempt every cleanup operation even if an earlier one fails.
         let cursor_result = self.terminal.show_cursor();
         let raw_result = disable_raw_mode();
-        let screen_result = execute!(stdout(), LeaveAlternateScreen);
+        let screen_result = execute!(stdout(), DisableBracketedPaste, LeaveAlternateScreen);
         self.active = false;
 
         cursor_result?;
