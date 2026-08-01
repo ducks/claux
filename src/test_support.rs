@@ -86,6 +86,83 @@ pub fn tool_use(
     (id.to_string(), name.to_string(), input)
 }
 
+/// A loopback SSE server that records the request bodies it receives.
+///
+/// Lets provider tests drive the real `Provider::stream` path and then assert
+/// on what actually went over the wire, rather than on internal helpers.
+pub struct RecordingSseServer {
+    pub base_url: String,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+}
+
+impl RecordingSseServer {
+    /// Serve `bodies` in order, one per connection, recording each request.
+    pub async fn start(bodies: Vec<String>) -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+
+        tokio::spawn(async move {
+            for body in bodies {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                // Read until the request body is complete: headers, then
+                // exactly content-length bytes.
+                let mut raw = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let Ok(read) = socket.read(&mut buffer).await else {
+                        break;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buffer[..read]);
+                    let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+                    let Some(header_end) = text.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let length = text
+                        .split("content-length:")
+                        .nth(1)
+                        .and_then(|rest| rest.split("\r\n").next())
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if raw.len() >= header_end + 4 + length {
+                        let payload = &raw[header_end + 4..];
+                        if let Ok(value) = serde_json::from_slice(payload) {
+                            recorded.lock().unwrap().push(value);
+                        }
+                        break;
+                    }
+                }
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+
+        Self {
+            base_url: format!("http://{address}"),
+            requests,
+        }
+    }
+
+    /// The request bodies received so far, in order.
+    pub fn requests(&self) -> Vec<serde_json::Value> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
 /// Serve one HTTP response over loopback and return it as a reqwest response.
 /// API stream parser tests use this to exercise clean EOF behavior.
 pub async fn sse_response(body: &str) -> reqwest::Response {

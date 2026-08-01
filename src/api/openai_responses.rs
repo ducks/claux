@@ -14,7 +14,14 @@ use super::types::{ContentBlock, Message, MessageContent, ToolDefinition, Usage}
 #[derive(Default)]
 struct ResponseCursor {
     response_id: Option<String>,
-    next_message_index: usize,
+    /// Count of messages already reflected server-side under `response_id`.
+    ///
+    /// This is the length of the history that was *actually sent*, never a
+    /// prediction of what the turn will append. The engine appends a variable
+    /// number of messages per round (an empty response appends none, steering
+    /// appends several), so any predicted index desynchronizes from history
+    /// and silently slices past unsent messages.
+    sent_message_count: usize,
 }
 
 /// Native OpenAI Responses API provider.
@@ -52,17 +59,29 @@ impl OpenAIResponsesProvider {
         }
     }
 
-    fn build_input(&self, messages: &[Message]) -> (Vec<Value>, Option<String>) {
+    /// Build the request input, continuing from the stored cursor when the
+    /// history it describes is still a prefix of `messages`.
+    ///
+    /// Returns the input items, the `previous_response_id` to continue from,
+    /// and the number of messages the request covers.
+    ///
+    /// Falls back to resending the whole conversation whenever continuation
+    /// would be lossy: if history shrank (compaction rewrote it) or if the
+    /// delta is empty. An empty delta paired with a live `previous_response_id`
+    /// would ask the model to continue with no new input, silently discarding
+    /// whatever the user just said.
+    fn build_input(&self, messages: &[Message]) -> (Vec<Value>, Option<String>, usize) {
         let cursor = self.cursor.lock().expect("response cursor poisoned");
         if let Some(response_id) = &cursor.response_id {
-            if cursor.next_message_index <= messages.len() {
+            if cursor.sent_message_count < messages.len() {
                 return (
-                    convert_messages(&messages[cursor.next_message_index..], true),
+                    convert_messages(&messages[cursor.sent_message_count..], true),
                     Some(response_id.clone()),
+                    messages.len(),
                 );
             }
         }
-        (convert_messages(messages, false), None)
+        (convert_messages(messages, false), None, messages.len())
     }
 }
 
@@ -90,8 +109,7 @@ impl Provider for OpenAIResponsesProvider {
         cancel: CancellationToken,
     ) -> Result<ProviderStream> {
         let (tx, rx) = mpsc::channel(256);
-        let (input, previous_response_id) = self.build_input(messages);
-        let next_message_index = messages.len().saturating_add(1);
+        let (input, previous_response_id, sent_message_count) = self.build_input(messages);
 
         let mut body = json!({
             "model": self.model,
@@ -145,7 +163,7 @@ impl Provider for OpenAIResponsesProvider {
                 tx,
                 reader_cancel,
                 cursor,
-                next_message_index,
+                sent_message_count,
                 &provider_name,
                 &model,
             )
@@ -246,7 +264,7 @@ async fn read_responses_sse(
     tx: mpsc::Sender<ApiEvent>,
     cancel: CancellationToken,
     cursor: Arc<Mutex<ResponseCursor>>,
-    next_message_index: usize,
+    sent_message_count: usize,
     provider: &str,
     model: &str,
 ) -> Result<()> {
@@ -286,7 +304,7 @@ async fn read_responses_sse(
                 if let Some(response_id) = response["id"].as_str() {
                     *cursor.lock().expect("response cursor poisoned") = ResponseCursor {
                         response_id: Some(response_id.to_string()),
-                        next_message_index,
+                        sent_message_count,
                     };
                 }
                 completed = true;
@@ -424,16 +442,213 @@ mod tests {
         );
         *provider.cursor.lock().unwrap() = ResponseCursor {
             response_id: Some("resp_previous_session".to_string()),
-            next_message_index: 1,
+            sent_message_count: 1,
         };
 
         provider.reset_session();
 
         let messages = vec![Message::user("new session")];
-        let (input, previous_response_id) = provider.build_input(&messages);
+        let (input, previous_response_id, _) = provider.build_input(&messages);
         assert!(previous_response_id.is_none());
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["content"], "new session");
+    }
+
+    fn provider_for_cursor_tests() -> OpenAIResponsesProvider {
+        OpenAIResponsesProvider::new(
+            "https://api.openai.com/v1",
+            "key",
+            "gpt-5.6-sol",
+            "openai",
+            None,
+        )
+    }
+
+    /// Commit a cursor the way a completed response does: the request covered
+    /// exactly `sent_message_count` messages.
+    fn commit_cursor(provider: &OpenAIResponsesProvider, id: &str, sent_message_count: usize) {
+        *provider.cursor.lock().unwrap() = ResponseCursor {
+            response_id: Some(id.to_string()),
+            sent_message_count,
+        };
+    }
+
+    /// Drive two real `stream()` calls against a loopback server and return
+    /// the request bodies. This exercises the full accounting path — cursor
+    /// commit on `response.completed`, then the next request's slice — rather
+    /// than poking at `build_input` with a hand-written cursor.
+    async fn two_round_requests(first: &[Message], second: &[Message]) -> Vec<serde_json::Value> {
+        let completed = |id: &str| {
+            format!(
+                "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{id}\",\"usage\":{{}}}}}}\n\n"
+            )
+        };
+        let server = crate::test_support::RecordingSseServer::start(vec![
+            completed("resp_1"),
+            completed("resp_2"),
+        ])
+        .await;
+        let provider = OpenAIResponsesProvider::new(&server.base_url, "key", "m", "openai", None);
+
+        for messages in [first, second] {
+            let mut stream = provider
+                .stream(messages, "system", &[], 1_000, CancellationToken::new())
+                .await
+                .unwrap();
+            while stream.recv().await.is_some() {}
+        }
+
+        server.requests()
+    }
+
+    #[tokio::test]
+    async fn a_turn_appending_no_assistant_message_does_not_drop_the_next_user_message() {
+        // Regression: the cursor was derived from `messages.len() + 1`, which
+        // assumed every round appends exactly one assistant message. An empty
+        // model response appends none, so the next user message landed at the
+        // index the cursor had already claimed and was sliced away — the
+        // request went out with a live previous_response_id and an empty
+        // input, silently discarding what the user typed.
+        let requests = two_round_requests(
+            &[Message::user("first")],
+            &[Message::user("first"), Message::user("second")],
+        )
+        .await;
+
+        let second = &requests[1];
+        assert_eq!(second["previous_response_id"], "resp_1");
+        let input = second["input"].as_array().unwrap();
+        assert!(
+            !input.is_empty(),
+            "the user message must not be dropped: {second}"
+        );
+        assert_eq!(input[0]["content"], "second");
+    }
+
+    #[tokio::test]
+    async fn steering_messages_appended_mid_turn_are_all_sent() {
+        // Steering injects a variable number of user messages between rounds.
+        // A fixed +1 stride skipped every message past the first.
+        let requests = two_round_requests(
+            &[Message::user("first")],
+            &[
+                Message::user("first"),
+                Message::assistant_text("working on it"),
+                Message::user("steer one"),
+                Message::user("steer two"),
+            ],
+        )
+        .await;
+
+        let second = &requests[1];
+        assert_eq!(second["previous_response_id"], "resp_1");
+        let contents: Vec<&str> = second["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["content"].as_str())
+            .collect();
+        assert_eq!(contents, ["working on it", "steer one", "steer two"]);
+    }
+
+    #[tokio::test]
+    async fn a_tool_round_continues_from_the_previous_response() {
+        // The case the cursor exists for: the assistant tool_use is already
+        // server-side, so only the tool result should be sent.
+        let requests = two_round_requests(
+            &[Message::user("first")],
+            &[
+                Message::user("first"),
+                Message::assistant_blocks(vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "Read".to_string(),
+                    input: json!({"file_path": "/tmp/a"}),
+                }]),
+                Message::tool_results(vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "contents".to_string(),
+                    is_error: None,
+                }]),
+            ],
+        )
+        .await;
+
+        let second = &requests[1];
+        assert_eq!(second["previous_response_id"], "resp_1");
+        let input = second["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1, "only the tool result is new: {second}");
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn an_empty_delta_resends_the_conversation_instead_of_continuing_blindly() {
+        // If history did not grow, continuing from previous_response_id would
+        // send an empty input. Resend in full rather than ask the model to
+        // continue from nothing.
+        let provider = provider_for_cursor_tests();
+        let messages = vec![Message::user("first")];
+        let (_, _, sent) = provider.build_input(&messages);
+        commit_cursor(&provider, "resp_1", sent);
+
+        let (input, previous_response_id, _) = provider.build_input(&messages);
+
+        assert!(previous_response_id.is_none());
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["content"], "first");
+    }
+
+    #[test]
+    fn compaction_shrinking_history_falls_back_to_a_full_resend() {
+        // Compaction rewrites history to something shorter. The stored cursor
+        // then describes messages that no longer exist, so continuation would
+        // be meaningless. (The engine also calls reset_session here; this
+        // guards the provider independently.)
+        let provider = provider_for_cursor_tests();
+        commit_cursor(&provider, "resp_1", 12);
+
+        let messages = vec![
+            Message::user("Here is a summary of our conversation so far:"),
+            Message::assistant_text("summary body"),
+        ];
+        let (input, previous_response_id, _) = provider.build_input(&messages);
+
+        assert!(previous_response_id.is_none());
+        assert_eq!(input.len(), 2);
+        assert_eq!(
+            input[0]["content"],
+            "Here is a summary of our conversation so far:"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_completed_response_records_the_count_of_messages_actually_sent() {
+        let provider = provider_for_cursor_tests();
+        let response = crate::test_support::sse_response(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_7\",\"usage\":{}}}\n\n",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_responses_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            provider.cursor.clone(),
+            3,
+            "openai",
+            "gpt-5.6-sol",
+        )
+        .await
+        .unwrap();
+
+        while rx.recv().await.is_some() {}
+        let cursor = provider.cursor.lock().unwrap();
+        assert_eq!(cursor.response_id.as_deref(), Some("resp_7"));
+        assert_eq!(
+            cursor.sent_message_count, 3,
+            "the cursor must record what was sent, not a prediction"
+        );
     }
 
     #[test]
