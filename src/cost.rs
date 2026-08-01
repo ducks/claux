@@ -1,5 +1,15 @@
 use crate::api::types::Usage;
 pub use crate::model::ModelPricing;
+use serde::Serialize;
+
+#[derive(Debug, PartialEq, Serialize)]
+pub struct UsageSummary {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cost_usd: Option<f64>,
+}
 
 /// Tracks token usage and estimated cost for a session.
 #[derive(Debug, Default)]
@@ -65,11 +75,26 @@ impl CostTracker {
             + per_m(self.cache_creation_tokens, pricing.cache_write)
     }
 
+    /// Actual provider-reported cost, or an estimate when pricing is known.
+    pub fn cost_usd(&self) -> Option<f64> {
+        self.provider_cost_usd
+            .or_else(|| self.pricing.map(|_| self.total_cost_usd()))
+    }
+
+    pub fn usage_summary(&self) -> UsageSummary {
+        UsageSummary {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_read_tokens: self.cache_read_tokens,
+            cache_creation_tokens: self.cache_creation_tokens,
+            cost_usd: self.cost_usd(),
+        }
+    }
+
     pub fn format_summary(&self) -> String {
         let cost = self
-            .provider_cost_usd
+            .cost_usd()
             .map(format_cost)
-            .or_else(|| self.pricing.map(|_| format_cost(self.total_cost_usd())))
             .unwrap_or_else(|| "unavailable".to_string());
         format!(
             "Cost: {} | Tokens: {}in / {}out{}",
@@ -283,6 +308,36 @@ mod tests {
 
         assert_eq!(tracker.total_cost_usd(), 0.0);
         assert!(tracker.format_summary().contains("unavailable"));
+    }
+
+    #[test]
+    fn usage_summary_preserves_provider_cost_and_token_classes() {
+        let mut tracker = CostTracker::new("unknown-model");
+        tracker.add_usage(&Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_tokens: 80,
+            cache_creation_tokens: 10,
+            provider_cost_usd: Some(0.00125),
+        });
+
+        assert_eq!(
+            tracker.usage_summary(),
+            UsageSummary {
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_read_tokens: 80,
+                cache_creation_tokens: 10,
+                cost_usd: Some(0.00125),
+            }
+        );
+    }
+
+    #[test]
+    fn usage_summary_uses_null_when_cost_is_unavailable() {
+        let tracker = CostTracker::new("unknown-model");
+
+        assert_eq!(tracker.usage_summary().cost_usd, None);
     }
 
     #[test]

@@ -142,9 +142,33 @@ claux --tui
 # One-shot
 claux -p "explain this error"
 
+# Machine-readable one-shot result with usage and cost
+claux -p "explain this error" --output-format json
+
 # Resume a session
 claux --resume 20260401-143022
 ```
+
+JSON output has a versioned contract suitable for CI, agent evaluations, and
+other automation:
+
+```json
+{
+  "schema_version": 1,
+  "result": "...",
+  "model": "deepseek/deepseek-v4-flash",
+  "usage": {
+    "input_tokens": 123,
+    "output_tokens": 45,
+    "cache_read_tokens": 67,
+    "cache_creation_tokens": 0,
+    "cost_usd": 0.00123
+  }
+}
+```
+
+`cost_usd` uses provider-reported cost when available, otherwise configured or
+built-in model pricing. It is `null` when neither source is available.
 
 ## Commands
 
