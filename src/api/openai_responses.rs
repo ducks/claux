@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use super::error::{ApiFailure, ApiFailureKind};
 use super::provider::{Provider, ProviderStream};
 use super::stream::ApiEvent;
 use super::types::{ContentBlock, Message, MessageContent, ToolDefinition, Usage};
@@ -169,9 +170,12 @@ impl Provider for OpenAIResponsesProvider {
             )
             .await
             {
-                let message = format!("OpenAI Responses stream error: {error}");
-                tracing::error!("{message}");
-                let _ = error_tx.send(ApiEvent::Error(message)).await;
+                // Classify before wrapping: the prefix is for display, and
+                // must not erase what the failure was.
+                let failure = super::error::classify_reader_error(&error)
+                    .prefixed("OpenAI Responses stream error");
+                tracing::error!("{failure}");
+                let _ = error_tx.send(ApiEvent::Error(failure)).await;
             }
         });
 
@@ -341,14 +345,14 @@ fn translate_event(event: &Value, provider: &str, model: &str) -> Vec<ApiEvent> 
         "response.output_item.done" if event["item"]["type"] == "function_call" => {
             let item = &event["item"];
             let Some(call_id) = item["call_id"].as_str() else {
-                return vec![ApiEvent::Error(
-                    "OpenAI function call omitted call_id".to_string(),
-                )];
+                return vec![ApiEvent::Error(ApiFailure::other(
+                    "OpenAI function call omitted call_id",
+                ))];
             };
             let Some(name) = item["name"].as_str() else {
-                return vec![ApiEvent::Error(
-                    "OpenAI function call omitted name".to_string(),
-                )];
+                return vec![ApiEvent::Error(ApiFailure::other(
+                    "OpenAI function call omitted name",
+                ))];
             };
             match item["arguments"]
                 .as_str()
@@ -359,8 +363,11 @@ fn translate_event(event: &Value, provider: &str, model: &str) -> Vec<ApiEvent> 
                     name: name.to_string(),
                     input,
                 }],
-                None => vec![ApiEvent::Error(format!(
-                    "OpenAI function {name} returned invalid arguments"
+                // The model produced arguments that are not valid JSON. The
+                // turn loop can retry this, so classify it rather than
+                // surfacing it as an opaque failure.
+                None => vec![ApiEvent::Error(ApiFailure::malformed_tool_arguments(
+                    format!("invalid arguments for tool call {name} ({call_id})"),
                 ))],
             }
         }
@@ -384,9 +391,13 @@ fn translate_event(event: &Value, provider: &str, model: &str) -> Vec<ApiEvent> 
             ]
         }
         "response.failed" | "response.incomplete" => {
-            vec![ApiEvent::Error(super::error::stream_error(
-                event, provider, model,
-            ))]
+            let mut failure = super::error::stream_error(event, provider, model);
+            // The Responses equivalent of chat-completions' `finish_reason:
+            // "length"`: the response stopped because it hit the output cap.
+            if event["response"]["incomplete_details"]["reason"] == "max_output_tokens" {
+                failure.kind = ApiFailureKind::OutputLimitExceeded;
+            }
+            vec![ApiEvent::Error(failure)]
         }
         "error" | "response.error" => vec![ApiEvent::Error(super::error::stream_error(
             event, provider, model,
@@ -725,8 +736,8 @@ mod tests {
         assert!(matches!(
             &failed[0],
             ApiEvent::Error(error)
-                if error.contains("429 Too Many Requests")
-                    && error.contains("moonshotai/kimi-k3")
+                if error.message.contains("429 Too Many Requests")
+                    && error.message.contains("moonshotai/kimi-k3")
         ));
     }
 
@@ -753,8 +764,8 @@ mod tests {
         assert!(matches!(
             rx.recv().await,
             Some(ApiEvent::Error(error))
-                if error.contains("429 Too Many Requests")
-                    && error.contains("deepseek/deepseek-r1")
+                if error.message.contains("429 Too Many Requests")
+                    && error.message.contains("deepseek/deepseek-r1")
         ));
         assert!(rx.recv().await.is_none());
     }

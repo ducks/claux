@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 
 #[cfg(test)]
 use crate::api::ProviderStream;
-use crate::api::{ApiEvent, ContentBlock, Message, Provider};
+use crate::api::{ApiEvent, ApiFailure, ApiFailureKind, ContentBlock, Message, Provider};
 use crate::checkpoint::{PendingCheckpoint, TurnCheckpoint};
 use crate::compact::{self};
 use crate::config::{HookTrigger, ModelBinding};
@@ -432,7 +432,10 @@ impl Engine {
                     completed = true;
                     break;
                 }
-                ApiEvent::Error(e) => return Err(anyhow::anyhow!("Compact error: {e}")),
+                ApiEvent::Error(failure) => {
+                    let message = format!("Compact error: {}", failure.message);
+                    return Err(anyhow::Error::new(ApiFailure::new(failure.kind, message)));
+                }
                 _ => {}
             }
         }
@@ -459,28 +462,16 @@ impl Engine {
         self.provider.reset_session();
     }
 
-    /// Check if an API error is a prompt-too-long error (413 or specific error message).
-    fn is_prompt_too_long(err: &str) -> bool {
-        let err = err.to_ascii_lowercase();
-        err.contains("413")
-            || err.contains("prompt is too long")
-            || err.contains("maximum context length")
-            || err.contains("context_length_exceeded")
-    }
-
-    /// Check if an API error is a max-output-tokens error.
-    fn is_max_output_tokens(err: &str) -> bool {
-        let err = err.to_ascii_lowercase();
-        err.contains("max_output_tokens") || err.contains("max_tokens_exceeded")
-    }
-
-    /// OpenAI-compatible providers report malformed accumulated tool-call
-    /// arguments through this error. The provider parser is deliberately
-    /// atomic, so matching this error means no tool calls from the rejected
-    /// response have been emitted or executed.
-    fn is_malformed_tool_arguments(err: &str) -> bool {
-        err.to_ascii_lowercase()
-            .contains("invalid arguments for tool call")
+    /// Recover the failure classification from a `stream()` error.
+    ///
+    /// Providers return `anyhow::Error` when the request fails before a stream
+    /// exists; the underlying `ApiFailure` carries the classification, so
+    /// downcast rather than inspecting the rendered message.
+    fn failure_kind(error: &anyhow::Error) -> ApiFailureKind {
+        error
+            .downcast_ref::<ApiFailure>()
+            .map(|failure| failure.kind)
+            .unwrap_or(ApiFailureKind::Other)
     }
 
     fn malformed_tool_retry_prompt(err: &str) -> String {
@@ -612,32 +603,35 @@ impl Engine {
                         return Ok(());
                     }
                     let err_str = e.to_string();
-                    if Self::is_malformed_tool_arguments(&err_str)
-                        && malformed_tool_retries < MAX_MALFORMED_TOOL_RETRIES
-                    {
-                        malformed_tool_retries += 1;
-                        retry_prompt = Some(Self::malformed_tool_retry_prompt(&err_str));
-                        let _ = tx
-                            .send(StreamEvent::Retry(
-                                "model returned malformed tool arguments; retrying once"
-                                    .to_string(),
-                            ))
-                            .await;
-                        continue;
-                    }
-                    if Self::is_max_output_tokens(&err_str) && self.max_tokens < 64_000 {
-                        self.max_tokens = (self.max_tokens * 2).min(64_000);
-                        continue;
-                    }
-                    if Self::is_prompt_too_long(&err_str) && recovery_attempts < MAX_RECOVERY {
-                        recovery_attempts += 1;
-                        let _ = tx
-                            .send(StreamEvent::Notice(
-                                "compacting conversation...".to_string(),
-                            ))
-                            .await;
-                        self.compact().await?;
-                        continue;
+                    match Self::failure_kind(&e) {
+                        ApiFailureKind::MalformedToolArguments
+                            if malformed_tool_retries < MAX_MALFORMED_TOOL_RETRIES =>
+                        {
+                            malformed_tool_retries += 1;
+                            retry_prompt = Some(Self::malformed_tool_retry_prompt(&err_str));
+                            let _ = tx
+                                .send(StreamEvent::Retry(
+                                    "model returned malformed tool arguments; retrying once"
+                                        .to_string(),
+                                ))
+                                .await;
+                            continue;
+                        }
+                        ApiFailureKind::OutputLimitExceeded if self.max_tokens < 64_000 => {
+                            self.max_tokens = (self.max_tokens * 2).min(64_000);
+                            continue;
+                        }
+                        ApiFailureKind::ContextExceeded if recovery_attempts < MAX_RECOVERY => {
+                            recovery_attempts += 1;
+                            let _ = tx
+                                .send(StreamEvent::Notice(
+                                    "compacting conversation...".to_string(),
+                                ))
+                                .await;
+                            self.compact().await?;
+                            continue;
+                        }
+                        _ => {}
                     }
                     let _ = tx.send(StreamEvent::Error(err_str.clone())).await;
                     return Err(e);
@@ -684,40 +678,53 @@ impl Engine {
                         self.cost.add_usage(&usage);
                     }
                     ApiEvent::Done => break,
-                    ApiEvent::Error(e) => {
-                        if Self::is_malformed_tool_arguments(&e)
-                            && tool_uses.is_empty()
-                            && malformed_tool_retries < MAX_MALFORMED_TOOL_RETRIES
-                        {
-                            malformed_tool_retries += 1;
-                            retry_prompt = Some(Self::malformed_tool_retry_prompt(&e));
-                            let _ = tx
-                                .send(StreamEvent::Retry(
-                                    "model returned malformed tool arguments; retrying once"
-                                        .to_string(),
-                                ))
-                                .await;
-                            had_error = true;
-                            break;
+                    ApiEvent::Error(failure) => {
+                        match failure.kind {
+                            // `tool_uses.is_empty()` keeps the retry safe: a
+                            // provider that emits tool calls one at a time may
+                            // already have surfaced some of the batch, and
+                            // reissuing would double-execute them.
+                            ApiFailureKind::MalformedToolArguments
+                                if tool_uses.is_empty()
+                                    && malformed_tool_retries < MAX_MALFORMED_TOOL_RETRIES =>
+                            {
+                                malformed_tool_retries += 1;
+                                retry_prompt =
+                                    Some(Self::malformed_tool_retry_prompt(&failure.message));
+                                let _ = tx
+                                    .send(StreamEvent::Retry(
+                                        "model returned malformed tool arguments; retrying once"
+                                            .to_string(),
+                                    ))
+                                    .await;
+                                had_error = true;
+                                break;
+                            }
+                            ApiFailureKind::OutputLimitExceeded if self.max_tokens < 64_000 => {
+                                self.max_tokens = (self.max_tokens * 2).min(64_000);
+                                had_error = true;
+                                break;
+                            }
+                            ApiFailureKind::ContextExceeded if recovery_attempts < MAX_RECOVERY => {
+                                recovery_attempts += 1;
+                                let _ = tx
+                                    .send(StreamEvent::Notice(
+                                        "compacting conversation...".to_string(),
+                                    ))
+                                    .await;
+                                self.compact().await?;
+                                had_error = true;
+                                break;
+                            }
+                            _ => {}
                         }
-                        if Self::is_max_output_tokens(&e) && self.max_tokens < 64_000 {
-                            self.max_tokens = (self.max_tokens * 2).min(64_000);
-                            had_error = true;
-                            break;
-                        }
-                        if Self::is_prompt_too_long(&e) && recovery_attempts < MAX_RECOVERY {
-                            recovery_attempts += 1;
-                            let _ = tx
-                                .send(StreamEvent::Notice(
-                                    "compacting conversation...".to_string(),
-                                ))
-                                .await;
-                            self.compact().await?;
-                            had_error = true;
-                            break;
-                        }
-                        let _ = tx.send(StreamEvent::Error(e.clone())).await;
-                        return Err(anyhow::anyhow!("API error: {e}"));
+                        let _ = tx.send(StreamEvent::Error(failure.message.clone())).await;
+                        // Keep the detail in the rendered message: `context`
+                        // alone would leave `to_string()` as just "API error"
+                        // and push the cause into the error source, which
+                        // callers that print the error would drop.
+                        let message = format!("API error: {}", failure.message);
+                        return Err(anyhow::Error::new(ApiFailure::new(failure.kind, message)));
                     }
                 }
             }
@@ -1104,11 +1111,10 @@ mod tests {
                     .unwrap();
                 tx.send(ApiEvent::Done).await.unwrap();
             } else {
-                tx.send(ApiEvent::Error(
+                tx.send(ApiEvent::Error(ApiFailure::malformed_tool_arguments(
                     "OpenAI SSE stream error: invalid arguments for tool call Read \
-                     (call_3): EOF while parsing a value"
-                        .to_string(),
-                ))
+                     (call_3): EOF while parsing a value",
+                )))
                 .await
                 .unwrap();
             }
@@ -1158,36 +1164,132 @@ mod tests {
         }
     }
 
-    #[test]
-    fn output_token_limit_is_not_misclassified_as_prompt_too_long() {
-        let error = "max_tokens_exceeded: response reached max output tokens";
-        assert!(Engine::is_max_output_tokens(error));
-        assert!(!Engine::is_prompt_too_long(error));
+    /// Provider that fails every request with a given classified failure,
+    /// counting attempts. Lets the recovery tests assert on what the turn
+    /// loop *did* rather than on how an error string was spelled.
+    struct FailingProvider {
+        failure: ApiFailure,
+        calls: Arc<AtomicUsize>,
+        max_tokens_seen: Arc<Mutex<Vec<u32>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            max_tokens: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.max_tokens_seen.lock().unwrap().push(max_tokens);
+            let (tx, rx) = mpsc::channel(2);
+            tx.send(ApiEvent::Error(self.failure.clone()))
+                .await
+                .unwrap();
+            drop(tx);
+            Ok(ProviderStream::new(rx, cancel.child_token()))
+        }
+    }
+
+    /// Run one turn against a provider that always fails with `failure`,
+    /// returning (attempt count, max_tokens seen per attempt).
+    async fn recovery_attempts_for(failure: ApiFailure) -> (usize, Vec<u32>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let max_tokens_seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Box::new(FailingProvider {
+            failure,
+            calls: calls.clone(),
+            max_tokens_seen: max_tokens_seen.clone(),
+        });
+        let mut engine =
+            Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Bypass);
+
+        let _ = engine
+            .submit("go", tokio_util::sync::CancellationToken::new())
+            .await;
+
+        let seen = max_tokens_seen.lock().unwrap().clone();
+        (calls.load(Ordering::SeqCst), seen)
+    }
+
+    #[tokio::test]
+    async fn an_output_limit_escalates_max_tokens_without_compacting() {
+        // Previously keyed off the substring "max_output_tokens"; now keyed
+        // off the classification, so the recovery cannot be reached by an
+        // error that merely mentions the phrase.
+        let (attempts, max_tokens) =
+            recovery_attempts_for(ApiFailure::output_limit_exceeded("output limit")).await;
+
+        assert!(attempts > 1, "the turn should retry with a larger budget");
+        assert!(
+            max_tokens.windows(2).all(|pair| pair[1] > pair[0]),
+            "max_tokens must escalate on each retry, got {max_tokens:?}"
+        );
+        assert_eq!(
+            *max_tokens.last().unwrap(),
+            64_000,
+            "escalation stops at the ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unclassified_failure_triggers_no_recovery() {
+        // The case the substring predicates got wrong: an error whose text
+        // happens to contain "413" or "max_output_tokens" but which is
+        // neither condition. It must fail fast, not burn retries.
+        let (attempts, _) = recovery_attempts_for(ApiFailure::other(
+            "internal error (request req_413_88): invalid max_tokens parameter",
+        ))
+        .await;
+
+        assert_eq!(
+            attempts, 1,
+            "an unclassified failure must not trigger compaction or escalation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_context_overflow_attempts_compaction() {
+        // The failing provider also serves the summarization request, so the
+        // compact fails and ends the turn: attempt 1 is the turn, attempt 2 is
+        // the compaction it triggered. What matters is that ContextExceeded
+        // routes to compaction at all — an unclassified failure does not
+        // (see `an_unclassified_failure_triggers_no_recovery`).
+        let (attempts, _) =
+            recovery_attempts_for(ApiFailure::new(ApiFailureKind::ContextExceeded, "too long"))
+                .await;
+
+        assert_eq!(
+            attempts, 2,
+            "a context overflow must trigger a compaction attempt"
+        );
     }
 
     #[test]
-    fn max_tokens_parameter_error_does_not_trigger_compaction() {
-        let error = "invalid max_tokens parameter";
-        assert!(!Engine::is_prompt_too_long(error));
-        assert!(!Engine::is_max_output_tokens(error));
-    }
+    fn stream_errors_carry_their_classification_to_the_turn_loop() {
+        // The turn loop downcasts `stream()` errors; a failure that loses its
+        // type on the way through anyhow would silently stop being recoverable.
+        let error = anyhow::Error::new(ApiFailure::malformed_tool_arguments("bad args"));
+        assert_eq!(
+            Engine::failure_kind(&error),
+            ApiFailureKind::MalformedToolArguments
+        );
 
-    #[test]
-    fn context_limit_errors_are_classified_case_insensitively() {
-        assert!(Engine::is_prompt_too_long(
-            "Maximum Context Length exceeded"
-        ));
-        assert!(Engine::is_prompt_too_long("CONTEXT_LENGTH_EXCEEDED"));
-    }
-
-    #[test]
-    fn malformed_tool_argument_errors_are_classified_narrowly() {
-        assert!(Engine::is_malformed_tool_arguments(
-            "OpenAI SSE stream error: invalid arguments for tool call Read (call_3)"
-        ));
-        assert!(!Engine::is_malformed_tool_arguments(
-            "invalid arguments for request"
-        ));
+        let untyped = anyhow::anyhow!("invalid arguments for tool call Read (call_3)");
+        assert_eq!(
+            Engine::failure_kind(&untyped),
+            ApiFailureKind::Other,
+            "prose alone must not be treated as a classification"
+        );
     }
 
     #[tokio::test]

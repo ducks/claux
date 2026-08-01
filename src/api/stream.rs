@@ -23,8 +23,9 @@ pub enum ApiEvent {
     /// Stream complete
     Done,
 
-    /// Error from API
-    Error(String),
+    /// Error from API, classified so the turn loop can choose a recovery
+    /// without pattern-matching provider prose.
+    Error(super::error::ApiFailure),
 }
 
 /// Incrementally split an SSE byte stream into UTF-8 lines.
@@ -74,6 +75,7 @@ pub async fn read_sse_stream(
     response: reqwest::Response,
     tx: mpsc::Sender<ApiEvent>,
     cancel: CancellationToken,
+    model: &str,
 ) -> Result<()> {
     use futures_util::StreamExt as _;
 
@@ -219,10 +221,13 @@ pub async fn read_sse_stream(
                 }
 
                 "error" => {
-                    let msg = event["error"]["message"]
-                        .as_str()
-                        .unwrap_or("unknown error");
-                    let _ = tx.send(ApiEvent::Error(msg.to_string())).await;
+                    let _ = tx
+                        .send(ApiEvent::Error(super::error::stream_error(
+                            &event,
+                            "anthropic",
+                            model,
+                        )))
+                        .await;
                     return Ok(());
                 }
 
@@ -267,7 +272,7 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let error = read_sse_stream(response, tx, CancellationToken::new())
+        let error = read_sse_stream(response, tx, CancellationToken::new(), "claude-test")
             .await
             .unwrap_err();
 
@@ -281,7 +286,7 @@ mod tests {
         let response = crate::test_support::sse_response("data: {not json}\n\n").await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let error = read_sse_stream(response, tx, CancellationToken::new())
+        let error = read_sse_stream(response, tx, CancellationToken::new(), "claude-test")
             .await
             .unwrap_err();
 
@@ -302,7 +307,7 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let error = read_sse_stream(response, tx, CancellationToken::new())
+        let error = read_sse_stream(response, tx, CancellationToken::new(), "claude-test")
             .await
             .unwrap_err();
 
@@ -322,7 +327,7 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        read_sse_stream(response, tx, CancellationToken::new())
+        read_sse_stream(response, tx, CancellationToken::new(), "claude-test")
             .await
             .unwrap();
 
