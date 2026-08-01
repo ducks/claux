@@ -1,5 +1,5 @@
 pub(crate) mod anthropic;
-mod error;
+pub(crate) mod error;
 pub(crate) mod openai_compat;
 pub(crate) mod openai_responses;
 pub(crate) mod provider;
@@ -7,6 +7,7 @@ pub(crate) mod stream;
 pub(crate) mod types;
 
 pub use anthropic::AnthropicProvider;
+pub use error::{ApiFailure, ApiFailureKind};
 pub use openai_compat::OpenAICompatProvider;
 pub use openai_responses::OpenAIResponsesProvider;
 pub use provider::Provider;

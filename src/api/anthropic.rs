@@ -100,11 +100,14 @@ impl Provider for AnthropicProvider {
         let stream_cancel = cancel.child_token();
         let reader_cancel = stream_cancel.clone();
         let error_tx = tx.clone();
+        let model = self.model.clone();
         tokio::spawn(async move {
-            if let Err(e) = stream::read_sse_stream(response, tx, reader_cancel).await {
-                let message = format!("SSE stream error: {e}");
-                tracing::error!("{message}");
-                let _ = error_tx.send(ApiEvent::Error(message)).await;
+            if let Err(e) = stream::read_sse_stream(response, tx, reader_cancel, &model).await {
+                // Classify before wrapping: the prefix is for display, and
+                // must not erase what the failure was.
+                let failure = super::error::classify_reader_error(&e).prefixed("SSE stream error");
+                tracing::error!("{failure}");
+                let _ = error_tx.send(ApiEvent::Error(failure)).await;
             }
         });
 

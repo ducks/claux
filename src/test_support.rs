@@ -163,6 +163,30 @@ impl RecordingSseServer {
     }
 }
 
+/// Serve one HTTP response with the given status over loopback. Error-path
+/// tests use this to exercise real `reqwest::Response` handling.
+pub async fn json_response(status: u16, body: &str) -> reqwest::Response {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let body = body.to_string();
+
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = socket.read(&mut request).await;
+        let response = format!(
+            "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    });
+
+    reqwest::get(format!("http://{address}")).await.unwrap()
+}
+
 /// Serve one HTTP response over loopback and return it as a reqwest response.
 /// API stream parser tests use this to exercise clean EOF behavior.
 pub async fn sse_response(body: &str) -> reqwest::Response {

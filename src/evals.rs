@@ -125,7 +125,9 @@ impl Provider for FixtureProvider {
             Terminal::Close => {}
             Terminal::Error => {
                 let _ = tx
-                    .send(ApiEvent::Error("scripted provider failure".to_string()))
+                    .send(ApiEvent::Error(crate::api::ApiFailure::other(
+                        "scripted provider failure",
+                    )))
                     .await;
             }
         }

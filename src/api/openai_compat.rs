@@ -4,6 +4,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use super::error::ApiFailure;
 use super::provider::{Provider, ProviderStream};
 use super::stream::{ApiEvent, Utf8LineDecoder};
 use super::types::{Message, MessageContent, ToolDefinition, Usage};
@@ -211,9 +212,12 @@ impl Provider for OpenAICompatProvider {
             if let Err(e) =
                 read_openai_sse(response, tx, reader_cancel, &provider_name, &model).await
             {
-                let message = format!("OpenAI SSE stream error: {e}");
-                tracing::error!("{message}");
-                let _ = error_tx.send(ApiEvent::Error(message)).await;
+                // Classify before wrapping: the prefix is for display, and
+                // must not erase what the failure was.
+                let failure =
+                    super::error::classify_reader_error(&e).prefixed("OpenAI SSE stream error");
+                tracing::error!("{failure}");
+                let _ = error_tx.send(ApiEvent::Error(failure)).await;
             }
         });
 
@@ -301,8 +305,8 @@ async fn read_openai_sse(
                 .map_err(|error| anyhow::anyhow!("invalid JSON in OpenAI SSE event: {error}"))?;
 
             if event["error"].is_object() {
-                let message = super::error::stream_error(&event, provider, model);
-                let _ = tx.send(ApiEvent::Error(message)).await;
+                let failure = super::error::stream_error(&event, provider, model);
+                let _ = tx.send(ApiEvent::Error(failure)).await;
                 return Ok(());
             }
 
@@ -378,26 +382,25 @@ async fn read_openai_sse(
                         "stop" => {}
                         "length" => {
                             let _ = tx
-                                .send(ApiEvent::Error(
-                                    "max_output_tokens: response reached its output token limit"
-                                        .to_string(),
-                                ))
+                                .send(ApiEvent::Error(ApiFailure::output_limit_exceeded(
+                                    "response reached its output token limit",
+                                )))
                                 .await;
                             return Ok(());
                         }
                         "content_filter" => {
                             let _ = tx
-                                .send(ApiEvent::Error(
-                                    "response blocked by provider content filter".to_string(),
-                                ))
+                                .send(ApiEvent::Error(ApiFailure::other(
+                                    "response blocked by provider content filter",
+                                )))
                                 .await;
                             return Ok(());
                         }
                         other => {
                             let _ = tx
-                                .send(ApiEvent::Error(format!(
+                                .send(ApiEvent::Error(ApiFailure::other(format!(
                                     "unsupported OpenAI finish reason: {other}"
-                                )))
+                                ))))
                                 .await;
                             return Ok(());
                         }
@@ -525,9 +528,11 @@ mod tests {
             .unwrap();
 
         assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "partial"));
-        assert!(
-            matches!(rx.recv().await, Some(ApiEvent::Error(error)) if error.contains("max_output_tokens"))
-        );
+        assert!(matches!(
+            rx.recv().await,
+            Some(ApiEvent::Error(error))
+                if error.kind == crate::api::ApiFailureKind::OutputLimitExceeded
+        ));
         assert!(rx.recv().await.is_none());
     }
 
@@ -584,9 +589,9 @@ mod tests {
         assert!(matches!(
             rx.recv().await,
             Some(ApiEvent::Error(error))
-                if error.contains("429 Too Many Requests")
-                    && error.contains("poolside/laguna")
-                    && error.contains("choose another model/provider")
+                if error.message.contains("429 Too Many Requests")
+                    && error.message.contains("poolside/laguna")
+                    && error.message.contains("choose another model/provider")
         ));
         assert!(rx.recv().await.is_none());
     }
