@@ -108,6 +108,7 @@ pub async fn run(
                         Some(&plugins),
                         &HookTrigger::OnContextBuild,
                         resolved.binding.provider_kind == ProviderKind::Anthropic,
+                        config.is_project_trusted(),
                     )
                     .await?;
                     engine.set_system_prompt(system_prompt);

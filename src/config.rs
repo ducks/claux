@@ -606,6 +606,16 @@ impl Config {
             .is_some_and(|url| url.contains("api.openai.com") || url.contains("openrouter.ai"))
     }
 
+    /// Whether the current project is trusted. Falls back to `false` (the
+    /// fail-closed default) when trust has not been resolved, which only
+    /// happens for configs built outside `Config::load`.
+    pub fn is_project_trusted(&self) -> bool {
+        self.project_trust
+            .as_ref()
+            .map(ProjectTrust::is_trusted)
+            .unwrap_or(false)
+    }
+
     pub fn load(force_project_trust: bool) -> Result<Self> {
         let global_path = Self::global_path();
 
@@ -1099,5 +1109,19 @@ mod tests {
         let servers = load_mcp_json(&trust);
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "safe");
+    }
+
+    #[test]
+    fn is_project_trusted_reflects_resolved_trust() {
+        let mut config = Config::default();
+
+        // Before trust is resolved, the fail-closed default is untrusted.
+        assert!(!config.is_project_trusted());
+
+        config.project_trust = Some(ProjectTrust::for_test(PathBuf::from("."), true));
+        assert!(config.is_project_trusted());
+
+        config.project_trust = Some(ProjectTrust::for_test(PathBuf::from("."), false));
+        assert!(!config.is_project_trusted());
     }
 }

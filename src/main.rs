@@ -141,6 +141,7 @@ async fn main() -> Result<()> {
             Some(&plugin_registry),
             &config::HookTrigger::OnContextBuild,
             requested_model.binding.provider_kind == config::ProviderKind::Anthropic,
+            config.is_project_trusted(),
         )
         .await?;
         engine.set_system_prompt(system_prompt);
@@ -250,6 +251,7 @@ async fn build_engine(
         agent_factory,
         model.clone(),
         config.permission_mode,
+        config.is_project_trusted(),
         sandbox_policy,
         command_sandbox,
     );
