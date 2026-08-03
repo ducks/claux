@@ -16,7 +16,7 @@ A terminal-based AI coding assistant written in Rust. Streams responses, execute
 - **Auto-compact** — triggers when conversation gets large
 - **Cost tracking** — per-model token usage and USD estimates
 - **Prompt caching** — automatic Anthropic cache breakpoints on the system prompt and conversation, cutting input cost and latency on long sessions
-- **Context assembly** — git status, CLAUDE.md, environment info in system prompt
+- **Context assembly** — git status, CLAUDE.md, environment info in system prompt. Checked-in CLAUDE.md is loaded only for trusted projects (the user's `~/.claude/CLAUDE.md` always is), and each file is size-capped
 - **TUI mode** — full-screen ratatui interface with `--tui`
 - **Multi-provider** — Anthropic, OpenAI, Ollama, or any OpenAI-compatible endpoint
 - **Native system prompt** — claux speaks as claux; the full prompt is readable in `src/context.rs`, and what you read is what the model gets
@@ -203,6 +203,9 @@ bash_filesystem_policy = "auto" # auto | workspace_write | unrestricted
 # policies without trust, but cannot loosen them unless their directory is
 # listed here or --trust-project is passed for the invocation.
 # Project-local .mcp.json uses the same boundary.
+# CLAUDE.md instructions checked into a project (in the working directory and
+# its ancestors) are also only loaded for trusted projects; the user's own
+# ~/.claude/CLAUDE.md is always loaded. Each CLAUDE.md is capped at 40k chars.
 trusted_projects = ["/absolute/path/to/a/trusted/project"]
 
 [providers.anthropic]

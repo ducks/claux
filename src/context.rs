@@ -1,6 +1,7 @@
 use crate::config::HookTrigger;
 use crate::plugin::PluginRegistry;
 use anyhow::Result;
+use std::path::Path;
 
 /// Separator between system prompt blocks.
 /// The Anthropic provider splits on this to send an array of text blocks:
@@ -10,9 +11,21 @@ use anyhow::Result;
 pub const SYSTEM_PROMPT_BLOCK_SEPARATOR: &str = "\n__CLAUX_BLOCK__\n";
 
 /// Build the system prompt from environment context.
-/// Used by sub-agents.
-pub async fn build_system_prompt() -> Result<String> {
-    build_system_prompt_for_model("an AI assistant", None, &HookTrigger::OnContextBuild, true).await
+///
+/// `trusted` controls whether project-checked-in CLAUDE.md files (in the
+/// working directory and its ancestors) are loaded. Untrusted projects do not
+/// get their checked-in instructions injected, matching the MCP trust
+/// boundary; the user's own `~/.claude/CLAUDE.md` is always loaded because it
+/// is the user's private global config, not derived from the repository.
+pub async fn build_system_prompt(trusted: bool) -> Result<String> {
+    build_system_prompt_for_model(
+        "an AI assistant",
+        None,
+        &HookTrigger::OnContextBuild,
+        true,
+        trusted,
+    )
+    .await
 }
 
 pub async fn build_system_prompt_for_model(
@@ -20,13 +33,14 @@ pub async fn build_system_prompt_for_model(
     plugins: Option<&PluginRegistry>,
     trigger: &HookTrigger,
     is_anthropic: bool,
+    trusted: bool,
 ) -> Result<String> {
     // Block 0: static instructions — claux's own prompt, same for every
     // provider. What you read here is exactly what the model gets.
     let instructions = claux_system_prompt(model);
 
     // Block 1: runtime (environment, git status, CLAUDE.md, memory, plugins)
-    let runtime = build_runtime_section(model, plugins, trigger).await;
+    let runtime = build_runtime_section(model, plugins, trigger, trusted).await;
 
     if is_anthropic {
         Ok(format!(
@@ -42,6 +56,7 @@ async fn build_runtime_section(
     model: &str,
     plugins: Option<&PluginRegistry>,
     trigger: &HookTrigger,
+    trusted: bool,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -84,7 +99,7 @@ async fn build_runtime_section(
     }
 
     // CLAUDE.md / project context
-    if let Some(claude_md) = read_claude_md().await {
+    if let Some(claude_md) = read_claude_md(trusted).await {
         parts.push(format!("\n{claude_md}"));
     }
 
@@ -280,48 +295,52 @@ async fn detect_default_branch() -> String {
     "main".to_string()
 }
 
-async fn read_claude_md() -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
+/// Per-file cap on CLAUDE.md content injected into the system prompt, so an
+/// oversized instructions file (or many of them) cannot bloat every request
+/// and every Anthropic cache write. Mirror of git status's 2k truncation,
+/// applied to each CLAUDE.md file read.
+const MAX_CLAUDE_MD_BYTES: usize = 40_000;
+
+async fn read_claude_md(trusted: bool) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
+    let home = std::env::var("HOME").ok();
+    read_claude_md_from(&cwd, home.as_deref(), trusted).await
+}
 
-    // 1. Check cwd and .claude/ subdir
-    for name in &["CLAUDE.md", ".claude/CLAUDE.md"] {
-        let path = cwd.join(name);
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                parts.push(format!("# {} ({})\n{}", name, cwd.display(), content));
-            }
-        }
-    }
+/// Collect CLAUDE.md instructions.
+///
+/// Project-checked-in files (CLAUDE.md and .claude/CLAUDE.md in `cwd` and its
+/// ancestors) are only loaded when `trusted`. Checking out a repo must not
+/// silently inject its contents into the model: an untrusted project controls
+/// these paths. The user's own `~/.claude/CLAUDE.md` is always loaded because
+/// it is user-owned global config rather than repository-derived content.
+///
+/// `cwd` and `home` are parameters so tests can target a throwaway directory
+/// without mutating the process-global current directory.
+async fn read_claude_md_from(cwd: &Path, home: Option<&str>, trusted: bool) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
 
-    // 2. Walk up parent directories
-    let mut dir = cwd.as_path();
-    while let Some(parent) = dir.parent() {
-        // Don't re-read cwd
-        if parent == cwd {
-            dir = parent;
-            continue;
-        }
-        for name in &["CLAUDE.md", ".claude/CLAUDE.md"] {
-            let path = parent.join(name);
-            if path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    parts.push(format!("# {} ({})\n{}", name, parent.display(), content));
+    if trusted {
+        // 1. cwd and .claude/ subdir, then walk up parent directories.
+        //    These are checked into the repo being opened.
+        for dir in std::iter::once(cwd).chain(cwd.ancestors().skip(1)) {
+            for name in &["CLAUDE.md", ".claude/CLAUDE.md"] {
+                let path = dir.join(name);
+                if let Some(content) = read_capped(&path) {
+                    parts.push(format!("# {} ({})\n{}", name, dir.display(), content));
                 }
             }
         }
-        dir = parent;
     }
 
-    // 3. Check ~/.claude/CLAUDE.md (user-global)
-    if let Ok(home) = std::env::var("HOME") {
-        let path = std::path::PathBuf::from(&home)
+    // 2. ~/.claude/CLAUDE.md (user-global) — the user's own instructions,
+    //    loaded regardless of project trust.
+    if let Some(home_path) = home {
+        let path = std::path::PathBuf::from(home_path)
             .join(".claude")
             .join("CLAUDE.md");
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                parts.push(format!("# ~/.claude/CLAUDE.md\n{content}"));
-            }
+        if let Some(content) = read_capped(&path) {
+            parts.push(format!("# ~/.claude/CLAUDE.md\n{content}"));
         }
     }
 
@@ -329,6 +348,20 @@ async fn read_claude_md() -> Option<String> {
         None
     } else {
         Some(parts.join("\n\n"))
+    }
+}
+
+/// Read a file's text, capped at `MAX_CLAUDE_MD_BYTES` with a truncation
+/// marker. Returns `None` when the file is missing or unreadable.
+fn read_capped(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    if content.len() > MAX_CLAUDE_MD_BYTES {
+        let truncated = crate::utils::truncate_str(&content, MAX_CLAUDE_MD_BYTES);
+        Some(format!(
+            "{truncated}\n... (truncated because it exceeds {MAX_CLAUDE_MD_BYTES} bytes)",
+        ))
+    } else {
+        Some(content)
     }
 }
 
@@ -381,5 +414,89 @@ mod tests {
             !dir.contains(".claude"),
             "claux memory must not share Claude Code's ~/.claude tree"
         );
+    }
+
+    #[tokio::test]
+    async fn trusted_project_loads_project_and_parent_claude_md() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("CLAUDE.md"), "project instructions").unwrap();
+        std::fs::write(parent.path().join("CLAUDE.md"), "parent instructions").unwrap();
+
+        let result = read_claude_md_from(&project, None, true).await.unwrap();
+
+        assert!(result.contains("project instructions"));
+        assert!(result.contains("parent instructions"));
+    }
+
+    #[tokio::test]
+    async fn untrusted_project_skips_all_checked_in_claude_md() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("CLAUDE.md"), "project instructions").unwrap();
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        std::fs::write(project.join(".claude/CLAUDE.md"), "dot claude").unwrap();
+        std::fs::write(parent.path().join("CLAUDE.md"), "parent instructions").unwrap();
+
+        let result = read_claude_md_from(&project, None, false).await;
+
+        assert!(
+            result.is_none(),
+            "an untrusted project must load no checked-in CLAUDE.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_global_claude_md_loads_regardless_of_trust() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir_all(parent.path().join("home/.claude")).unwrap();
+        std::fs::write(
+            parent.path().join("home/.claude/CLAUDE.md"),
+            "user global instructions",
+        )
+        .unwrap();
+        let home = parent.path().join("home");
+
+        let trusted = read_claude_md_from(&project, Some(home.to_str().unwrap()), true)
+            .await
+            .unwrap();
+        assert!(trusted.contains("user global instructions"));
+
+        // Even for an untrusted project, the user's own global file is loaded.
+        let untrusted = read_claude_md_from(&project, Some(home.to_str().unwrap()), false)
+            .await
+            .unwrap();
+        assert!(untrusted.contains("user global instructions"));
+    }
+
+    #[test]
+    fn oversized_claude_md_is_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        // Just over the per-file cap.
+        let big = "x".repeat(MAX_CLAUDE_MD_BYTES + 1);
+        let path = dir.path().join("CLAUDE.md");
+        std::fs::write(&path, &big).unwrap();
+
+        let content = read_capped(&path).unwrap();
+
+        assert!(
+            content.len() <= MAX_CLAUDE_MD_BYTES + "truncated marker".len() + 64,
+            "oversized content must be bounded"
+        );
+        assert!(content.contains("truncated because it exceeds"));
+    }
+
+    #[test]
+    fn small_claude_md_is_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        std::fs::write(&path, "small instructions").unwrap();
+
+        let content = read_capped(&path).unwrap();
+        assert_eq!(content, "small instructions");
     }
 }

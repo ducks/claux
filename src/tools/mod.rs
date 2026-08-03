@@ -77,6 +77,7 @@ impl ToolRegistry {
         factory: agent::ProviderFactory,
         model: String,
         permission_mode: crate::permissions::PermissionMode,
+        trusted: bool,
         sandbox_policy: Arc<SandboxPolicy>,
         command_sandbox: Arc<CommandSandbox>,
     ) -> Self {
@@ -94,6 +95,7 @@ impl ToolRegistry {
                     factory,
                     model,
                     permission_mode,
+                    trusted,
                     sandbox_policy,
                     command_sandbox,
                 )),
@@ -247,6 +249,7 @@ mod tests {
             factory,
             "model".into(),
             crate::permissions::PermissionMode::Default,
+            true,
             Arc::new(SandboxPolicy::unrestricted_for_tests()),
             Arc::new(CommandSandbox::unrestricted_for_tests()),
         );

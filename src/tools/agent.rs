@@ -23,6 +23,11 @@ pub struct AgentTool {
     /// mode would prompt for is denied rather than auto-run — but Plan's
     /// deny-all-writes and Bypass's allow-all are honored exactly.
     permission_mode: PermissionMode,
+    /// Project trust inherited from the parent session. Sub-agents share the
+    /// parent's working directory, so they must apply the same CLAUDE.md
+    /// trust gating: an untrusted project must not inject its checked-in
+    /// instructions into a sub-agent's prompt either.
+    trusted: bool,
     sandbox_policy: Arc<SandboxPolicy>,
     command_sandbox: Arc<CommandSandbox>,
 }
@@ -32,6 +37,7 @@ impl AgentTool {
         make_provider: ProviderFactory,
         model: String,
         permission_mode: PermissionMode,
+        trusted: bool,
         sandbox_policy: Arc<SandboxPolicy>,
         command_sandbox: Arc<CommandSandbox>,
     ) -> Self {
@@ -39,6 +45,7 @@ impl AgentTool {
             make_provider,
             model,
             permission_mode,
+            trusted,
             sandbox_policy,
             command_sandbox,
         }
@@ -124,7 +131,7 @@ impl Tool for AgentTool {
         let mut engine = Engine::new(provider, tools, permissions, &self.model);
         engine.set_auto_compact_threshold(0.8); // Default for sub-agents
 
-        let base_prompt = context::build_system_prompt().await?;
+        let base_prompt = context::build_system_prompt(self.trusted).await?;
         let agent_prompt = format!(
             "{base_prompt}\n\n# Agent Mode\n\
              You are a sub-agent spawned to handle a specific task. \
@@ -223,6 +230,7 @@ mod tests {
             factory,
             "test".into(),
             mode,
+            true,
             sandbox_policy,
             Arc::new(CommandSandbox::unrestricted_for_tests()),
         );
