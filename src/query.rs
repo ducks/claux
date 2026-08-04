@@ -1,4 +1,5 @@
 use anyhow::Result;
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
@@ -38,7 +39,20 @@ pub struct Engine {
     checkpoint_enabled: bool,
     pending_checkpoint: Option<PendingCheckpoint>,
     last_checkpoint: Option<TurnCheckpoint>,
+    tool_trace: Vec<ToolTraceEntry>,
     pub cost: CostTracker,
+}
+
+/// An immutable audit record of a tool call and the result sent back to the
+/// model. This is kept separately from conversation history so compaction
+/// cannot erase earlier tool activity from an exported transcript.
+#[derive(Clone, Debug, Serialize)]
+pub struct ToolTraceEntry {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+    pub output: String,
+    pub is_error: bool,
 }
 
 /// Events sent from the engine to the UI during streaming.
@@ -107,6 +121,7 @@ impl Engine {
             checkpoint_enabled: true,
             pending_checkpoint: None,
             last_checkpoint: None,
+            tool_trace: Vec::new(),
             cost: CostTracker::new(model),
         }
     }
@@ -135,6 +150,7 @@ impl Engine {
             checkpoint_enabled: false,
             pending_checkpoint: None,
             last_checkpoint: None,
+            tool_trace: Vec::new(),
             cost: CostTracker::new("test"),
         }
     }
@@ -288,6 +304,10 @@ impl Engine {
         &self.messages
     }
 
+    pub fn tool_trace(&self) -> &[ToolTraceEntry] {
+        &self.tool_trace
+    }
+
     #[cfg(test)]
     pub fn messages_mut(&mut self) -> &mut Vec<Message> {
         &mut self.messages
@@ -303,6 +323,7 @@ impl Engine {
             .expect("steering queue poisoned")
             .clear();
         self.messages = messages;
+        self.tool_trace.clear();
         self.pending_checkpoint = None;
         self.last_checkpoint = None;
     }
@@ -762,9 +783,16 @@ impl Engine {
             if stream_interrupted {
                 if !tool_uses.is_empty() {
                     let mut result_blocks = Vec::with_capacity(tool_uses.len());
-                    for (id, _, _) in &tool_uses {
+                    for (id, name, input) in &tool_uses {
                         self.fire_hook(&HookTrigger::OnToolComplete).await;
                         let _ = tx.send(StreamEvent::ToolResult { is_error: true }).await;
+                        self.tool_trace.push(ToolTraceEntry {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                            output: Self::INTERRUPTED_BY_USER.to_string(),
+                            is_error: true,
+                        });
                         result_blocks.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content: Self::INTERRUPTED_BY_USER.to_string(),
@@ -921,7 +949,7 @@ impl Engine {
 
         // Phase 3: truncate, emit events, and build blocks in order.
         let mut result_blocks = Vec::with_capacity(tool_uses.len());
-        for (idx, (id, name, _)) in tool_uses.iter().enumerate() {
+        for (idx, (id, name, input)) in tool_uses.iter().enumerate() {
             let output = outputs[idx].take().expect("every tool got an output");
             let (content, was_truncated) = compact::truncate_tool_output(&output.content);
             if was_truncated {
@@ -934,6 +962,14 @@ impl Engine {
                     is_error: output.is_error,
                 })
                 .await;
+
+            self.tool_trace.push(ToolTraceEntry {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                output: content.clone(),
+                is_error: output.is_error,
+            });
 
             result_blocks.push(ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
@@ -1415,11 +1451,19 @@ mod tests {
             .push_back("stale steering".to_string());
         engine.permissions.always_allow("Write");
         engine.permissions.always_allow_command("cargo test");
+        engine.tool_trace.push(ToolTraceEntry {
+            id: "old-tool".to_string(),
+            name: "Bash".to_string(),
+            input: serde_json::json!({"command": "true"}),
+            output: String::new(),
+            is_error: false,
+        });
 
         engine.set_messages(vec![Message::user("loaded session")]);
 
         assert_eq!(resets.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(engine.message_count(), 1);
+        assert!(engine.tool_trace().is_empty());
         assert!(engine.steering_queue().lock().unwrap().is_empty());
         assert_eq!(engine.cost.input_tokens, 0);
         assert_eq!(engine.cost.output_tokens, 0);
@@ -1499,6 +1543,7 @@ mod tests {
             checkpoint_enabled: false,
             pending_checkpoint: None,
             last_checkpoint: None,
+            tool_trace: Vec::new(),
             cost: CostTracker::new("test"),
         };
 
@@ -1576,6 +1621,7 @@ mod tests {
             checkpoint_enabled: false,
             pending_checkpoint: None,
             last_checkpoint: None,
+            tool_trace: Vec::new(),
             cost: CostTracker::new("test"),
         };
 
@@ -2115,6 +2161,7 @@ mod tests {
             checkpoint_enabled: false,
             pending_checkpoint: None,
             last_checkpoint: None,
+            tool_trace: Vec::new(),
             cost: CostTracker::new("test"),
         };
 
@@ -2150,6 +2197,13 @@ mod tests {
             }
             _ => panic!("Expected ToolResult block"),
         }
+
+        assert_eq!(engine.tool_trace().len(), 1);
+        assert_eq!(engine.tool_trace()[0].id, "test1");
+        assert_eq!(engine.tool_trace()[0].name, "TaskCreate");
+        assert_eq!(engine.tool_trace()[0].input["subject"], "x");
+        assert!(engine.tool_trace()[0].is_error);
+        assert!(engine.tool_trace()[0].output.contains("Unknown tool"));
     }
 
     #[tokio::test]
@@ -2177,6 +2231,7 @@ mod tests {
             checkpoint_enabled: false,
             pending_checkpoint: None,
             last_checkpoint: None,
+            tool_trace: Vec::new(),
             cost: CostTracker::new("test"),
         };
 

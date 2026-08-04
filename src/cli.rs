@@ -16,6 +16,12 @@ pub struct Cli {
     #[arg(long, value_enum, requires = "prompt")]
     pub output_format: Option<OutputFormat>,
 
+    /// Write the complete one-shot transcript and tool trace to a JSON file
+    ///
+    /// The artifact can contain sensitive tool inputs and outputs.
+    #[arg(long, value_name = "FILE", requires = "prompt")]
+    pub transcript: Option<PathBuf>,
+
     /// Model to use
     #[arg(long)]
     pub model: Option<String>,
@@ -124,6 +130,37 @@ mod tests {
             Cli::try_parse_from(["claux", "--print", "hello", "--output-format", "json"]).unwrap();
 
         assert_eq!(cli.output_format, Some(OutputFormat::Json));
+    }
+
+    #[test]
+    fn parses_transcript_for_one_shot_mode() {
+        let cli = Cli::try_parse_from([
+            "claux",
+            "--print",
+            "hello",
+            "--transcript",
+            "/tmp/claux-transcript.json",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.transcript,
+            Some(PathBuf::from("/tmp/claux-transcript.json"))
+        );
+    }
+
+    #[test]
+    fn transcript_requires_one_shot_mode() {
+        let error =
+            match Cli::try_parse_from(["claux", "--transcript", "/tmp/claux-transcript.json"]) {
+                Ok(_) => panic!("transcript should require one-shot mode"),
+                Err(error) => error,
+            };
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]

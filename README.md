@@ -145,6 +145,10 @@ claux -p "explain this error"
 # Machine-readable one-shot result with usage and cost
 claux -p "explain this error" --output-format json
 
+# Also retain the conversation and every tool input/result for evaluation
+claux -p "repair the service" --output-format json \
+  --transcript ./artifacts/claux-transcript.json
+
 # Resume a session
 claux --resume 20260401-143022
 ```
@@ -169,6 +173,19 @@ other automation:
 
 `cost_usd` uses provider-reported cost when available, otherwise configured or
 built-in model pricing. It is `null` when neither source is available.
+
+`--transcript FILE` writes a separate, versioned JSON artifact containing the
+final conversation state, outcome, usage, and a complete ordered tool trace.
+The tool trace is retained independently of context compaction, so earlier
+tool calls are not lost when the model's active history is summarized. Failed
+turns write the partial transcript before returning the error. Failures before
+the engine starts, such as invalid configuration, cannot produce a transcript.
+Claux creates transcript files with private permissions on Unix.
+
+Transcripts contain raw tool inputs and the exact results returned to the
+model. They may therefore include source code, command output, or credentials
+the agent explicitly read. Capture is opt-in; store and share these artifacts
+accordingly.
 
 ## Commands
 

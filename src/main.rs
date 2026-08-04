@@ -148,7 +148,21 @@ async fn main() -> Result<()> {
 
         let response = engine
             .submit(prompt, tokio_util::sync::CancellationToken::new())
-            .await?;
+            .await;
+        if let Some(path) = args.transcript.as_deref() {
+            let error = response.as_ref().err().map(ToString::to_string);
+            let result = response.as_ref().ok().map(String::as_str);
+            let transcript = output::OneShotTranscript::new(
+                engine.model(),
+                &engine.cost,
+                engine.messages(),
+                engine.tool_trace(),
+                result,
+                error.as_deref(),
+            );
+            output::write_transcript(path, &transcript)?;
+        }
+        let response = response?;
         match args.output_format.unwrap_or_default() {
             cli::OutputFormat::Text => print!("{response}"),
             cli::OutputFormat::Json => {
