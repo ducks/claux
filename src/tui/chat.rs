@@ -52,6 +52,9 @@ pub struct ChatApp {
     pub messages: Vec<ChatMessage>,
     pub input: String,
     pub cursor: usize,
+    /// Slash-command completion. Holds only the selection and any Esc
+    /// dismissal; the candidate list is derived from `input` each frame.
+    pub completion: super::completion::CompletionState,
     pub scroll: u16,
     pub manual_scroll: bool,
     pub mode: Mode,
@@ -89,6 +92,7 @@ impl ChatApp {
             messages: Vec::new(),
             input: String::new(),
             cursor: 0,
+            completion: Default::default(),
             scroll: 0,
             manual_scroll: false,
             mode: Mode::Input,
@@ -171,6 +175,35 @@ impl ChatApp {
             self.status = format!("{} | /help for commands", self.model);
         }
 
+        // While the completion menu is showing it claims a few keys that
+        // otherwise scroll or submit. Everything else falls through to normal
+        // editing, so typing is never trapped in a "completion mode".
+        if let Some(active) = self.completion.active(&self.input, self.cursor) {
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Up) => {
+                    self.completion.move_selection(-1, active.matches.len());
+                    return;
+                }
+                (_, KeyCode::Down) => {
+                    self.completion.move_selection(1, active.matches.len());
+                    return;
+                }
+                (_, KeyCode::Tab) | (_, KeyCode::Enter) => {
+                    let (input, cursor) =
+                        super::completion::apply(&self.input, self.cursor, active.selected_spec());
+                    self.input = input;
+                    self.cursor = cursor;
+                    self.completion.reset();
+                    return;
+                }
+                (_, KeyCode::Esc) => {
+                    self.completion.dismiss(&active.token);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                 if self.ctrl_c.press() {
@@ -206,6 +239,7 @@ impl ChatApp {
             (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
                 self.input.clear();
                 self.cursor = 0;
+                self.completion.reset();
             }
             (_, KeyCode::Up) => {
                 self.scroll = self.scroll.saturating_add(3);
@@ -236,6 +270,7 @@ impl ChatApp {
         let input = self.input.clone();
         self.input.clear();
         self.cursor = 0;
+        self.completion.reset();
         Some(input)
     }
 }
@@ -816,6 +851,95 @@ mod tests {
 
     fn ctrl_c_key() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_str(app: &mut ChatApp, text: &str) {
+        for c in text.chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn tab_accepts_the_selected_completion() {
+        let mut app = test_app();
+        type_str(&mut app, "/comp");
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/compact");
+        assert_eq!(app.cursor, 8);
+    }
+
+    #[test]
+    fn enter_accepts_a_completion_instead_of_submitting() {
+        // With the menu open, Enter picks the highlighted command. The caller
+        // only sees a submit once the menu is gone.
+        let mut app = test_app();
+        type_str(&mut app, "/comp");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.input, "/compact");
+
+        // Menu is now closed (exact match), so the next Enter is a real submit.
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.input, "/compact", "second Enter leaves the line intact");
+    }
+
+    #[test]
+    fn arrows_move_the_selection_rather_than_scrolling() {
+        let mut app = test_app();
+        let before = app.scroll;
+        type_str(&mut app, "/c");
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.scroll, before, "the transcript must not scroll");
+
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/compact", "Down moved to the second entry");
+    }
+
+    #[test]
+    fn arrows_still_scroll_when_no_menu_is_open() {
+        let mut app = test_app();
+        type_str(&mut app, "hello");
+        app.handle_key(key(KeyCode::Up));
+        assert!(app.scroll > 0, "ordinary input keeps arrow scrolling");
+    }
+
+    #[test]
+    fn esc_dismisses_the_menu_and_typing_brings_it_back() {
+        let mut app = test_app();
+        type_str(&mut app, "/co");
+        app.handle_key(key(KeyCode::Esc));
+
+        // Dismissed: Tab is now an ordinary key, so the line is unchanged.
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/co");
+
+        type_str(&mut app, "m");
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/compact", "typing re-arms completion");
+    }
+
+    #[test]
+    fn submitting_clears_completion_state() {
+        let mut app = test_app();
+        type_str(&mut app, "/co");
+        app.handle_key(key(KeyCode::Down));
+        app.take_input();
+
+        // A stale selection must not carry into the next command.
+        type_str(&mut app, "/co");
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/cost", "selection reset to the first entry");
+    }
+
+    #[test]
+    fn a_slash_mid_sentence_is_just_text() {
+        let mut app = test_app();
+        type_str(&mut app, "what about /co");
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "what about /co", "no completion mid-line");
     }
 
     #[test]

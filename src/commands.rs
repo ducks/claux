@@ -5,6 +5,119 @@ use crate::query::Engine;
 use crate::session;
 use crate::theme::ThemeName;
 
+/// One slash command, described once.
+///
+/// The parser, the help text and the completer all read this table. They used
+/// to be independent: a `match` on string literals plus a hand-maintained help
+/// string, which had already drifted (`/quit` parsed but was undocumented).
+pub struct CommandSpec {
+    /// Canonical name, with the leading slash.
+    pub name: &'static str,
+    /// Accepted alternatives. Not offered by the completer - one obvious
+    /// spelling per command keeps the menu short.
+    pub aliases: &'static [&'static str],
+    pub summary: &'static str,
+    /// Placeholder for the argument, when the command takes one. Drives both
+    /// the help column and whether accepting a completion leaves a trailing
+    /// space ready for that argument.
+    pub arg: Option<&'static str>,
+}
+
+impl CommandSpec {
+    /// Display form: `/model [profile]`.
+    pub fn usage(&self) -> String {
+        match self.arg {
+            Some(arg) => format!("{} [{arg}]", self.name),
+            None => self.name.to_string(),
+        }
+    }
+
+    /// True if `token` is a prefix of this command's canonical name. Aliases
+    /// are matched by the parser but deliberately not completed.
+    fn completes(&self, token: &str) -> bool {
+        self.name.starts_with(token)
+    }
+
+    fn matches(&self, token: &str) -> bool {
+        self.name == token || self.aliases.contains(&token)
+    }
+}
+
+/// Every slash command, in the order the help and completion menu show them.
+pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "/help",
+        aliases: &[],
+        summary: "Show this help",
+        arg: None,
+    },
+    CommandSpec {
+        name: "/cost",
+        aliases: &[],
+        summary: "Show token usage and cost",
+        arg: None,
+    },
+    CommandSpec {
+        name: "/compact",
+        aliases: &[],
+        summary: "Summarize conversation to free context",
+        arg: None,
+    },
+    CommandSpec {
+        name: "/diff",
+        aliases: &[],
+        summary: "Show the last turn's file changes",
+        arg: None,
+    },
+    CommandSpec {
+        name: "/undo-turn",
+        aliases: &[],
+        summary: "Safely undo the last turn's file changes",
+        arg: None,
+    },
+    CommandSpec {
+        name: "/model",
+        aliases: &[],
+        summary: "Show configured models or switch profile",
+        arg: Some("profile"),
+    },
+    CommandSpec {
+        name: "/theme",
+        aliases: &[],
+        summary: "Show or switch theme (dark, light, ansi)",
+        arg: Some("name"),
+    },
+    CommandSpec {
+        name: "/resume",
+        aliases: &[],
+        summary: "List or resume past sessions",
+        arg: Some("id"),
+    },
+    CommandSpec {
+        name: "/clear",
+        aliases: &[],
+        summary: "Clear screen",
+        arg: None,
+    },
+    CommandSpec {
+        name: "/exit",
+        aliases: &["/quit"],
+        summary: "Exit claux",
+        arg: None,
+    },
+];
+
+/// Commands whose canonical name starts with `token`, in table order.
+///
+/// `token` is the raw first word including the leading slash. A bare `/`
+/// matches everything, which is what makes the menu a discovery surface.
+pub fn complete(token: &str) -> Vec<&'static CommandSpec> {
+    if !token.starts_with('/') {
+        return Vec::new();
+    }
+    COMMANDS.iter().filter(|c| c.completes(token)).collect()
+}
+
 pub enum CommandResult {
     /// Print text to the user
     Text(String),
@@ -35,9 +148,17 @@ pub fn parse_command(input: &str) -> Option<CommandResult> {
         None => (trimmed, ""),
     };
 
+    // Resolve aliases to the canonical name once, so the dispatch below only
+    // ever sees canonical spellings and cannot fall out of step with the table.
+    let cmd = COMMANDS
+        .iter()
+        .find(|spec| spec.matches(cmd))
+        .map(|spec| spec.name)
+        .unwrap_or(cmd);
+
     match cmd {
         "/help" => Some(CommandResult::Text(help_text())),
-        "/exit" | "/quit" => Some(CommandResult::Exit),
+        "/exit" => Some(CommandResult::Exit),
         "/clear" => Some(CommandResult::Text("\x1b[2J\x1b[H".to_string())),
         "/compact" => Some(CommandResult::Async(AsyncCommand::Compact)),
         "/diff" => Some(CommandResult::Async(AsyncCommand::Diff)),
@@ -213,22 +334,26 @@ async fn execute_theme(theme_name: Option<String>, engine: &mut Engine) -> Resul
 }
 
 fn help_text() -> String {
-    "Available commands:
-  /help           Show this help
-  /cost           Show token usage and cost
-  /compact        Summarize conversation to free context
-  /diff           Show the last turn's file changes
-  /undo-turn      Safely undo the last turn's file changes
-  /model [profile] Show configured models or switch profile
-  /theme [name]   Show or switch theme (dark, light, ansi)
-  /resume [id]    List or resume past sessions
-  /clear          Clear screen
-  /exit           Exit claux
+    // Rendered from COMMANDS so it cannot drift from what the parser accepts.
+    let width = COMMANDS
+        .iter()
+        .map(|c| c.usage().chars().count())
+        .max()
+        .unwrap_or(0);
 
-Keyboard:
-  Ctrl+C    Cancel current request
-  Ctrl+D    Exit"
-        .to_string()
+    let mut out = String::from("Available commands:\n");
+    for spec in COMMANDS {
+        out.push_str(&format!(
+            "  {:<width$}  {}\n",
+            spec.usage(),
+            spec.summary,
+            width = width
+        ));
+    }
+    out.push_str(
+        "\nKeyboard:\n  Tab       Accept completion\n  Ctrl+C    Cancel current request\n  Ctrl+D    Exit",
+    );
+    out
 }
 
 #[cfg(test)]

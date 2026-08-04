@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -333,6 +333,87 @@ fn history_lines(app: &ChatApp) -> Vec<Line<'static>> {
     lines
 }
 
+/// Draw the slash-command menu floating above the input box.
+///
+/// Rendered after the main layout so it overlays the transcript rather than
+/// displacing it - the input line must not jump around while the user types.
+/// Nothing is drawn when no completion is active, so this is a no-op on the
+/// overwhelming majority of frames.
+fn draw_completion_popup(f: &mut Frame, app: &mut ChatApp, input_area: ratatui::layout::Rect) {
+    let Some(active) = app.completion.active(&app.input, app.cursor) else {
+        return;
+    };
+
+    // Cap the visible rows so a long list cannot cover the conversation, and
+    // scroll the window to keep the selection inside it.
+    const MAX_ROWS: usize = 8;
+    let visible = active.matches.len().min(MAX_ROWS);
+    let first = active.selected.saturating_sub(visible.saturating_sub(1));
+
+    let width = active
+        .matches
+        .iter()
+        .map(|spec| spec.usage().chars().count() + spec.summary.chars().count() + 4)
+        .max()
+        .unwrap_or(20)
+        .clamp(20, input_area.width.saturating_sub(2) as usize) as u16;
+    let height = visible as u16 + 2; // borders
+
+    // Sit directly on top of the input box; clamp if the terminal is short.
+    let y = input_area.y.saturating_sub(height);
+    let area = ratatui::layout::Rect {
+        x: input_area.x,
+        y,
+        width: width.min(input_area.width),
+        height: height.min(input_area.y.max(1)),
+    };
+    if area.height < 3 || area.width < 10 {
+        return; // no room to draw anything legible
+    }
+
+    let name_width = active
+        .matches
+        .iter()
+        .map(|spec| spec.usage().chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let rows: Vec<Line> = active
+        .matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible)
+        .map(|(idx, spec)| {
+            let selected = idx == active.selected;
+            let marker = if selected { "› " } else { "  " };
+            Line::from(vec![
+                Span::styled(
+                    format!("{marker}{:<name_width$}", spec.usage()),
+                    Style::default().fg(if selected {
+                        app.theme.user
+                    } else {
+                        app.theme.fg
+                    }),
+                ),
+                Span::styled(
+                    format!("  {}", spec.summary),
+                    Style::default().fg(app.theme.dim),
+                ),
+            ])
+        })
+        .collect();
+
+    let popup = Paragraph::new(rows).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.dim)),
+    );
+
+    f.render_widget(Clear, area);
+    f.render_widget(popup, area);
+}
+
 /// Draw the input (or permission) box and the status bar.
 fn draw_input_and_status(f: &mut Frame, app: &mut ChatApp, chunks: &[ratatui::layout::Rect]) {
     // Input area
@@ -410,6 +491,8 @@ fn draw_input_and_status(f: &mut Frame, app: &mut ChatApp, chunks: &[ratatui::la
     }
 
     if app.mode == Mode::Input {
+        draw_completion_popup(f, app, chunks[2]);
+
         let cursor_width = super::input::display_width_before(&app.input, app.cursor);
         f.set_cursor_position((chunks[2].x + cursor_width as u16 + 1, chunks[2].y + 1));
     }
