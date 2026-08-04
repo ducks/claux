@@ -332,13 +332,18 @@ pub async fn run(
         if let Some(input) = pending_submit.take() {
             let trimmed = input.trim().to_string();
 
-            // Check for /home command
+            // /home is a screen transition, so it returns Action::Home rather
+            // than routing through parse_command like the rest. It is still
+            // declared in commands::COMMANDS (tui_only) so that /help lists it
+            // and the completion menu offers it; parse_command's own /home arm
+            // only ever runs in the REPL, where it explains the command is
+            // TUI-only.
             if trimmed == "/home" {
                 return Ok(Action::Home);
             }
 
             // Check slash commands
-            if let Some(result) = commands::parse_command(&trimmed) {
+            if let Some(result) = commands::parse_command(&trimmed, commands::Surface::Tui) {
                 match result {
                     CommandResult::Text(ref text) if text == "__cost__" => {
                         app.add_message("system", &commands::format_cost(engine));

@@ -66,7 +66,7 @@ impl CompletionState {
         // Typing past a dismissal re-arms the menu.
         self.dismissed = None;
 
-        let matches = commands::complete(&token);
+        let matches = commands::complete(&token, commands::Surface::Tui);
         if matches.is_empty() {
             return None;
         }
@@ -136,7 +136,11 @@ mod tests {
     fn a_bare_slash_offers_every_command() {
         let mut s = state();
         let c = s.active("/", 1).expect("menu");
-        assert_eq!(c.matches.len(), commands::COMMANDS.len());
+        assert_eq!(
+            c.matches.len(),
+            commands::COMMANDS.len(),
+            "TUI sees every command"
+        );
     }
 
     #[test]
