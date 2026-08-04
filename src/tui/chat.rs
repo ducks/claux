@@ -1230,6 +1230,61 @@ mod turn_tests {
             .collect()
     }
 
+    /// Draw the chat screen with `input` typed, and return the rendered text.
+    /// Exercises the real popup geometry rather than just the match list.
+    fn render_with_input(input: &str, width: u16, height: u16) -> String {
+        let mut app = ChatApp::new("test-model", Theme::dark());
+        app.mode = Mode::Input;
+        for c in input.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| ui::draw_chat(f, &mut app)).unwrap();
+        buffer_text(&terminal)
+    }
+
+    #[test]
+    fn the_menu_renders_every_match_not_just_the_first() {
+        // Regression: /h matched both /help and /home, but only /help was drawn.
+        let screen = render_with_input("/h", 100, 30);
+        assert!(screen.contains("/help"), "missing /help:\n{screen}");
+        assert!(screen.contains("/home"), "missing /home:\n{screen}");
+    }
+
+    #[test]
+    fn a_bare_slash_renders_the_whole_command_list() {
+        // Regression: a fixed 8-row cap meant typing `/` showed only the first
+        // eight of eleven commands, and the window did not scroll until the
+        // selection moved - so /home and the rest were invisible until the user
+        // typed enough to filter them in.
+        let screen = render_with_input("/", 100, 40);
+        for spec in commands::COMMANDS {
+            assert!(
+                screen.contains(spec.name),
+                "{} missing from the menu",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_terminal_still_draws_a_usable_menu() {
+        // The list cannot fit, so it scrolls rather than overflowing. The
+        // selected entry must still be on screen.
+        let screen = render_with_input("/", 100, 14);
+        assert!(
+            screen.contains("/help"),
+            "the selected entry must be visible:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn a_tiny_terminal_draws_no_menu_rather_than_garbage() {
+        // Not enough room above the input for borders plus a row.
+        let screen = render_with_input("/", 100, 6);
+        assert!(!screen.contains("Show this help"), "menu should be skipped");
+    }
+
     /// Run one full turn through drive_streaming with scripted keys.
     async fn run_turn(
         engine: &mut Engine,

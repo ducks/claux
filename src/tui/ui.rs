@@ -344,11 +344,22 @@ fn draw_completion_popup(f: &mut Frame, app: &mut ChatApp, input_area: ratatui::
         return;
     };
 
-    // Cap the visible rows so a long list cannot cover the conversation, and
-    // scroll the window to keep the selection inside it.
-    const MAX_ROWS: usize = 8;
-    let visible = active.matches.len().min(MAX_ROWS);
-    let first = active.selected.saturating_sub(visible.saturating_sub(1));
+    // Show the whole list when it fits. A fixed cap hid commands outright: with
+    // eleven commands and a cap of eight, typing `/` never revealed the last
+    // three, and the window only scrolled once the selection moved past the
+    // edge - so they were invisible until the user typed enough to filter them
+    // in. Bound by the space above the input instead, keeping a couple of rows
+    // of conversation visible, and only scroll when the list genuinely cannot
+    // fit.
+    let room = (input_area.y as usize).saturating_sub(2); // leave some transcript
+    let max_rows = room.saturating_sub(2).max(1); // borders
+    let visible = active.matches.len().min(max_rows);
+    // Keep the selection inside the window when the list is taller than the
+    // space available.
+    let first = active
+        .selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(active.matches.len().saturating_sub(visible));
 
     let width = active
         .matches
@@ -357,15 +368,14 @@ fn draw_completion_popup(f: &mut Frame, app: &mut ChatApp, input_area: ratatui::
         .max()
         .unwrap_or(20)
         .clamp(20, input_area.width.saturating_sub(2) as usize) as u16;
-    let height = visible as u16 + 2; // borders
+    let height = (visible as u16 + 2).min(input_area.y.max(1)); // borders
 
-    // Sit directly on top of the input box; clamp if the terminal is short.
-    let y = input_area.y.saturating_sub(height);
+    // Sit directly on top of the input box.
     let area = ratatui::layout::Rect {
         x: input_area.x,
-        y,
+        y: input_area.y.saturating_sub(height),
         width: width.min(input_area.width),
-        height: height.min(input_area.y.max(1)),
+        height,
     };
     if area.height < 3 || area.width < 10 {
         return; // no room to draw anything legible
