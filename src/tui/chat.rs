@@ -160,6 +160,15 @@ impl ChatApp {
         self.messages_rev += 1;
     }
 
+    /// Whether the completion menu is currently showing.
+    ///
+    /// The event loop needs this because it routes Enter to submission before
+    /// `handle_key` ever sees it; without asking, a bare `/` would be sent to
+    /// the model instead of accepting the highlighted command.
+    pub fn completion_is_open(&mut self) -> bool {
+        self.completion.active(&self.input, self.cursor).is_some()
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         match self.mode {
             Mode::Input => self.handle_input_key(key),
@@ -440,7 +449,13 @@ pub async fn run(
         if event::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
-                    if key.code == KeyCode::Enter && app.mode == Mode::Input {
+                    // Enter submits, unless the completion menu has claimed it to
+                    // accept the highlighted command. Ask the app rather than
+                    // deciding here: the caller cannot see the menu state.
+                    if key.code == KeyCode::Enter
+                        && app.mode == Mode::Input
+                        && !app.completion_is_open()
+                    {
                         if let Some(input) = app.take_input() {
                             pending_submit = Some(input);
                         }
@@ -870,6 +885,50 @@ mod tests {
         app.handle_key(key(KeyCode::Tab));
         assert_eq!(app.input, "/compact");
         assert_eq!(app.cursor, 8);
+    }
+
+    /// Mirror the event loop's Enter routing: it decides between submitting
+    /// and delegating *before* handle_key runs, so a test that only calls
+    /// handle_key does not exercise the real path. An earlier version of these
+    /// tests missed exactly that, and a bare `/` was submitted to the model.
+    fn press_enter_via_event_loop(app: &mut ChatApp) -> Option<String> {
+        if app.mode == Mode::Input && !app.completion_is_open() {
+            app.take_input()
+        } else {
+            app.handle_key(key(KeyCode::Enter));
+            None
+        }
+    }
+
+    #[test]
+    fn a_bare_slash_is_never_submitted() {
+        // Regression: typing / and pressing Enter sent "/" to the model, which
+        // came back as "Unknown command: /".
+        let mut app = test_app();
+        type_str(&mut app, "/");
+        let submitted = press_enter_via_event_loop(&mut app);
+        assert!(
+            submitted.is_none(),
+            "must not submit while the menu is open"
+        );
+        assert_eq!(app.input, "/help", "Enter accepts the first entry");
+    }
+
+    #[test]
+    fn enter_submits_once_the_menu_has_closed() {
+        let mut app = test_app();
+        type_str(&mut app, "/");
+        press_enter_via_event_loop(&mut app); // accepts /help, closing the menu
+        let submitted = press_enter_via_event_loop(&mut app);
+        assert_eq!(submitted.as_deref(), Some("/help"));
+    }
+
+    #[test]
+    fn enter_submits_ordinary_text_untouched() {
+        let mut app = test_app();
+        type_str(&mut app, "hello there");
+        let submitted = press_enter_via_event_loop(&mut app);
+        assert_eq!(submitted.as_deref(), Some("hello there"));
     }
 
     #[test]
