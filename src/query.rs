@@ -41,6 +41,23 @@ pub struct Engine {
     last_checkpoint: Option<TurnCheckpoint>,
     tool_trace: Vec<ToolTraceEntry>,
     pub cost: CostTracker,
+    /// Provider-reported size of the last request; anchors the context estimate.
+    last_request_usage: Option<RequestUsageBaseline>,
+}
+
+/// What the provider charged for the most recent request, and how much of the
+/// message list that request covered.
+///
+/// Used to anchor the context-window estimate to a real provider count rather
+/// than re-deriving the system prompt and tool-schema overhead locally.
+struct RequestUsageBaseline {
+    /// input + cache_read + cache_creation for that request: system prompt,
+    /// tool definitions, and the conversation prefix, as the provider counted
+    /// them.
+    prompt_tokens: usize,
+    /// Length of `messages` at the time the request was sent. Messages beyond
+    /// this index are newer than the baseline and still need estimating.
+    message_count: usize,
 }
 
 /// An immutable audit record of a tool call and the result sent back to the
@@ -123,6 +140,7 @@ impl Engine {
             last_checkpoint: None,
             tool_trace: Vec::new(),
             cost: CostTracker::new(model),
+            last_request_usage: None,
         }
     }
 
@@ -152,6 +170,7 @@ impl Engine {
             last_checkpoint: None,
             tool_trace: Vec::new(),
             cost: CostTracker::new("test"),
+            last_request_usage: None,
         }
     }
 
@@ -326,6 +345,7 @@ impl Engine {
         self.tool_trace.clear();
         self.pending_checkpoint = None;
         self.last_checkpoint = None;
+        self.last_request_usage = None;
     }
 
     pub fn model(&self) -> &str {
@@ -350,6 +370,56 @@ impl Engine {
         self.messages.len()
     }
 
+    /// Estimated tokens the next request will occupy in the context window.
+    ///
+    /// `compact::estimate_tokens` only walks the message list, which
+    /// systematically undercounts: the real request also carries the system
+    /// prompt (environment, git status, project files) and every tool's JSON
+    /// schema, including MCP-server tools. With several MCP servers connected
+    /// the tool definitions alone run to thousands of tokens, so the threshold
+    /// drifts further from reality the more tools are configured.
+    ///
+    /// Rather than trying to re-derive that overhead, anchor on what the
+    /// provider actually charged for the last request. `input_tokens` +
+    /// `cache_read_tokens` + `cache_creation_tokens` is everything it saw:
+    /// system prompt, tools, and the whole conversation prefix. Only the
+    /// messages appended since then need estimating.
+    ///
+    /// Falls back to a plain estimate when there is no usable baseline —
+    /// notably right after compaction, where a pre-compaction baseline would
+    /// describe a conversation that no longer exists.
+    fn estimated_context_tokens(&self) -> usize {
+        let Some(baseline) = &self.last_request_usage else {
+            return compact::estimate_tokens(&self.messages);
+        };
+
+        // The baseline covers the request as sent, so it is only valid if the
+        // messages it was measured against are still a prefix of history.
+        if baseline.message_count > self.messages.len() {
+            return compact::estimate_tokens(&self.messages);
+        }
+
+        baseline.prompt_tokens + compact::estimate_tokens(&self.messages[baseline.message_count..])
+    }
+
+    /// Record what the provider charged for the request just completed, so the
+    /// next budget check can anchor to it instead of re-estimating overhead.
+    fn record_request_usage(&mut self, usage: &crate::api::types::Usage, message_count: usize) {
+        // Everything the provider read: fresh input, cache reads, and cache
+        // writes. Output tokens are excluded - they become part of the message
+        // list, which is estimated separately.
+        let prompt_tokens = usage.input_tokens as usize
+            + usage.cache_read_tokens as usize
+            + usage.cache_creation_tokens as usize;
+        if prompt_tokens == 0 {
+            return; // provider reported nothing usable; keep the old baseline
+        }
+        self.last_request_usage = Some(RequestUsageBaseline {
+            prompt_tokens,
+            message_count,
+        });
+    }
+
     /// Check if auto-compact is needed and perform it if so.
     /// Returns true if compaction was performed.
     pub async fn maybe_auto_compact(&mut self) -> Result<bool> {
@@ -358,7 +428,7 @@ impl Engine {
             return Ok(false);
         }
 
-        let current_tokens = compact::estimate_tokens(&self.messages);
+        let current_tokens = self.estimated_context_tokens();
         let threshold_tokens = (self.context_window as f64 * self.auto_compact_threshold) as usize;
 
         if current_tokens > threshold_tokens {
@@ -481,6 +551,10 @@ impl Engine {
     fn commit_compacted_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
         self.provider.reset_session();
+        // The baseline describes a conversation that no longer exists. Keeping
+        // it would have the next check add the post-compaction messages to the
+        // pre-compaction total and immediately re-trigger compaction.
+        self.last_request_usage = None;
     }
 
     /// Recover the failure classification from a `stream()` error.
@@ -615,6 +689,10 @@ impl Engine {
                     cancel.clone(),
                 )
                 .await;
+            // How much of the conversation this request covered. Captured
+            // before the stream appends anything, so the usage the provider
+            // reports can be paired with the history it actually measured.
+            let sent_message_count = self.messages.len();
 
             let mut rx = match stream_result {
                 Ok(rx) => rx,
@@ -711,6 +789,7 @@ impl Engine {
                         tool_uses.push((id, name, input));
                     }
                     ApiEvent::Usage(usage) => {
+                        self.record_request_usage(&usage, sent_message_count);
                         self.cost.add_usage(&usage);
                     }
                     ApiEvent::Done => break,
@@ -1602,6 +1681,116 @@ mod tests {
         assert_eq!(engine.cost.total_cost_usd(), 2.0);
     }
 
+    fn usage(input: u32, cache_read: u32) -> crate::api::types::Usage {
+        crate::api::types::Usage {
+            input_tokens: input,
+            output_tokens: 0,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: 0,
+            provider_cost_usd: None,
+        }
+    }
+
+    #[test]
+    fn context_estimate_falls_back_to_message_scan_without_a_baseline() {
+        let mut engine = Engine::for_tests(
+            Box::new(MockProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        engine.messages_mut().push(Message::user("hello there"));
+
+        assert_eq!(
+            engine.estimated_context_tokens(),
+            compact::estimate_tokens(engine.messages())
+        );
+    }
+
+    #[test]
+    fn context_estimate_anchors_to_provider_reported_usage() {
+        // The provider's count includes the system prompt and every tool
+        // schema, which a message-only scan cannot see. Anchoring to it and
+        // estimating only the delta is the whole point.
+        let mut engine = Engine::for_tests(
+            Box::new(MockProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        engine.messages_mut().push(Message::user("first"));
+        engine.record_request_usage(&usage(9_000, 3_000), 1);
+
+        // Nothing appended since: the estimate is exactly the baseline.
+        assert_eq!(engine.estimated_context_tokens(), 12_000);
+
+        // A new message adds only its own estimated size on top.
+        engine.messages_mut().push(Message::user("second message"));
+        let delta = compact::estimate_tokens(&engine.messages()[1..]);
+        assert!(delta > 0);
+        assert_eq!(engine.estimated_context_tokens(), 12_000 + delta);
+    }
+
+    #[test]
+    fn compaction_clears_the_baseline_so_it_cannot_re_trigger() {
+        // Regression guard: a baseline that outlived the history it measured
+        // would have the next check add post-compaction messages to the
+        // pre-compaction total, compacting again immediately.
+        let mut engine = Engine::for_tests(
+            Box::new(MockProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        engine
+            .messages_mut()
+            .push(Message::user("a long conversation"));
+        engine.record_request_usage(&usage(150_000, 0), 1);
+        assert_eq!(engine.estimated_context_tokens(), 150_000);
+
+        engine.commit_compacted_messages(vec![Message::user("summary")]);
+
+        assert!(
+            engine.estimated_context_tokens() < 1_000,
+            "post-compaction estimate must not inherit the old total"
+        );
+    }
+
+    #[test]
+    fn a_baseline_covering_more_messages_than_history_is_discarded() {
+        // History can shrink without going through commit_compacted_messages
+        // (a loaded session, a rewritten transcript). Slicing with a stale
+        // count would panic, so the baseline is dropped instead.
+        let mut engine = Engine::for_tests(
+            Box::new(MockProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        engine.messages_mut().push(Message::user("one"));
+        engine.messages_mut().push(Message::user("two"));
+        engine.record_request_usage(&usage(5_000, 0), 2);
+
+        engine.messages_mut().pop();
+
+        assert_eq!(
+            engine.estimated_context_tokens(),
+            compact::estimate_tokens(engine.messages())
+        );
+    }
+
+    #[test]
+    fn zero_usage_does_not_replace_a_good_baseline() {
+        // Some providers emit a Usage event with nothing populated. Treating
+        // that as a baseline would report a near-empty context.
+        let mut engine = Engine::for_tests(
+            Box::new(MockProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        engine.messages_mut().push(Message::user("first"));
+        engine.record_request_usage(&usage(20_000, 0), 1);
+        engine.record_request_usage(&usage(0, 0), 1);
+
+        assert_eq!(engine.estimated_context_tokens(), 20_000);
+    }
+
     #[test]
     fn resolved_model_metadata_configures_compaction_and_cost() {
         let mut engine = Engine::for_tests(
@@ -1655,6 +1844,7 @@ mod tests {
             last_checkpoint: None,
             tool_trace: Vec::new(),
             cost: CostTracker::new("test"),
+            last_request_usage: None,
         };
 
         // Create multiple read-only tool uses (Read and Glob)
@@ -1733,6 +1923,7 @@ mod tests {
             last_checkpoint: None,
             tool_trace: Vec::new(),
             cost: CostTracker::new("test"),
+            last_request_usage: None,
         };
 
         // Mix read-only and write tools
@@ -2273,6 +2464,7 @@ mod tests {
             last_checkpoint: None,
             tool_trace: Vec::new(),
             cost: CostTracker::new("test"),
+            last_request_usage: None,
         };
 
         let tool_uses = vec![(
@@ -2343,6 +2535,7 @@ mod tests {
             last_checkpoint: None,
             tool_trace: Vec::new(),
             cost: CostTracker::new("test"),
+            last_request_usage: None,
         };
 
         // Under PermissionMode::Default, network reads ask for confirmation.
