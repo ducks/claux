@@ -663,6 +663,13 @@ impl Engine {
             let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
             let mut had_error = false;
             let mut stream_interrupted = false;
+            // Whether this attempt has produced anything the caller can already
+            // see or act on. Once it has, the attempt cannot be retried: the
+            // UI has rendered text it would have to un-render, or a tool has
+            // been announced and reissuing the batch would run it twice.
+            //
+            // Retry recovery is only safe before this flips.
+            let mut committed = false;
 
             loop {
                 let event = tokio::select! {
@@ -693,6 +700,14 @@ impl Engine {
                                 summary,
                             })
                             .await;
+                        // Announcing a tool commits the attempt. The hook has
+                        // fired, UIs flush any buffered text to render the tool
+                        // line, and a retry would reissue a batch the model
+                        // already partially surfaced. Providers that emit tool
+                        // calls one at a time (Anthropic, per content_block_stop)
+                        // reach this before a later call in the same batch is
+                        // found to be malformed.
+                        committed = true;
                         tool_uses.push((id, name, input));
                     }
                     ApiEvent::Usage(usage) => {
@@ -700,44 +715,49 @@ impl Engine {
                     }
                     ApiEvent::Done => break,
                     ApiEvent::Error(failure) => {
-                        match failure.kind {
-                            // `tool_uses.is_empty()` keeps the retry safe: a
-                            // provider that emits tool calls one at a time may
-                            // already have surfaced some of the batch, and
-                            // reissuing would double-execute them.
-                            ApiFailureKind::MalformedToolArguments
-                                if tool_uses.is_empty()
-                                    && malformed_tool_retries < MAX_MALFORMED_TOOL_RETRIES =>
-                            {
-                                malformed_tool_retries += 1;
-                                retry_prompt =
-                                    Some(Self::malformed_tool_retry_prompt(&failure.message));
-                                let _ = tx
-                                    .send(StreamEvent::Retry(
-                                        "model returned malformed tool arguments; retrying once"
-                                            .to_string(),
-                                    ))
-                                    .await;
-                                had_error = true;
-                                break;
+                        // Every arm below recovers by reissuing the request.
+                        // None of them are safe once the attempt has committed
+                        // - the model has already surfaced part of a tool batch
+                        // and reissuing would run those tools twice. Gate the
+                        // whole recovery block rather than each arm, so a new
+                        // recovery kind cannot be added without the guard.
+                        if !committed {
+                            match failure.kind {
+                                ApiFailureKind::MalformedToolArguments
+                                    if malformed_tool_retries < MAX_MALFORMED_TOOL_RETRIES =>
+                                {
+                                    malformed_tool_retries += 1;
+                                    retry_prompt =
+                                        Some(Self::malformed_tool_retry_prompt(&failure.message));
+                                    let _ = tx
+                                        .send(StreamEvent::Retry(
+                                            "model returned malformed tool arguments; retrying once"
+                                                .to_string(),
+                                        ))
+                                        .await;
+                                    had_error = true;
+                                    break;
+                                }
+                                ApiFailureKind::OutputLimitExceeded if self.max_tokens < 64_000 => {
+                                    self.max_tokens = (self.max_tokens * 2).min(64_000);
+                                    had_error = true;
+                                    break;
+                                }
+                                ApiFailureKind::ContextExceeded
+                                    if recovery_attempts < MAX_RECOVERY =>
+                                {
+                                    recovery_attempts += 1;
+                                    let _ = tx
+                                        .send(StreamEvent::Notice(
+                                            "compacting conversation...".to_string(),
+                                        ))
+                                        .await;
+                                    self.compact().await?;
+                                    had_error = true;
+                                    break;
+                                }
+                                _ => {}
                             }
-                            ApiFailureKind::OutputLimitExceeded if self.max_tokens < 64_000 => {
-                                self.max_tokens = (self.max_tokens * 2).min(64_000);
-                                had_error = true;
-                                break;
-                            }
-                            ApiFailureKind::ContextExceeded if recovery_attempts < MAX_RECOVERY => {
-                                recovery_attempts += 1;
-                                let _ = tx
-                                    .send(StreamEvent::Notice(
-                                        "compacting conversation...".to_string(),
-                                    ))
-                                    .await;
-                                self.compact().await?;
-                                had_error = true;
-                                break;
-                            }
-                            _ => {}
                         }
                         let _ = tx.send(StreamEvent::Error(failure.message.clone())).await;
                         // Keep the detail in the rendered message: `context`
@@ -1234,6 +1254,96 @@ mod tests {
             drop(tx);
             Ok(ProviderStream::new(rx, cancel.child_token()))
         }
+    }
+
+    /// Provider that announces a tool and only then fails. Models a batch
+    /// whose later tool call is malformed: by the time the error lands, the
+    /// earlier call has already been surfaced to the UI and its hook fired.
+    struct ToolThenFailProvider {
+        failure: ApiFailure,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ToolThenFailProvider {
+        fn name(&self) -> &str {
+            "tool-then-fail"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = mpsc::channel(4);
+            tx.send(ApiEvent::ToolUse {
+                id: "tu_1".to_string(),
+                name: "Read".to_string(),
+                input: serde_json::json!({"file_path": "/dev/null"}),
+            })
+            .await
+            .unwrap();
+            tx.send(ApiEvent::Error(self.failure.clone()))
+                .await
+                .unwrap();
+            drop(tx);
+            Ok(ProviderStream::new(rx, cancel.child_token()))
+        }
+    }
+
+    /// Attempts made when the provider announces a tool before failing.
+    async fn committed_attempts_for(failure: ApiFailure) -> usize {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Box::new(ToolThenFailProvider {
+            failure,
+            calls: calls.clone(),
+        });
+        let mut engine =
+            Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Bypass);
+        let _ = engine
+            .submit("go", tokio_util::sync::CancellationToken::new())
+            .await;
+        calls.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn a_committed_attempt_is_not_retried_for_malformed_tool_arguments() {
+        // The pre-existing guard: a partially-surfaced batch must not be
+        // reissued, or the already-announced tool runs twice.
+        let attempts =
+            committed_attempts_for(ApiFailure::malformed_tool_arguments("bad args")).await;
+        assert_eq!(attempts, 1, "committed attempt must not retry");
+    }
+
+    #[tokio::test]
+    async fn a_committed_attempt_is_not_retried_for_an_output_limit() {
+        // This path previously had NO commit guard: it doubled max_tokens and
+        // reissued regardless of whether tools had already been announced.
+        let attempts =
+            committed_attempts_for(ApiFailure::output_limit_exceeded("output limit")).await;
+        assert_eq!(
+            attempts, 1,
+            "escalating max_tokens must not reissue a committed batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_committed_attempt_is_not_retried_for_a_context_overflow() {
+        // Likewise: compaction recovery reissued the request without checking
+        // whether the attempt had surfaced tools.
+        let attempts =
+            committed_attempts_for(ApiFailure::new(ApiFailureKind::ContextExceeded, "too long"))
+                .await;
+        assert_eq!(
+            attempts, 1,
+            "compaction recovery must not reissue a committed batch"
+        );
     }
 
     /// Run one turn against a provider that always fails with `failure`,

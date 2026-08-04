@@ -487,9 +487,12 @@ async fn drive_streaming<B: ratatui::backend::Backend>(
                         }
                         StreamEvent::Retry(n) => {
                             // The rejected provider attempt is not part of
-                            // conversation history. Its text was never
-                            // flushed because malformed tool batches emit no
-                            // ToolStart events.
+                            // conversation history, and its text has not been
+                            // flushed: the engine only emits Retry for an
+                            // attempt that never committed, and announcing a
+                            // tool (the thing that flushes this buffer) is
+                            // exactly what counts as committing. So clearing
+                            // here cannot discard rendered output.
                             app.stream_buffer.clear();
                             app.thinking = true;
                             app.add_message("system", &n);
