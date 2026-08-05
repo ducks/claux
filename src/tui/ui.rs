@@ -50,7 +50,18 @@ pub fn draw_chat(f: &mut Frame, app: &mut ChatApp) {
         // leaving the user with a question and no visible answers.
         (detail_lines as u16 + 6).min(f.area().height / 2)
     } else {
-        3
+        let text = editor_text(app);
+        let inner_width = f.area().width.saturating_sub(2).max(1) as usize;
+        let cursor = if app.mode == Mode::Input {
+            app.cursor
+        } else {
+            super::input::char_count(&text)
+        };
+        let rows = super::input::visual_layout(&text, cursor, inner_width)
+            .lines
+            .len() as u16;
+        let max_height = (f.area().height / 2).max(3);
+        rows.saturating_add(2).min(max_height)
     };
 
     let chunks = Layout::default()
@@ -474,18 +485,27 @@ fn draw_input_and_status(f: &mut Frame, app: &mut ChatApp, chunks: &[ratatui::la
         );
         f.render_widget(perm_widget, chunks[2]);
     } else {
-        let input_text = if app.mode == Mode::Streaming {
-            let steer = app.steer_buf.lock().expect("steer buffer poisoned");
-            if steer.is_empty() {
-                "... (type to steer, Enter to queue, Ctrl+C to interrupt)".to_string()
-            } else {
-                steer.clone()
-            }
+        let input_text = editor_text(app);
+        let inner_width = chunks[2].width.saturating_sub(2).max(1) as usize;
+        let cursor = if app.mode == Mode::Input {
+            app.cursor
         } else {
-            app.input.clone()
+            super::input::char_count(&input_text)
         };
+        let layout = super::input::visual_layout(&input_text, cursor, inner_width);
+        let visible_rows = chunks[2].height.saturating_sub(2).max(1) as usize;
+        let vertical_scroll = if app.mode == Mode::Input {
+            layout.cursor_row.saturating_sub(visible_rows - 1)
+        } else {
+            layout.lines.len().saturating_sub(visible_rows)
+        };
+        let input_lines: Vec<Line> = layout
+            .lines
+            .iter()
+            .map(|line| Line::from(line.as_str()))
+            .collect();
 
-        let input_widget = Paragraph::new(input_text)
+        let input_widget = Paragraph::new(input_lines)
             .style(Style::default().fg(app.theme.fg))
             .block(
                 Block::default()
@@ -496,15 +516,19 @@ fn draw_input_and_status(f: &mut Frame, app: &mut ChatApp, chunks: &[ratatui::la
                         app.theme.dim
                     }))
                     .title(" > "),
-            );
+            )
+            .scroll((vertical_scroll as u16, 0));
         f.render_widget(input_widget, chunks[2]);
-    }
 
-    if app.mode == Mode::Input {
-        draw_completion_popup(f, app, chunks[2]);
+        if app.mode == Mode::Input {
+            draw_completion_popup(f, app, chunks[2]);
 
-        let cursor_width = super::input::display_width_before(&app.input, app.cursor);
-        f.set_cursor_position((chunks[2].x + cursor_width as u16 + 1, chunks[2].y + 1));
+            let cursor_y = layout.cursor_row.saturating_sub(vertical_scroll);
+            f.set_cursor_position((
+                chunks[2].x + layout.cursor_col as u16 + 1,
+                chunks[2].y + cursor_y as u16 + 1,
+            ));
+        }
     }
 
     // Status bar
@@ -524,6 +548,19 @@ fn draw_input_and_status(f: &mut Frame, app: &mut ChatApp, chunks: &[ratatui::la
         ),
     ]));
     f.render_widget(status, chunks[3]);
+}
+
+fn editor_text(app: &ChatApp) -> String {
+    if app.mode == Mode::Streaming {
+        let steer = app.steer_buf.lock().expect("steer buffer poisoned");
+        if steer.is_empty() {
+            "... (type to steer, Enter to queue, Ctrl+C to interrupt)".to_string()
+        } else {
+            steer.clone()
+        }
+    } else {
+        app.input.clone()
+    }
 }
 
 #[cfg(test)]

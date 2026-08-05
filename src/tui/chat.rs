@@ -1285,6 +1285,50 @@ mod turn_tests {
         assert!(!screen.contains("Show this help"), "menu should be skipped");
     }
 
+    #[test]
+    fn a_long_input_wraps_onto_visible_editor_rows() {
+        // 40-wide terminal -> 38 columns inside the input borders.
+        let text = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ";
+        let mut app = type_input(text);
+        let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        terminal.draw(|f| ui::draw_chat(f, &mut app)).unwrap();
+        let rows: Vec<String> = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(40)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect();
+
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("abcdefghijklmnopqrstuvwxyz0123456789AB")));
+        assert!(rows.iter().any(|row| row.contains("CDEFGHIJ")));
+    }
+
+    #[test]
+    fn wrapped_input_keeps_the_cursor_visible_after_home() {
+        let mut app = type_input(&"abcdefghij".repeat(20));
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        terminal.draw(|f| ui::draw_chat(f, &mut app)).unwrap();
+        let screen = buffer_text(&terminal);
+        assert!(
+            screen.contains("abcdefghij"),
+            "head of the line must be visible after Home:\n{screen}"
+        );
+    }
+
+    /// Build an app with `input` already typed, cursor at the end.
+    fn type_input(input: &str) -> ChatApp {
+        let mut app = ChatApp::new("test-model", Theme::dark());
+        app.mode = Mode::Input;
+        for c in input.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app
+    }
+
     /// Run one full turn through drive_streaming with scripted keys.
     async fn run_turn(
         engine: &mut Engine,
