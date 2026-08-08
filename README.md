@@ -182,6 +182,11 @@ turns write the partial transcript before returning the error. Failures before
 the engine starts, such as invalid configuration, cannot produce a transcript.
 Claux creates transcript files with private permissions on Unix.
 
+In one-shot mode, `SIGINT` and `SIGTERM` cancel the active provider request or
+tool, pair interrupted tool calls with results, and write the partial
+transcript before the process exits. This lets supervisors enforce a deadline
+without discarding the investigation that occurred before it.
+
 Transcripts contain raw tool inputs and the exact results returned to the
 model. They may therefore include source code, command output, or credentials
 the agent explicitly read. Capture is opt-in; store and share these artifacts
