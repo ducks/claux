@@ -52,6 +52,9 @@ pub struct ChatApp {
     pub messages: Vec<ChatMessage>,
     pub input: String,
     pub cursor: usize,
+    /// Slash-command completion. Holds only the selection and any Esc
+    /// dismissal; the candidate list is derived from `input` each frame.
+    pub completion: super::completion::CompletionState,
     pub scroll: u16,
     pub manual_scroll: bool,
     pub mode: Mode,
@@ -89,6 +92,7 @@ impl ChatApp {
             messages: Vec::new(),
             input: String::new(),
             cursor: 0,
+            completion: Default::default(),
             scroll: 0,
             manual_scroll: false,
             mode: Mode::Input,
@@ -156,6 +160,15 @@ impl ChatApp {
         self.messages_rev += 1;
     }
 
+    /// Whether the completion menu is currently showing.
+    ///
+    /// The event loop needs this because it routes Enter to submission before
+    /// `handle_key` ever sees it; without asking, a bare `/` would be sent to
+    /// the model instead of accepting the highlighted command.
+    pub fn completion_is_open(&mut self) -> bool {
+        self.completion.active(&self.input, self.cursor).is_some()
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         match self.mode {
             Mode::Input => self.handle_input_key(key),
@@ -169,6 +182,35 @@ impl ChatApp {
         if !is_ctrl_c && self.ctrl_c.is_armed() {
             self.ctrl_c.disarm();
             self.status = format!("{} | /help for commands", self.model);
+        }
+
+        // While the completion menu is showing it claims a few keys that
+        // otherwise scroll or submit. Everything else falls through to normal
+        // editing, so typing is never trapped in a "completion mode".
+        if let Some(active) = self.completion.active(&self.input, self.cursor) {
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Up) => {
+                    self.completion.move_selection(-1, active.matches.len());
+                    return;
+                }
+                (_, KeyCode::Down) => {
+                    self.completion.move_selection(1, active.matches.len());
+                    return;
+                }
+                (_, KeyCode::Tab) | (_, KeyCode::Enter) => {
+                    let (input, cursor) =
+                        super::completion::apply(&self.input, self.cursor, active.selected_spec());
+                    self.input = input;
+                    self.cursor = cursor;
+                    self.completion.reset();
+                    return;
+                }
+                (_, KeyCode::Esc) => {
+                    self.completion.dismiss(&active.token);
+                    return;
+                }
+                _ => {}
+            }
         }
 
         match (key.modifiers, key.code) {
@@ -206,6 +248,7 @@ impl ChatApp {
             (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
                 self.input.clear();
                 self.cursor = 0;
+                self.completion.reset();
             }
             (_, KeyCode::Up) => {
                 self.scroll = self.scroll.saturating_add(3);
@@ -236,6 +279,7 @@ impl ChatApp {
         let input = self.input.clone();
         self.input.clear();
         self.cursor = 0;
+        self.completion.reset();
         Some(input)
     }
 }
@@ -288,13 +332,18 @@ pub async fn run(
         if let Some(input) = pending_submit.take() {
             let trimmed = input.trim().to_string();
 
-            // Check for /home command
+            // /home is a screen transition, so it returns Action::Home rather
+            // than routing through parse_command like the rest. It is still
+            // declared in commands::COMMANDS (tui_only) so that /help lists it
+            // and the completion menu offers it; parse_command's own /home arm
+            // only ever runs in the REPL, where it explains the command is
+            // TUI-only.
             if trimmed == "/home" {
                 return Ok(Action::Home);
             }
 
             // Check slash commands
-            if let Some(result) = commands::parse_command(&trimmed) {
+            if let Some(result) = commands::parse_command(&trimmed, commands::Surface::Tui) {
                 match result {
                     CommandResult::Text(ref text) if text == "__cost__" => {
                         app.add_message("system", &commands::format_cost(engine));
@@ -405,7 +454,13 @@ pub async fn run(
         if event::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
-                    if key.code == KeyCode::Enter && app.mode == Mode::Input {
+                    // Enter submits, unless the completion menu has claimed it to
+                    // accept the highlighted command. Ask the app rather than
+                    // deciding here: the caller cannot see the menu state.
+                    if key.code == KeyCode::Enter
+                        && app.mode == Mode::Input
+                        && !app.completion_is_open()
+                    {
                         if let Some(input) = app.take_input() {
                             pending_submit = Some(input);
                         }
@@ -487,9 +542,12 @@ async fn drive_streaming<B: ratatui::backend::Backend>(
                         }
                         StreamEvent::Retry(n) => {
                             // The rejected provider attempt is not part of
-                            // conversation history. Its text was never
-                            // flushed because malformed tool batches emit no
-                            // ToolStart events.
+                            // conversation history, and its text has not been
+                            // flushed: the engine only emits Retry for an
+                            // attempt that never committed, and announcing a
+                            // tool (the thing that flushes this buffer) is
+                            // exactly what counts as committing. So clearing
+                            // here cannot discard rendered output.
                             app.stream_buffer.clear();
                             app.thinking = true;
                             app.add_message("system", &n);
@@ -815,6 +873,139 @@ mod tests {
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
     }
 
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_str(app: &mut ChatApp, text: &str) {
+        for c in text.chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn tab_accepts_the_selected_completion() {
+        let mut app = test_app();
+        type_str(&mut app, "/comp");
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/compact");
+        assert_eq!(app.cursor, 8);
+    }
+
+    /// Mirror the event loop's Enter routing: it decides between submitting
+    /// and delegating *before* handle_key runs, so a test that only calls
+    /// handle_key does not exercise the real path. An earlier version of these
+    /// tests missed exactly that, and a bare `/` was submitted to the model.
+    fn press_enter_via_event_loop(app: &mut ChatApp) -> Option<String> {
+        if app.mode == Mode::Input && !app.completion_is_open() {
+            app.take_input()
+        } else {
+            app.handle_key(key(KeyCode::Enter));
+            None
+        }
+    }
+
+    #[test]
+    fn a_bare_slash_is_never_submitted() {
+        // Regression: typing / and pressing Enter sent "/" to the model, which
+        // came back as "Unknown command: /".
+        let mut app = test_app();
+        type_str(&mut app, "/");
+        let submitted = press_enter_via_event_loop(&mut app);
+        assert!(
+            submitted.is_none(),
+            "must not submit while the menu is open"
+        );
+        assert_eq!(app.input, "/help", "Enter accepts the first entry");
+    }
+
+    #[test]
+    fn enter_submits_once_the_menu_has_closed() {
+        let mut app = test_app();
+        type_str(&mut app, "/");
+        press_enter_via_event_loop(&mut app); // accepts /help, closing the menu
+        let submitted = press_enter_via_event_loop(&mut app);
+        assert_eq!(submitted.as_deref(), Some("/help"));
+    }
+
+    #[test]
+    fn enter_submits_ordinary_text_untouched() {
+        let mut app = test_app();
+        type_str(&mut app, "hello there");
+        let submitted = press_enter_via_event_loop(&mut app);
+        assert_eq!(submitted.as_deref(), Some("hello there"));
+    }
+
+    #[test]
+    fn enter_accepts_a_completion_instead_of_submitting() {
+        // With the menu open, Enter picks the highlighted command. The caller
+        // only sees a submit once the menu is gone.
+        let mut app = test_app();
+        type_str(&mut app, "/comp");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.input, "/compact");
+
+        // Menu is now closed (exact match), so the next Enter is a real submit.
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.input, "/compact", "second Enter leaves the line intact");
+    }
+
+    #[test]
+    fn arrows_move_the_selection_rather_than_scrolling() {
+        let mut app = test_app();
+        let before = app.scroll;
+        type_str(&mut app, "/c");
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.scroll, before, "the transcript must not scroll");
+
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/compact", "Down moved to the second entry");
+    }
+
+    #[test]
+    fn arrows_still_scroll_when_no_menu_is_open() {
+        let mut app = test_app();
+        type_str(&mut app, "hello");
+        app.handle_key(key(KeyCode::Up));
+        assert!(app.scroll > 0, "ordinary input keeps arrow scrolling");
+    }
+
+    #[test]
+    fn esc_dismisses_the_menu_and_typing_brings_it_back() {
+        let mut app = test_app();
+        type_str(&mut app, "/co");
+        app.handle_key(key(KeyCode::Esc));
+
+        // Dismissed: Tab is now an ordinary key, so the line is unchanged.
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/co");
+
+        type_str(&mut app, "m");
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/compact", "typing re-arms completion");
+    }
+
+    #[test]
+    fn submitting_clears_completion_state() {
+        let mut app = test_app();
+        type_str(&mut app, "/co");
+        app.handle_key(key(KeyCode::Down));
+        app.take_input();
+
+        // A stale selection must not carry into the next command.
+        type_str(&mut app, "/co");
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/cost", "selection reset to the first entry");
+    }
+
+    #[test]
+    fn a_slash_mid_sentence_is_just_text() {
+        let mut app = test_app();
+        type_str(&mut app, "what about /co");
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "what about /co", "no completion mid-line");
+    }
+
     #[test]
     fn single_ctrl_c_warns_double_exits() {
         let mut app = test_app();
@@ -1037,6 +1228,61 @@ mod turn_tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    /// Draw the chat screen with `input` typed, and return the rendered text.
+    /// Exercises the real popup geometry rather than just the match list.
+    fn render_with_input(input: &str, width: u16, height: u16) -> String {
+        let mut app = ChatApp::new("test-model", Theme::dark());
+        app.mode = Mode::Input;
+        for c in input.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| ui::draw_chat(f, &mut app)).unwrap();
+        buffer_text(&terminal)
+    }
+
+    #[test]
+    fn the_menu_renders_every_match_not_just_the_first() {
+        // Regression: /h matched both /help and /home, but only /help was drawn.
+        let screen = render_with_input("/h", 100, 30);
+        assert!(screen.contains("/help"), "missing /help:\n{screen}");
+        assert!(screen.contains("/home"), "missing /home:\n{screen}");
+    }
+
+    #[test]
+    fn a_bare_slash_renders_the_whole_command_list() {
+        // Regression: a fixed 8-row cap meant typing `/` showed only the first
+        // eight of eleven commands, and the window did not scroll until the
+        // selection moved - so /home and the rest were invisible until the user
+        // typed enough to filter them in.
+        let screen = render_with_input("/", 100, 40);
+        for spec in commands::COMMANDS {
+            assert!(
+                screen.contains(spec.name),
+                "{} missing from the menu",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_terminal_still_draws_a_usable_menu() {
+        // The list cannot fit, so it scrolls rather than overflowing. The
+        // selected entry must still be on screen.
+        let screen = render_with_input("/", 100, 14);
+        assert!(
+            screen.contains("/help"),
+            "the selected entry must be visible:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn a_tiny_terminal_draws_no_menu_rather_than_garbage() {
+        // Not enough room above the input for borders plus a row.
+        let screen = render_with_input("/", 100, 6);
+        assert!(!screen.contains("Show this help"), "menu should be skipped");
     }
 
     /// Run one full turn through drive_streaming with scripted keys.

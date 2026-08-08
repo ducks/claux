@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -333,6 +333,97 @@ fn history_lines(app: &ChatApp) -> Vec<Line<'static>> {
     lines
 }
 
+/// Draw the slash-command menu floating above the input box.
+///
+/// Rendered after the main layout so it overlays the transcript rather than
+/// displacing it - the input line must not jump around while the user types.
+/// Nothing is drawn when no completion is active, so this is a no-op on the
+/// overwhelming majority of frames.
+fn draw_completion_popup(f: &mut Frame, app: &mut ChatApp, input_area: ratatui::layout::Rect) {
+    let Some(active) = app.completion.active(&app.input, app.cursor) else {
+        return;
+    };
+
+    // Show the whole list when it fits. A fixed cap hid commands outright: with
+    // eleven commands and a cap of eight, typing `/` never revealed the last
+    // three, and the window only scrolled once the selection moved past the
+    // edge - so they were invisible until the user typed enough to filter them
+    // in. Bound by the space above the input instead, keeping a couple of rows
+    // of conversation visible, and only scroll when the list genuinely cannot
+    // fit.
+    let room = (input_area.y as usize).saturating_sub(2); // leave some transcript
+    let max_rows = room.saturating_sub(2).max(1); // borders
+    let visible = active.matches.len().min(max_rows);
+    // Keep the selection inside the window when the list is taller than the
+    // space available.
+    let first = active
+        .selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(active.matches.len().saturating_sub(visible));
+
+    let width = active
+        .matches
+        .iter()
+        .map(|spec| spec.usage().chars().count() + spec.summary.chars().count() + 4)
+        .max()
+        .unwrap_or(20)
+        .clamp(20, input_area.width.saturating_sub(2) as usize) as u16;
+    let height = (visible as u16 + 2).min(input_area.y.max(1)); // borders
+
+    // Sit directly on top of the input box.
+    let area = ratatui::layout::Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(height),
+        width: width.min(input_area.width),
+        height,
+    };
+    if area.height < 3 || area.width < 10 {
+        return; // no room to draw anything legible
+    }
+
+    let name_width = active
+        .matches
+        .iter()
+        .map(|spec| spec.usage().chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let rows: Vec<Line> = active
+        .matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible)
+        .map(|(idx, spec)| {
+            let selected = idx == active.selected;
+            let marker = if selected { "› " } else { "  " };
+            Line::from(vec![
+                Span::styled(
+                    format!("{marker}{:<name_width$}", spec.usage()),
+                    Style::default().fg(if selected {
+                        app.theme.user
+                    } else {
+                        app.theme.fg
+                    }),
+                ),
+                Span::styled(
+                    format!("  {}", spec.summary),
+                    Style::default().fg(app.theme.dim),
+                ),
+            ])
+        })
+        .collect();
+
+    let popup = Paragraph::new(rows).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.dim)),
+    );
+
+    f.render_widget(Clear, area);
+    f.render_widget(popup, area);
+}
+
 /// Draw the input (or permission) box and the status bar.
 fn draw_input_and_status(f: &mut Frame, app: &mut ChatApp, chunks: &[ratatui::layout::Rect]) {
     // Input area
@@ -410,6 +501,8 @@ fn draw_input_and_status(f: &mut Frame, app: &mut ChatApp, chunks: &[ratatui::la
     }
 
     if app.mode == Mode::Input {
+        draw_completion_popup(f, app, chunks[2]);
+
         let cursor_width = super::input::display_width_before(&app.input, app.cursor);
         f.set_cursor_position((chunks[2].x + cursor_width as u16 + 1, chunks[2].y + 1));
     }
