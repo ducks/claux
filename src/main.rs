@@ -20,6 +20,7 @@ mod query;
 mod repl;
 mod sandbox;
 mod session;
+mod shutdown;
 #[cfg(test)]
 mod test_support;
 mod theme;
@@ -146,9 +147,9 @@ async fn main() -> Result<()> {
         .await?;
         engine.set_system_prompt(system_prompt);
 
-        let response = engine
-            .submit(prompt, tokio_util::sync::CancellationToken::new())
-            .await;
+        let cancel = shutdown::one_shot_cancellation_token()?;
+        let response = engine.submit(prompt, cancel.clone()).await;
+        let response = shutdown::classify_one_shot_response(response, cancel.is_cancelled());
         if let Some(path) = args.transcript.as_deref() {
             let error = response.as_ref().err().map(ToString::to_string);
             let result = response.as_ref().ok().map(String::as_str);
