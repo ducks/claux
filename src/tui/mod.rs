@@ -5,6 +5,7 @@
 //! on the Action returned by each.
 
 pub mod chat;
+pub mod completion;
 pub mod home;
 mod input;
 pub mod markdown;

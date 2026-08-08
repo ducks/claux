@@ -108,7 +108,7 @@ pub async fn run(
         }
 
         // Check for slash commands
-        if let Some(result) = commands::parse_command(trimmed) {
+        if let Some(result) = commands::parse_command(trimmed, commands::Surface::Repl) {
             match result {
                 CommandResult::Text(ref text) if text == "__cost__" => {
                     println!("{}", commands::format_cost(&engine));

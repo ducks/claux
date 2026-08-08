@@ -5,6 +5,159 @@ use crate::query::Engine;
 use crate::session;
 use crate::theme::ThemeName;
 
+/// One slash command, described once.
+///
+/// The parser, the help text and the completer all read this table. They used
+/// to be independent: a `match` on string literals plus a hand-maintained help
+/// string, which had already drifted (`/quit` parsed but was undocumented).
+pub struct CommandSpec {
+    /// Canonical name, with the leading slash.
+    pub name: &'static str,
+    /// Accepted alternatives. Not offered by the completer - one obvious
+    /// spelling per command keeps the menu short.
+    pub aliases: &'static [&'static str],
+    pub summary: &'static str,
+    /// Placeholder for the argument, when the command takes one. Drives both
+    /// the help column and whether accepting a completion leaves a trailing
+    /// space ready for that argument.
+    pub arg: Option<&'static str>,
+    /// True for commands only the full-screen TUI can service. `/home` returns
+    /// to the session picker, which the line-based REPL does not have, so it is
+    /// listed and completed there but not in the REPL.
+    pub tui_only: bool,
+}
+
+impl CommandSpec {
+    /// Display form: `/model [profile]`.
+    pub fn usage(&self) -> String {
+        match self.arg {
+            Some(arg) => format!("{} [{arg}]", self.name),
+            None => self.name.to_string(),
+        }
+    }
+
+    /// True if `token` is a prefix of this command's canonical name. Aliases
+    /// are matched by the parser but deliberately not completed.
+    fn completes(&self, token: &str) -> bool {
+        self.name.starts_with(token)
+    }
+
+    fn matches(&self, token: &str) -> bool {
+        self.name == token || self.aliases.contains(&token)
+    }
+}
+
+/// Every slash command, in the order the help and completion menu show them.
+pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "/help",
+        aliases: &[],
+        summary: "Show this help",
+        arg: None,
+        tui_only: false,
+    },
+    CommandSpec {
+        name: "/cost",
+        aliases: &[],
+        summary: "Show token usage and cost",
+        arg: None,
+        tui_only: false,
+    },
+    CommandSpec {
+        name: "/compact",
+        aliases: &[],
+        summary: "Summarize conversation to free context",
+        arg: None,
+        tui_only: false,
+    },
+    CommandSpec {
+        name: "/diff",
+        aliases: &[],
+        summary: "Show the last turn's file changes",
+        arg: None,
+        tui_only: false,
+    },
+    CommandSpec {
+        name: "/undo-turn",
+        aliases: &[],
+        summary: "Safely undo the last turn's file changes",
+        arg: None,
+        tui_only: false,
+    },
+    CommandSpec {
+        name: "/model",
+        aliases: &[],
+        summary: "Show configured models or switch profile",
+        arg: Some("profile"),
+        tui_only: false,
+    },
+    CommandSpec {
+        name: "/theme",
+        aliases: &[],
+        summary: "Show or switch theme (dark, light, ansi)",
+        arg: Some("name"),
+        tui_only: false,
+    },
+    CommandSpec {
+        name: "/resume",
+        aliases: &[],
+        summary: "List or resume past sessions",
+        arg: Some("id"),
+        tui_only: false,
+    },
+    CommandSpec {
+        name: "/clear",
+        aliases: &[],
+        summary: "Clear screen",
+        arg: None,
+        tui_only: false,
+    },
+    CommandSpec {
+        name: "/home",
+        aliases: &[],
+        summary: "Return to the session picker",
+        arg: None,
+        // Intercepted by the TUI event loop before parse_command, because
+        // returning home is a screen transition the engine knows nothing
+        // about. Listed here so it is discoverable and completable.
+        tui_only: true,
+    },
+    CommandSpec {
+        name: "/exit",
+        aliases: &["/quit"],
+        summary: "Exit claux",
+        arg: None,
+        tui_only: false,
+    },
+];
+
+/// Which frontend is asking. Some commands only exist in one of them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    Tui,
+    Repl,
+}
+
+impl Surface {
+    fn shows(self, spec: &CommandSpec) -> bool {
+        !spec.tui_only || self == Surface::Tui
+    }
+}
+
+/// Commands whose canonical name starts with `token`, in table order.
+///
+/// `token` is the raw first word including the leading slash. A bare `/`
+/// matches everything, which is what makes the menu a discovery surface.
+pub fn complete(token: &str, surface: Surface) -> Vec<&'static CommandSpec> {
+    if !token.starts_with('/') {
+        return Vec::new();
+    }
+    COMMANDS
+        .iter()
+        .filter(|c| surface.shows(c) && c.completes(token))
+        .collect()
+}
+
 pub enum CommandResult {
     /// Print text to the user
     Text(String),
@@ -24,7 +177,10 @@ pub enum AsyncCommand {
 }
 
 /// Parse a slash command. Returns None if input isn't a command.
-pub fn parse_command(input: &str) -> Option<CommandResult> {
+///
+/// `surface` decides what `/help` advertises and how a TUI-only command is
+/// answered when it reaches the REPL.
+pub fn parse_command(input: &str, surface: Surface) -> Option<CommandResult> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
         return None;
@@ -35,9 +191,22 @@ pub fn parse_command(input: &str) -> Option<CommandResult> {
         None => (trimmed, ""),
     };
 
+    // Resolve aliases to the canonical name once, so the dispatch below only
+    // ever sees canonical spellings and cannot fall out of step with the table.
+    let cmd = COMMANDS
+        .iter()
+        .find(|spec| spec.matches(cmd))
+        .map(|spec| spec.name)
+        .unwrap_or(cmd);
+
     match cmd {
-        "/help" => Some(CommandResult::Text(help_text())),
-        "/exit" | "/quit" => Some(CommandResult::Exit),
+        // /home is a screen transition, handled by the TUI event loop before
+        // this runs. Reaching it here means the REPL, which has no home screen.
+        "/home" => Some(CommandResult::Text(
+            "/home is only available in the full-screen TUI (claux --tui).".to_string(),
+        )),
+        "/help" => Some(CommandResult::Text(help_text(surface))),
+        "/exit" => Some(CommandResult::Exit),
         "/clear" => Some(CommandResult::Text("\x1b[2J\x1b[H".to_string())),
         "/compact" => Some(CommandResult::Async(AsyncCommand::Compact)),
         "/diff" => Some(CommandResult::Async(AsyncCommand::Diff)),
@@ -212,23 +381,29 @@ async fn execute_theme(theme_name: Option<String>, engine: &mut Engine) -> Resul
     }
 }
 
-fn help_text() -> String {
-    "Available commands:
-  /help           Show this help
-  /cost           Show token usage and cost
-  /compact        Summarize conversation to free context
-  /diff           Show the last turn's file changes
-  /undo-turn      Safely undo the last turn's file changes
-  /model [profile] Show configured models or switch profile
-  /theme [name]   Show or switch theme (dark, light, ansi)
-  /resume [id]    List or resume past sessions
-  /clear          Clear screen
-  /exit           Exit claux
+fn help_text(surface: Surface) -> String {
+    // Rendered from COMMANDS so it cannot drift from what the parser accepts,
+    // and filtered by surface so the REPL is not told about /home.
+    let visible: Vec<_> = COMMANDS.iter().filter(|c| surface.shows(c)).collect();
+    let width = visible
+        .iter()
+        .map(|c| c.usage().chars().count())
+        .max()
+        .unwrap_or(0);
 
-Keyboard:
-  Ctrl+C    Cancel current request
-  Ctrl+D    Exit"
-        .to_string()
+    let mut out = String::from("Available commands:\n");
+    for spec in visible {
+        out.push_str(&format!(
+            "  {:<width$}  {}\n",
+            spec.usage(),
+            spec.summary,
+            width = width
+        ));
+    }
+    out.push_str(
+        "\nKeyboard:\n  Tab       Accept completion\n  Ctrl+C    Cancel current request\n  Ctrl+D    Exit",
+    );
+    out
 }
 
 #[cfg(test)]
@@ -237,24 +412,83 @@ mod tests {
 
     #[test]
     fn non_command_returns_none() {
-        assert!(parse_command("hello world").is_none());
+        assert!(parse_command("hello world", Surface::Tui).is_none());
+    }
+
+    #[test]
+    fn home_is_completable_in_the_tui() {
+        // Regression: /home was special-cased in the TUI event loop and absent
+        // from the table, so typing / never offered it and /help never listed
+        // it - exactly the drift the table exists to prevent.
+        let names: Vec<_> = complete("/h", Surface::Tui)
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(names.contains(&"/home"), "got {names:?}");
+    }
+
+    #[test]
+    fn home_is_hidden_from_the_repl() {
+        let names: Vec<_> = complete("/h", Surface::Repl)
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(!names.contains(&"/home"), "REPL has no home screen");
+        assert!(names.contains(&"/help"), "other matches still offered");
+    }
+
+    #[test]
+    fn home_in_the_repl_explains_itself() {
+        // Reaching parse_command with /home means the REPL: the TUI intercepts
+        // it earlier. Say so rather than falling through to "Unknown command".
+        let Some(CommandResult::Text(text)) = parse_command("/home", Surface::Tui) else {
+            panic!("expected explanatory text");
+        };
+        assert!(text.contains("full-screen TUI"), "got {text}");
+    }
+
+    #[test]
+    fn tui_help_lists_every_command_in_the_table() {
+        let Some(CommandResult::Text(text)) = parse_command("/help", Surface::Tui) else {
+            panic!("expected help text");
+        };
+        for spec in COMMANDS {
+            assert!(text.contains(spec.name), "{} missing from /help", spec.name);
+        }
+    }
+
+    #[test]
+    fn repl_help_omits_tui_only_commands() {
+        let Some(CommandResult::Text(text)) = parse_command("/help", Surface::Repl) else {
+            panic!("expected help text");
+        };
+        assert!(!text.contains("/home"), "REPL has no home screen to offer");
+        for spec in COMMANDS.iter().filter(|c| !c.tui_only) {
+            assert!(text.contains(spec.name), "{} missing from /help", spec.name);
+        }
     }
 
     #[test]
     fn help_returns_text() {
-        let result = parse_command("/help");
+        let result = parse_command("/help", Surface::Tui);
         assert!(matches!(result, Some(CommandResult::Text(_))));
     }
 
     #[test]
     fn exit_returns_exit() {
-        assert!(matches!(parse_command("/exit"), Some(CommandResult::Exit)));
-        assert!(matches!(parse_command("/quit"), Some(CommandResult::Exit)));
+        assert!(matches!(
+            parse_command("/exit", Surface::Tui),
+            Some(CommandResult::Exit)
+        ));
+        assert!(matches!(
+            parse_command("/quit", Surface::Tui),
+            Some(CommandResult::Exit)
+        ));
     }
 
     #[test]
     fn cost_returns_sentinel() {
-        if let Some(CommandResult::Text(text)) = parse_command("/cost") {
+        if let Some(CommandResult::Text(text)) = parse_command("/cost", Surface::Tui) {
             assert_eq!(text, "__cost__");
         } else {
             panic!("expected Text");
@@ -264,7 +498,7 @@ mod tests {
     #[test]
     fn compact_returns_async() {
         assert!(matches!(
-            parse_command("/compact"),
+            parse_command("/compact", Surface::Tui),
             Some(CommandResult::Async(AsyncCommand::Compact))
         ));
     }
@@ -272,18 +506,20 @@ mod tests {
     #[test]
     fn checkpoint_commands_return_async_actions() {
         assert!(matches!(
-            parse_command("/diff"),
+            parse_command("/diff", Surface::Tui),
             Some(CommandResult::Async(AsyncCommand::Diff))
         ));
         assert!(matches!(
-            parse_command("/undo-turn"),
+            parse_command("/undo-turn", Surface::Tui),
             Some(CommandResult::Async(AsyncCommand::UndoTurn))
         ));
     }
 
     #[test]
     fn model_no_args_returns_none_model() {
-        if let Some(CommandResult::Async(AsyncCommand::Model(m))) = parse_command("/model") {
+        if let Some(CommandResult::Async(AsyncCommand::Model(m))) =
+            parse_command("/model", Surface::Tui)
+        {
             assert!(m.is_none());
         } else {
             panic!("expected Model(None)");
@@ -293,7 +529,7 @@ mod tests {
     #[test]
     fn model_with_profile() {
         if let Some(CommandResult::Async(AsyncCommand::Model(Some(m)))) =
-            parse_command("/model kimi")
+            parse_command("/model kimi", Surface::Tui)
         {
             assert_eq!(m, "kimi");
         } else {
@@ -336,7 +572,9 @@ model = "moonshotai/kimi-k3"
 
     #[test]
     fn resume_no_args() {
-        if let Some(CommandResult::Async(AsyncCommand::Resume(id))) = parse_command("/resume") {
+        if let Some(CommandResult::Async(AsyncCommand::Resume(id))) =
+            parse_command("/resume", Surface::Tui)
+        {
             assert!(id.is_none());
         } else {
             panic!("expected Resume(None)");
@@ -346,7 +584,7 @@ model = "moonshotai/kimi-k3"
     #[test]
     fn resume_with_id() {
         if let Some(CommandResult::Async(AsyncCommand::Resume(Some(id)))) =
-            parse_command("/resume 20260401-143022")
+            parse_command("/resume 20260401-143022", Surface::Tui)
         {
             assert_eq!(id, "20260401-143022");
         } else {
@@ -356,7 +594,7 @@ model = "moonshotai/kimi-k3"
 
     #[test]
     fn unknown_command_returns_error_text() {
-        if let Some(CommandResult::Text(text)) = parse_command("/bogus") {
+        if let Some(CommandResult::Text(text)) = parse_command("/bogus", Surface::Tui) {
             assert!(text.contains("Unknown command"));
         } else {
             panic!("expected Text");
