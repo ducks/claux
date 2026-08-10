@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 
 #[cfg(test)]
@@ -40,6 +41,9 @@ pub struct Engine {
     pending_checkpoint: Option<PendingCheckpoint>,
     last_checkpoint: Option<TurnCheckpoint>,
     tool_trace: Vec<ToolTraceEntry>,
+    model_trace: Vec<ModelTraceEntry>,
+    trace_started_at: Option<Instant>,
+    trace_duration_ms: Option<u64>,
     pub cost: CostTracker,
     /// Provider-reported size of the last request; anchors the context estimate.
     last_request_usage: Option<RequestUsageBaseline>,
@@ -70,6 +74,41 @@ pub struct ToolTraceEntry {
     pub input: serde_json::Value,
     pub output: String,
     pub is_error: bool,
+    pub read_only: bool,
+    pub started_after_ms: u64,
+    pub duration_ms: u64,
+}
+
+/// Timing for one provider request, including streamed response delivery.
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelTraceEntry {
+    pub index: usize,
+    pub started_after_ms: u64,
+    pub duration_ms: u64,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ModelRoundUsage>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelRoundUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_creation_tokens: u32,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExecutionTiming {
+    pub total_duration_ms: u64,
+    pub model_rounds: Vec<ModelTraceEntry>,
+}
+
+struct TimedToolOutput {
+    output: crate::tools::ToolOutput,
+    started_after_ms: u64,
+    duration_ms: u64,
 }
 
 /// Events sent from the engine to the UI during streaming.
@@ -139,6 +178,9 @@ impl Engine {
             pending_checkpoint: None,
             last_checkpoint: None,
             tool_trace: Vec::new(),
+            model_trace: Vec::new(),
+            trace_started_at: None,
+            trace_duration_ms: None,
             cost: CostTracker::new(model),
             last_request_usage: None,
         }
@@ -169,6 +211,9 @@ impl Engine {
             pending_checkpoint: None,
             last_checkpoint: None,
             tool_trace: Vec::new(),
+            model_trace: Vec::new(),
+            trace_started_at: None,
+            trace_duration_ms: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
         }
@@ -327,6 +372,32 @@ impl Engine {
         &self.tool_trace
     }
 
+    pub fn execution_timing(&self) -> ExecutionTiming {
+        ExecutionTiming {
+            total_duration_ms: self.trace_duration_ms.unwrap_or_default(),
+            model_rounds: self.model_trace.clone(),
+        }
+    }
+
+    fn start_recording(&mut self) {
+        self.tool_trace.clear();
+        self.model_trace.clear();
+        self.trace_duration_ms = None;
+        self.trace_started_at = Some(Instant::now());
+    }
+
+    fn finish_recording(&mut self) {
+        self.trace_duration_ms = self
+            .trace_started_at
+            .map(|started| started.elapsed().as_millis() as u64);
+    }
+
+    fn trace_offset_ms(&self) -> u64 {
+        self.trace_started_at
+            .map(|started| started.elapsed().as_millis() as u64)
+            .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub fn messages_mut(&mut self) -> &mut Vec<Message> {
         &mut self.messages
@@ -343,6 +414,9 @@ impl Engine {
             .clear();
         self.messages = messages;
         self.tool_trace.clear();
+        self.model_trace.clear();
+        self.trace_started_at = None;
+        self.trace_duration_ms = None;
         self.pending_checkpoint = None;
         self.last_checkpoint = None;
         self.last_request_usage = None;
@@ -595,6 +669,7 @@ impl Engine {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String> {
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
+        self.start_recording();
         self.begin_checkpoint();
 
         let collector = tokio::spawn(async move {
@@ -610,6 +685,7 @@ impl Engine {
         });
 
         let result = self.run_turn(user_input, tx, false, cancel).await;
+        self.finish_recording();
         let text = collector.await.unwrap_or_default();
         self.finish_checkpoint();
         self.fire_hook(&HookTrigger::OnTurnEnd).await;
@@ -625,8 +701,10 @@ impl Engine {
         tx: mpsc::Sender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
+        self.start_recording();
         self.begin_checkpoint();
         let result = self.run_turn(user_input, tx, true, cancel).await;
+        self.finish_recording();
         self.finish_checkpoint();
         self.fire_hook(&HookTrigger::OnTurnEnd).await;
         result
@@ -677,6 +755,8 @@ impl Engine {
             let effective_system_prompt = retry_prompt
                 .as_ref()
                 .map(|prompt| format!("{}\n\n{prompt}", self.system_prompt));
+            let model_started_after_ms = self.trace_offset_ms();
+            let model_started = Instant::now();
             let stream_result = self
                 .provider
                 .stream(
@@ -697,6 +777,13 @@ impl Engine {
             let mut rx = match stream_result {
                 Ok(rx) => rx,
                 Err(e) => {
+                    self.model_trace.push(ModelTraceEntry {
+                        index: self.model_trace.len() + 1,
+                        started_after_ms: model_started_after_ms,
+                        duration_ms: model_started.elapsed().as_millis() as u64,
+                        status: "error".to_string(),
+                        usage: None,
+                    });
                     if cancel.is_cancelled() {
                         let _ = tx.send(StreamEvent::Interrupted).await;
                         return Ok(());
@@ -750,6 +837,8 @@ impl Engine {
             //
             // Retry recovery is only safe before this flips.
             let mut committed = false;
+            let mut model_status = "completed";
+            let mut model_usage = None;
 
             loop {
                 let event = tokio::select! {
@@ -758,6 +847,13 @@ impl Engine {
                         None => {
                             let error = "API stream ended without completion".to_string();
                             let _ = tx.send(StreamEvent::Error(error.clone())).await;
+                            self.model_trace.push(ModelTraceEntry {
+                                index: self.model_trace.len() + 1,
+                                started_after_ms: model_started_after_ms,
+                                duration_ms: model_started.elapsed().as_millis() as u64,
+                                status: "error".to_string(),
+                                usage: model_usage,
+                            });
                             return Err(anyhow::anyhow!(error));
                         }
                     },
@@ -797,6 +893,13 @@ impl Engine {
                         tool_uses.push((id, name, input));
                     }
                     ApiEvent::Usage(usage) => {
+                        model_usage = Some(ModelRoundUsage {
+                            input_tokens: usage.input_tokens,
+                            output_tokens: usage.output_tokens,
+                            cache_read_tokens: usage.cache_read_tokens,
+                            cache_creation_tokens: usage.cache_creation_tokens,
+                            cost_usd: usage.provider_cost_usd,
+                        });
                         self.record_request_usage(&usage, sent_message_count);
                         self.cost.add_usage(&usage);
                     }
@@ -823,11 +926,13 @@ impl Engine {
                                         ))
                                         .await;
                                     had_error = true;
+                                    model_status = "retry";
                                     break;
                                 }
                                 ApiFailureKind::OutputLimitExceeded if self.max_tokens < 64_000 => {
                                     self.max_tokens = (self.max_tokens * 2).min(64_000);
                                     had_error = true;
+                                    model_status = "retry";
                                     break;
                                 }
                                 ApiFailureKind::ContextExceeded
@@ -841,12 +946,20 @@ impl Engine {
                                         .await;
                                     self.compact().await?;
                                     had_error = true;
+                                    model_status = "retry";
                                     break;
                                 }
                                 _ => {}
                             }
                         }
                         let _ = tx.send(StreamEvent::Error(failure.message.clone())).await;
+                        self.model_trace.push(ModelTraceEntry {
+                            index: self.model_trace.len() + 1,
+                            started_after_ms: model_started_after_ms,
+                            duration_ms: model_started.elapsed().as_millis() as u64,
+                            status: "error".to_string(),
+                            usage: model_usage,
+                        });
                         // Keep the detail in the rendered message: `context`
                         // alone would leave `to_string()` as just "API error"
                         // and push the cause into the error source, which
@@ -856,6 +969,18 @@ impl Engine {
                     }
                 }
             }
+
+            self.model_trace.push(ModelTraceEntry {
+                index: self.model_trace.len() + 1,
+                started_after_ms: model_started_after_ms,
+                duration_ms: model_started.elapsed().as_millis() as u64,
+                status: if stream_interrupted {
+                    "interrupted".to_string()
+                } else {
+                    model_status.to_string()
+                },
+                usage: model_usage,
+            });
 
             if had_error {
                 continue;
@@ -905,6 +1030,9 @@ impl Engine {
                             input: input.clone(),
                             output: Self::INTERRUPTED_BY_USER.to_string(),
                             is_error: true,
+                            read_only: self.tools.is_read_only(name),
+                            started_after_ms: self.trace_offset_ms(),
+                            duration_ms: 0,
                         });
                         result_blocks.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
@@ -952,7 +1080,7 @@ impl Engine {
         interactive: bool,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> (Vec<ContentBlock>, bool) {
-        let mut outputs: Vec<Option<crate::tools::ToolOutput>> =
+        let mut outputs: Vec<Option<TimedToolOutput>> =
             (0..tool_uses.len()).map(|_| None).collect();
 
         // Classify up front. Only read-only AND auto-allowed tools run in
@@ -982,11 +1110,18 @@ impl Engine {
                 .iter()
                 .map(|&idx| {
                     let (_, name, input) = &tool_uses[idx];
+                    let started_after_ms = this.trace_offset_ms();
                     async move {
+                        let started = Instant::now();
                         (
                             idx,
-                            this.execute_tool_steerable(name, input.clone(), cancel)
-                                .await,
+                            TimedToolOutput {
+                                output: this
+                                    .execute_tool_steerable(name, input.clone(), cancel)
+                                    .await,
+                                started_after_ms,
+                                duration_ms: started.elapsed().as_millis() as u64,
+                            },
                         )
                     }
                 })
@@ -1006,9 +1141,13 @@ impl Engine {
             // results and end the turn after this batch.
             if cancel.is_cancelled() {
                 interrupted = true;
-                outputs[idx] = Some(crate::tools::ToolOutput {
-                    content: Self::INTERRUPTED_BY_USER.to_string(),
-                    is_error: true,
+                outputs[idx] = Some(TimedToolOutput {
+                    output: crate::tools::ToolOutput {
+                        content: Self::INTERRUPTED_BY_USER.to_string(),
+                        is_error: true,
+                    },
+                    started_after_ms: self.trace_offset_ms(),
+                    duration_ms: 0,
                 });
                 continue;
             }
@@ -1017,9 +1156,13 @@ impl Engine {
             // the remaining tools synthetic results so the model reads the
             // user's correction instead of finishing an abandoned plan.
             if self.steering_pending() {
-                outputs[idx] = Some(crate::tools::ToolOutput {
-                    content: Self::SKIPPED_FOR_STEERING.to_string(),
-                    is_error: true,
+                outputs[idx] = Some(TimedToolOutput {
+                    output: crate::tools::ToolOutput {
+                        content: Self::SKIPPED_FOR_STEERING.to_string(),
+                        is_error: true,
+                    },
+                    started_after_ms: self.trace_offset_ms(),
+                    duration_ms: 0,
                 });
                 continue;
             }
@@ -1027,6 +1170,8 @@ impl Engine {
             let is_read_only = self.tools.is_read_only(name);
             let perm = self.permissions.check(name, input, is_read_only);
 
+            let started_after_ms = self.trace_offset_ms();
+            let started = Instant::now();
             let output = match perm {
                 PermissionResult::Allow => {
                     self.execute_tool_steerable(name, input.clone(), cancel)
@@ -1053,7 +1198,11 @@ impl Engine {
                     }
                 }
             };
-            outputs[idx] = Some(output);
+            outputs[idx] = Some(TimedToolOutput {
+                output,
+                started_after_ms,
+                duration_ms: started.elapsed().as_millis() as u64,
+            });
         }
 
         if cancel.is_cancelled() {
@@ -1063,7 +1212,8 @@ impl Engine {
         // Phase 3: truncate, emit events, and build blocks in order.
         let mut result_blocks = Vec::with_capacity(tool_uses.len());
         for (idx, (id, name, input)) in tool_uses.iter().enumerate() {
-            let output = outputs[idx].take().expect("every tool got an output");
+            let timed = outputs[idx].take().expect("every tool got an output");
+            let output = timed.output;
             let (content, was_truncated) = compact::truncate_tool_output(&output.content);
             if was_truncated {
                 tracing::debug!("Truncated tool output for {}", name);
@@ -1082,6 +1232,9 @@ impl Engine {
                 input: input.clone(),
                 output: content.clone(),
                 is_error: output.is_error,
+                read_only: self.tools.is_read_only(name),
+                started_after_ms: timed.started_after_ms,
+                duration_ms: timed.duration_ms,
             });
 
             result_blocks.push(ContentBlock::ToolResult {
@@ -1696,6 +1849,9 @@ mod tests {
             input: serde_json::json!({"command": "true"}),
             output: String::new(),
             is_error: false,
+            read_only: true,
+            started_after_ms: 0,
+            duration_ms: 0,
         });
 
         engine.set_messages(vec![Message::user("loaded session")]);
@@ -1893,6 +2049,9 @@ mod tests {
             pending_checkpoint: None,
             last_checkpoint: None,
             tool_trace: Vec::new(),
+            model_trace: Vec::new(),
+            trace_started_at: Some(Instant::now()),
+            trace_duration_ms: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
         };
@@ -1972,6 +2131,9 @@ mod tests {
             pending_checkpoint: None,
             last_checkpoint: None,
             tool_trace: Vec::new(),
+            model_trace: Vec::new(),
+            trace_started_at: Some(Instant::now()),
+            trace_duration_ms: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
         };
@@ -2541,6 +2703,9 @@ mod tests {
             pending_checkpoint: None,
             last_checkpoint: None,
             tool_trace: Vec::new(),
+            model_trace: Vec::new(),
+            trace_started_at: Some(Instant::now()),
+            trace_duration_ms: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
         };
@@ -2612,6 +2777,9 @@ mod tests {
             pending_checkpoint: None,
             last_checkpoint: None,
             tool_trace: Vec::new(),
+            model_trace: Vec::new(),
+            trace_started_at: Some(Instant::now()),
+            trace_duration_ms: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
         };

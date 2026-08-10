@@ -177,7 +177,11 @@ built-in model pricing. It is `null` when neither source is available.
 `--transcript FILE` writes a separate, versioned JSON artifact containing the
 final conversation state, outcome, usage, and a complete ordered tool trace.
 The tool trace is retained independently of context compaction, so earlier
-tool calls are not lost when the model's active history is summarized. Failed
+tool calls are not lost when the model's active history is summarized.
+Transcript schema version 2 also records total turn duration, each streamed
+provider round with its usage and duration, and each tool call's monotonic
+start offset, duration, and read-only classification. These monotonic timings
+measure elapsed execution without depending on the host wall clock. Failed
 turns write the partial transcript before returning the error. Failures before
 the engine starts, such as invalid configuration, cannot produce a transcript.
 Claux creates transcript files with private permissions on Unix.
