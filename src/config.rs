@@ -214,7 +214,7 @@ pub struct Config {
     #[serde(default)]
     pub openai_protocol: OpenAIProtocol,
 
-    /// Optional Responses API reasoning effort.
+    /// Optional reasoning effort for OpenAI-compatible APIs.
     #[serde(default)]
     pub openai_reasoning_effort: Option<String>,
 

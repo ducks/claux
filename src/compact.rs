@@ -42,6 +42,16 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
                         ContentBlock::Text { text } => {
                             total += count_tokens(text);
                         }
+                        ContentBlock::Reasoning { text, details } => {
+                            if let Some(text) = text {
+                                total += count_tokens(text);
+                            }
+                            if !details.is_empty() {
+                                total += count_tokens(
+                                    &serde_json::Value::Array(details.clone()).to_string(),
+                                );
+                            }
+                        }
                         ContentBlock::ToolUse { input, name, .. } => {
                             total += count_tokens(name);
                             total += count_tokens(&input.to_string());
@@ -246,7 +256,7 @@ mod tests {
                                 "orphaned tool_result: {tool_use_id}"
                             );
                         }
-                        ContentBlock::Text { .. } => {}
+                        ContentBlock::Text { .. } | ContentBlock::Reasoning { .. } => {}
                     }
                 }
             }

@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use super::error::ApiFailure;
 use super::provider::{Provider, ProviderStream};
 use super::stream::{ApiEvent, Utf8LineDecoder};
-use super::types::{Message, MessageContent, ToolDefinition, Usage};
+use super::types::{ContentBlock, Message, MessageContent, ToolDefinition, Usage};
 
 /// OpenAI-compatible API provider.
 /// Works with Ollama, vLLM, LMStudio, OpenAI, and anything that speaks
@@ -17,11 +17,18 @@ pub struct OpenAICompatProvider {
     model: String,
     base_url: String,
     provider_name: String,
+    reasoning_effort: Option<String>,
     http: reqwest::Client,
 }
 
 impl OpenAICompatProvider {
-    pub fn new(base_url: &str, api_key: &str, model: &str, name: &str) -> Self {
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+        name: &str,
+        reasoning_effort: Option<&str>,
+    ) -> Self {
         // Strip trailing slash
         let base_url = base_url.trim_end_matches('/').to_string();
         Self {
@@ -29,6 +36,7 @@ impl OpenAICompatProvider {
             model: model.to_string(),
             base_url,
             provider_name: name.to_string(),
+            reasoning_effort: reasoning_effort.map(str::to_string),
             http: reqwest::Client::new(),
         }
     }
@@ -53,13 +61,21 @@ impl OpenAICompatProvider {
                     let mut text_parts = Vec::new();
                     let mut tool_calls = Vec::new();
                     let mut tool_results = Vec::new();
+                    let mut reasoning_text = String::new();
+                    let mut reasoning_details = Vec::new();
 
                     for block in blocks {
                         match block {
-                            super::types::ContentBlock::Text { text } => {
+                            ContentBlock::Text { text } => {
                                 text_parts.push(text.clone());
                             }
-                            super::types::ContentBlock::ToolUse { id, name, input } => {
+                            ContentBlock::Reasoning { text, details } => {
+                                if let Some(text) = text {
+                                    reasoning_text.push_str(text);
+                                }
+                                reasoning_details.extend(details.iter().cloned());
+                            }
+                            ContentBlock::ToolUse { id, name, input } => {
                                 tool_calls.push(json!({
                                     "id": id,
                                     "type": "function",
@@ -69,7 +85,7 @@ impl OpenAICompatProvider {
                                     }
                                 }));
                             }
-                            super::types::ContentBlock::ToolResult {
+                            ContentBlock::ToolResult {
                                 tool_use_id,
                                 content,
                                 ..
@@ -89,6 +105,11 @@ impl OpenAICompatProvider {
                         });
                         if !text_parts.is_empty() {
                             assistant_msg["content"] = json!(text_parts.join("\n"));
+                        }
+                        if !reasoning_details.is_empty() {
+                            assistant_msg["reasoning_details"] = json!(reasoning_details);
+                        } else if !reasoning_text.is_empty() {
+                            assistant_msg["reasoning"] = json!(reasoning_text);
                         }
                         assistant_msg["tool_calls"] = json!(tool_calls);
                         out.push(assistant_msg);
@@ -145,6 +166,9 @@ impl OpenAICompatProvider {
 
         if !tools.is_empty() {
             body["tools"] = json!(Self::convert_tools(tools));
+        }
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning"] = json!({ "effort": effort });
         }
 
         body
@@ -347,6 +371,26 @@ async fn read_openai_sse(
                     }
                 }
 
+                let reasoning_text = delta
+                    .get("reasoning")
+                    .or_else(|| delta.get("reasoning_content"))
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                let reasoning_details = delta
+                    .get("reasoning_details")
+                    .and_then(|value| value.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if reasoning_text.is_some() || !reasoning_details.is_empty() {
+                    let _ = tx
+                        .send(ApiEvent::Reasoning {
+                            text: reasoning_text,
+                            details: reasoning_details,
+                        })
+                        .await;
+                }
+
                 // Tool calls
                 if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                     for tc in tcs {
@@ -441,10 +485,47 @@ mod tests {
     #[test]
     fn requests_streamed_usage() {
         let provider =
-            OpenAICompatProvider::new("https://api.openai.com/v1", "key", "model", "openai");
+            OpenAICompatProvider::new("https://api.openai.com/v1", "key", "model", "openai", None);
         let body = provider.request_body(&[Message::user("hello")], "system", &[], 1_000);
 
         assert_eq!(body["stream_options"]["include_usage"], true);
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn sends_reasoning_effort_and_replays_reasoning_details() {
+        let provider = OpenAICompatProvider::new(
+            "https://openrouter.ai/api/v1",
+            "key",
+            "model",
+            "openrouter",
+            Some("low"),
+        );
+        let messages = vec![Message::assistant_blocks(vec![
+            ContentBlock::Reasoning {
+                text: Some("private thought".to_string()),
+                details: vec![json!({
+                    "type": "reasoning.text",
+                    "text": "preserved thought",
+                    "index": 0
+                })],
+            },
+            ContentBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "Read".to_string(),
+                input: json!({"file_path": "/tmp/test"}),
+            },
+        ])];
+
+        let body = provider.request_body(&messages, "system", &[], 1_000);
+
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(
+            body["messages"][1]["reasoning_details"][0]["text"],
+            "preserved thought"
+        );
+        assert!(body["messages"][1].get("reasoning").is_none());
+        assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call-1");
     }
 
     #[tokio::test]
@@ -512,6 +593,41 @@ mod tests {
                 provider_cost_usd: Some(cost),
             })) if (cost - 0.00095).abs() < f64::EPSILON
         ));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
+    }
+
+    #[tokio::test]
+    async fn emits_streamed_reasoning_for_later_tool_rounds() {
+        let response = crate::test_support::sse_response(concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"think \"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"carefully\",\"index\":0}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_openai_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            "openrouter",
+            "deepseek/deepseek-v4-flash-0731",
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(ApiEvent::Reasoning { text: Some(text), details })
+                if text == "think " && details.is_empty()
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(ApiEvent::Reasoning { text: None, details })
+                if details[0]["text"] == "carefully"
+        ));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Usage(_))));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
     }
 

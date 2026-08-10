@@ -294,7 +294,7 @@ mod tests {
                             assert!(seen.contains(tool_use_id), "orphan result {tool_use_id}");
                             pending.retain(|p| p != tool_use_id);
                         }
-                        ContentBlock::Text { .. } => {}
+                        ContentBlock::Text { .. } | ContentBlock::Reasoning { .. } => {}
                     }
                 }
             } else if !pending.is_empty() {
