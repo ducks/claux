@@ -307,6 +307,7 @@ fn build_provider(resolved: &config::ResolvedModel) -> Result<Box<dyn api::Provi
                         &api_key,
                         &binding.model,
                         &binding.provider_name,
+                        binding.reasoning_effort.as_deref(),
                     )))
                 }
                 config::OpenAIProtocol::Responses => {

@@ -252,6 +252,10 @@ model = "gpt-5.6-sol"
 display_name = "OpenAI Coder"
 reasoning_effort = "medium"
 
+# `reasoning_effort` also works with compatible Chat Completions providers
+# such as OpenRouter. Returned reasoning state is preserved across tool rounds
+# but is not rendered as assistant text.
+
 # Optional per-profile metadata overrides. These take precedence over built-in
 # model knowledge and the legacy model_pricing table.
 # context_window = 1050000

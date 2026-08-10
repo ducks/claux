@@ -22,6 +22,16 @@ pub enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
 
+    /// Provider reasoning state retained for multi-round tool use. This is
+    /// deliberately not rendered as assistant text.
+    #[serde(rename = "reasoning")]
+    Reasoning {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        details: Vec<serde_json::Value>,
+    },
+
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -166,5 +176,26 @@ mod tests {
         } else {
             panic!("expected Text");
         }
+    }
+
+    #[test]
+    fn reasoning_block_roundtrips_without_becoming_text() {
+        let original = ContentBlock::Reasoning {
+            text: Some("private thought".to_string()),
+            details: vec![serde_json::json!({
+                "type": "reasoning.text",
+                "text": "preserve me",
+                "index": 0
+            })],
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+
+        assert!(matches!(
+            parsed,
+            ContentBlock::Reasoning { text: Some(text), details }
+                if text == "private thought" && details[0]["text"] == "preserve me"
+        ));
     }
 }

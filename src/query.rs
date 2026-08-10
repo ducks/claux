@@ -738,6 +738,8 @@ impl Engine {
             };
 
             let mut text_buf = String::new();
+            let mut reasoning_text = String::new();
+            let mut reasoning_details = Vec::new();
             let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
             let mut had_error = false;
             let mut stream_interrupted = false;
@@ -768,6 +770,12 @@ impl Engine {
                     ApiEvent::Text(t) => {
                         let _ = tx.send(StreamEvent::Text(t.clone())).await;
                         text_buf.push_str(&t);
+                    }
+                    ApiEvent::Reasoning { text, details } => {
+                        if let Some(text) = text {
+                            reasoning_text.push_str(&text);
+                        }
+                        reasoning_details.extend(details);
                     }
                     ApiEvent::ToolUse { id, name, input } => {
                         self.fire_hook(&HookTrigger::OnToolStart).await;
@@ -860,6 +868,12 @@ impl Engine {
 
             // Record assistant message
             let mut blocks = Vec::new();
+            if !reasoning_text.is_empty() || !reasoning_details.is_empty() {
+                blocks.push(ContentBlock::Reasoning {
+                    text: (!reasoning_text.is_empty()).then_some(reasoning_text),
+                    details: reasoning_details,
+                });
+            }
             if !text_buf.is_empty() {
                 blocks.push(ContentBlock::Text {
                     text: text_buf.clone(),
@@ -1205,6 +1219,42 @@ mod tests {
             let _ = tx
                 .send(ApiEvent::Text("partial response".to_string()))
                 .await;
+            drop(tx);
+            Ok(ProviderStream::new(rx, cancel.child_token()))
+        }
+    }
+
+    struct ReasoningProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for ReasoningProvider {
+        fn name(&self) -> &str {
+            "reasoning"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            let (tx, rx) = mpsc::channel(4);
+            tx.send(ApiEvent::Reasoning {
+                text: Some("private thought".to_string()),
+                details: vec![serde_json::json!({
+                    "type": "reasoning.text",
+                    "text": "preserve me",
+                    "index": 0
+                })],
+            })
+            .await
+            .unwrap();
+            tx.send(ApiEvent::Text("answer".to_string())).await.unwrap();
+            tx.send(ApiEvent::Done).await.unwrap();
             drop(tx);
             Ok(ProviderStream::new(rx, cancel.child_token()))
         }
@@ -2238,6 +2288,34 @@ mod tests {
             crate::api::MessageContent::Text(t) => assert_eq!(t, "check auth too"),
             other => panic!("expected steering message last, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn reasoning_is_hidden_from_output_and_retained_in_history() {
+        let mut engine = Engine::for_tests(
+            Box::new(ReasoningProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+
+        let text = engine
+            .submit("go", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(text, "answer");
+        let MessageContent::Blocks(blocks) = &engine.messages()[1].content else {
+            panic!("expected assistant blocks");
+        };
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::Reasoning { text: Some(text), details }
+                if text == "private thought" && details[0]["text"] == "preserve me"
+        ));
+        assert!(matches!(
+            &blocks[1],
+            ContentBlock::Text { text } if text == "answer"
+        ));
     }
 
     #[tokio::test]

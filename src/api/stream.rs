@@ -10,6 +10,12 @@ pub enum ApiEvent {
     /// Streaming text from assistant
     Text(String),
 
+    /// Provider reasoning state that must be replayed on later tool rounds.
+    Reasoning {
+        text: Option<String>,
+        details: Vec<serde_json::Value>,
+    },
+
     /// Tool use request
     ToolUse {
         id: String,

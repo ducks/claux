@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::provider::{Provider, ProviderStream};
 use super::stream::{self, ApiEvent};
-use super::types::{Message, ToolDefinition};
+use super::types::{ContentBlock, Message, MessageContent, ToolDefinition};
 use crate::config::AnthropicApiKey;
 use crate::context::SYSTEM_PROMPT_BLOCK_SEPARATOR;
 
@@ -27,6 +27,26 @@ impl AnthropicProvider {
             http: reqwest::Client::new(),
         }
     }
+}
+
+fn without_provider_reasoning(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .filter_map(|message| match &message.content {
+            MessageContent::Blocks(blocks) => {
+                let blocks = blocks
+                    .iter()
+                    .filter(|block| !matches!(block, ContentBlock::Reasoning { .. }))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (!blocks.is_empty()).then(|| Message {
+                    role: message.role.clone(),
+                    content: MessageContent::Blocks(blocks),
+                })
+            }
+            MessageContent::Text(_) => Some(message.clone()),
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -61,6 +81,8 @@ impl Provider for AnthropicProvider {
                 })
             })
             .collect();
+
+        let messages = without_provider_reasoning(messages);
 
         let mut body = json!({
             "model": self.model,
@@ -186,6 +208,24 @@ mod tests {
             ],
             "messages": messages,
         })
+    }
+
+    #[test]
+    fn removes_openrouter_reasoning_before_anthropic_requests() {
+        let messages = without_provider_reasoning(&[Message::assistant_blocks(vec![
+            ContentBlock::Reasoning {
+                text: Some("private".to_string()),
+                details: vec![json!({"type": "reasoning.text", "text": "private"})],
+            },
+            ContentBlock::Text {
+                text: "visible".to_string(),
+            },
+        ])]);
+
+        let MessageContent::Blocks(blocks) = &messages[0].content else {
+            panic!("expected blocks");
+        };
+        assert!(matches!(blocks.as_slice(), [ContentBlock::Text { text }] if text == "visible"));
     }
 
     #[test]
