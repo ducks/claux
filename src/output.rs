@@ -1,6 +1,6 @@
 use crate::api::Message;
 use crate::cost::{CostTracker, UsageSummary};
-use crate::query::ToolTraceEntry;
+use crate::query::{ExecutionTiming, ToolTraceEntry};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::fs::OpenOptions;
@@ -34,6 +34,7 @@ pub struct OneShotTranscript<'a> {
     pub usage: UsageSummary,
     pub messages: &'a [Message],
     pub tool_trace: &'a [ToolTraceEntry],
+    pub timing: ExecutionTiming,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,12 +50,13 @@ impl<'a> OneShotTranscript<'a> {
         cost: &CostTracker,
         messages: &'a [Message],
         tool_trace: &'a [ToolTraceEntry],
+        timing: ExecutionTiming,
         result: Option<&'a str>,
         error: Option<&'a str>,
     ) -> Self {
         debug_assert!(result.is_some() ^ error.is_some());
         Self {
-            schema_version: 1,
+            schema_version: 2,
             model,
             outcome: match error {
                 Some(message) => TranscriptOutcome::Error { message },
@@ -65,6 +67,7 @@ impl<'a> OneShotTranscript<'a> {
             usage: cost.usage_summary(),
             messages,
             tool_trace,
+            timing,
         }
     }
 }
@@ -106,7 +109,7 @@ mod tests {
     use super::*;
     use crate::api::types::Usage;
     use crate::api::Message;
-    use crate::query::ToolTraceEntry;
+    use crate::query::{ModelRoundUsage, ModelTraceEntry, ToolTraceEntry};
 
     #[test]
     fn serializes_stable_one_shot_contract() {
@@ -155,12 +158,31 @@ mod tests {
             input: serde_json::json!({"command": "docker ps"}),
             output: "container-id\n".to_string(),
             is_error: false,
+            read_only: true,
+            started_after_ms: 120,
+            duration_ms: 45,
         }];
         let transcript = OneShotTranscript::new(
             "test/model",
             &cost,
             &messages,
             &tool_trace,
+            ExecutionTiming {
+                total_duration_ms: 500,
+                model_rounds: vec![ModelTraceEntry {
+                    index: 1,
+                    started_after_ms: 0,
+                    duration_ms: 75,
+                    status: "completed".to_string(),
+                    usage: Some(ModelRoundUsage {
+                        input_tokens: 3,
+                        output_tokens: 2,
+                        cache_read_tokens: 1,
+                        cache_creation_tokens: 0,
+                        cost_usd: Some(0.0001),
+                    }),
+                }],
+            },
             Some("done"),
             None,
         );
@@ -171,12 +193,19 @@ mod tests {
 
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
         assert_eq!(value["outcome"]["status"], "completed");
         assert_eq!(value["outcome"]["result"], "done");
         assert_eq!(value["messages"][0]["content"], "diagnose the service");
         assert_eq!(value["tool_trace"][0]["input"]["command"], "docker ps");
         assert_eq!(value["tool_trace"][0]["output"], "container-id\n");
+        assert_eq!(value["tool_trace"][0]["duration_ms"], 45);
+        assert_eq!(value["timing"]["total_duration_ms"], 500);
+        assert_eq!(value["timing"]["model_rounds"][0]["duration_ms"], 75);
+        assert_eq!(
+            value["timing"]["model_rounds"][0]["usage"]["input_tokens"],
+            3
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -199,6 +228,10 @@ mod tests {
             &cost,
             &[],
             &[],
+            ExecutionTiming {
+                total_duration_ms: 0,
+                model_rounds: vec![],
+            },
             None,
             Some("provider disconnected"),
         );

@@ -158,6 +158,7 @@ async fn main() -> Result<()> {
                 &engine.cost,
                 engine.messages(),
                 engine.tool_trace(),
+                engine.execution_timing(),
                 result,
                 error.as_deref(),
             );
