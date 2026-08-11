@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
@@ -44,6 +45,7 @@ pub struct Engine {
     model_trace: Vec<ModelTraceEntry>,
     trace_started_at: Option<Instant>,
     trace_duration_ms: Option<u64>,
+    transcript_checkpoint: Option<PathBuf>,
     pub cost: CostTracker,
     /// Provider-reported size of the last request; anchors the context estimate.
     last_request_usage: Option<RequestUsageBaseline>,
@@ -181,6 +183,7 @@ impl Engine {
             model_trace: Vec::new(),
             trace_started_at: None,
             trace_duration_ms: None,
+            transcript_checkpoint: None,
             cost: CostTracker::new(model),
             last_request_usage: None,
         }
@@ -214,6 +217,7 @@ impl Engine {
             model_trace: Vec::new(),
             trace_started_at: None,
             trace_duration_ms: None,
+            transcript_checkpoint: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
         }
@@ -374,8 +378,35 @@ impl Engine {
 
     pub fn execution_timing(&self) -> ExecutionTiming {
         ExecutionTiming {
-            total_duration_ms: self.trace_duration_ms.unwrap_or_default(),
+            total_duration_ms: self.trace_duration_ms.unwrap_or_else(|| {
+                self.trace_started_at
+                    .map(|started| started.elapsed().as_millis() as u64)
+                    .unwrap_or_default()
+            }),
             model_rounds: self.model_trace.clone(),
+        }
+    }
+
+    pub fn set_transcript_checkpoint(&mut self, path: PathBuf) {
+        self.transcript_checkpoint = Some(path);
+    }
+
+    fn checkpoint_transcript(&self) {
+        let Some(path) = self.transcript_checkpoint.as_deref() else {
+            return;
+        };
+        let transcript = crate::output::OneShotTranscript::running(
+            self.model(),
+            &self.cost,
+            self.messages(),
+            self.tool_trace(),
+            self.execution_timing(),
+        );
+        if let Err(error) = crate::output::write_transcript(path, &transcript) {
+            tracing::warn!(
+                "could not checkpoint transcript {}: {error}",
+                path.display()
+            );
         }
     }
 
@@ -732,6 +763,7 @@ impl Engine {
                 .await;
         }
         self.messages.push(Message::user(user_input));
+        self.checkpoint_transcript();
 
         let mut recovery_attempts = 0;
         const MAX_RECOVERY: u32 = 3;
@@ -784,6 +816,7 @@ impl Engine {
                         status: "error".to_string(),
                         usage: None,
                     });
+                    self.checkpoint_transcript();
                     if cancel.is_cancelled() {
                         let _ = tx.send(StreamEvent::Interrupted).await;
                         return Ok(());
@@ -854,6 +887,7 @@ impl Engine {
                                 status: "error".to_string(),
                                 usage: model_usage,
                             });
+                            self.checkpoint_transcript();
                             return Err(anyhow::anyhow!(error));
                         }
                     },
@@ -960,6 +994,7 @@ impl Engine {
                             status: "error".to_string(),
                             usage: model_usage,
                         });
+                        self.checkpoint_transcript();
                         // Keep the detail in the rendered message: `context`
                         // alone would leave `to_string()` as just "API error"
                         // and push the cause into the error source, which
@@ -983,6 +1018,7 @@ impl Engine {
             });
 
             if had_error {
+                self.checkpoint_transcript();
                 continue;
             }
 
@@ -1014,6 +1050,7 @@ impl Engine {
             if !blocks.is_empty() {
                 self.messages.push(Message::assistant_blocks(blocks));
             }
+            self.checkpoint_transcript();
 
             // Cancelled mid-stream: pair every received tool_use with a
             // synthetic interrupted result so the conversation stays
@@ -1041,6 +1078,7 @@ impl Engine {
                         });
                     }
                     self.messages.push(Message::tool_results(result_blocks));
+                    self.checkpoint_transcript();
                 }
                 let _ = tx.send(StreamEvent::Interrupted).await;
                 return Ok(());
@@ -1055,6 +1093,7 @@ impl Engine {
                 .execute_tool_batch(&tool_uses, &tx, interactive, &cancel)
                 .await;
             self.messages.push(Message::tool_results(result_blocks));
+            self.checkpoint_transcript();
 
             if interrupted {
                 let _ = tx.send(StreamEvent::Interrupted).await;
@@ -2025,6 +2064,35 @@ mod tests {
         assert_eq!(engine.cost.total_cost_usd(), 2.0);
     }
 
+    #[test]
+    fn transcript_checkpoint_preserves_running_engine_state() {
+        let mut engine = Engine::for_tests(
+            Box::new(MockProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.json");
+        engine.set_transcript_checkpoint(path.clone());
+        engine.start_recording();
+        engine.messages_mut().push(Message::user("repair it"));
+        engine.model_trace.push(ModelTraceEntry {
+            index: 1,
+            started_after_ms: 0,
+            duration_ms: 10,
+            status: "completed".to_string(),
+            usage: None,
+        });
+
+        engine.checkpoint_transcript();
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(value["outcome"]["status"], "running");
+        assert_eq!(value["messages"][0]["content"], "repair it");
+        assert_eq!(value["timing"]["model_rounds"][0]["status"], "completed");
+    }
+
     #[tokio::test]
     async fn test_parallel_tool_execution() {
         // Create a mock engine with read-only tools
@@ -2052,6 +2120,7 @@ mod tests {
             model_trace: Vec::new(),
             trace_started_at: Some(Instant::now()),
             trace_duration_ms: None,
+            transcript_checkpoint: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
         };
@@ -2134,6 +2203,7 @@ mod tests {
             model_trace: Vec::new(),
             trace_started_at: Some(Instant::now()),
             trace_duration_ms: None,
+            transcript_checkpoint: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
         };
@@ -2706,6 +2776,7 @@ mod tests {
             model_trace: Vec::new(),
             trace_started_at: Some(Instant::now()),
             trace_duration_ms: None,
+            transcript_checkpoint: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
         };
@@ -2780,6 +2851,7 @@ mod tests {
             model_trace: Vec::new(),
             trace_started_at: Some(Instant::now()),
             trace_duration_ms: None,
+            transcript_checkpoint: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
         };

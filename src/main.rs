@@ -146,6 +146,9 @@ async fn main() -> Result<()> {
         )
         .await?;
         engine.set_system_prompt(system_prompt);
+        if let Some(path) = args.transcript.as_ref() {
+            engine.set_transcript_checkpoint(path.clone());
+        }
 
         let cancel = shutdown::one_shot_cancellation_token()?;
         let response = engine.submit(prompt, cancel.clone()).await;

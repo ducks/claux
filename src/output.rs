@@ -4,8 +4,8 @@ use crate::query::{ExecutionTiming, ToolTraceEntry};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::fs::OpenOptions;
-use std::io::BufWriter;
-use std::path::Path;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize)]
 pub struct OneShotOutput<'a> {
@@ -40,6 +40,7 @@ pub struct OneShotTranscript<'a> {
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum TranscriptOutcome<'a> {
+    Running,
     Completed { result: &'a str },
     Error { message: &'a str },
 }
@@ -70,6 +71,24 @@ impl<'a> OneShotTranscript<'a> {
             timing,
         }
     }
+
+    pub fn running(
+        model: &'a str,
+        cost: &CostTracker,
+        messages: &'a [Message],
+        tool_trace: &'a [ToolTraceEntry],
+        timing: ExecutionTiming,
+    ) -> Self {
+        Self {
+            schema_version: 2,
+            model,
+            outcome: TranscriptOutcome::Running,
+            usage: cost.usage_summary(),
+            messages,
+            tool_trace,
+            timing,
+        }
+    }
 }
 
 pub fn write_transcript(path: &Path, transcript: &OneShotTranscript<'_>) -> Result<()> {
@@ -82,6 +101,7 @@ pub fn write_transcript(path: &Path, transcript: &OneShotTranscript<'_>) -> Resu
         })?;
     }
 
+    let partial_path = transcript_partial_path(path);
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -90,18 +110,36 @@ pub fn write_transcript(path: &Path, transcript: &OneShotTranscript<'_>) -> Resu
         options.mode(0o600);
     }
     let file = options
-        .open(path)
-        .with_context(|| format!("could not create transcript {}", path.display()))?;
+        .open(&partial_path)
+        .with_context(|| format!("could not create transcript {}", partial_path.display()))?;
     #[cfg(unix)]
     file.set_permissions({
         use std::os::unix::fs::PermissionsExt;
         std::fs::Permissions::from_mode(0o600)
     })
     .with_context(|| format!("could not secure transcript {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(&mut writer, transcript)
-        .with_context(|| format!("could not write transcript {}", path.display()))?;
+    {
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, transcript)
+            .with_context(|| format!("could not write transcript {}", path.display()))?;
+        writer
+            .flush()
+            .with_context(|| format!("could not flush transcript {}", path.display()))?;
+    }
+    std::fs::rename(&partial_path, path).with_context(|| {
+        format!(
+            "could not publish transcript {} from {}",
+            path.display(),
+            partial_path.display()
+        )
+    })?;
     Ok(())
+}
+
+fn transcript_partial_path(path: &Path) -> PathBuf {
+    let mut partial = path.as_os_str().to_os_string();
+    partial.push(".partial");
+    PathBuf::from(partial)
 }
 
 #[cfg(test)]
@@ -239,5 +277,44 @@ mod tests {
         let value = serde_json::to_value(transcript).unwrap();
         assert_eq!(value["outcome"]["status"], "error");
         assert_eq!(value["outcome"]["message"], "provider disconnected");
+    }
+
+    #[test]
+    fn atomically_replaces_running_checkpoint_with_final_outcome() {
+        let cost = CostTracker::new("test/model");
+        let messages = vec![Message::user("repair it")];
+        let timing = ExecutionTiming {
+            total_duration_ms: 25,
+            model_rounds: vec![],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.json");
+
+        write_transcript(
+            &path,
+            &OneShotTranscript::running("test/model", &cost, &messages, &[], timing.clone()),
+        )
+        .unwrap();
+        let running: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(running["outcome"]["status"], "running");
+
+        write_transcript(
+            &path,
+            &OneShotTranscript::new(
+                "test/model",
+                &cost,
+                &messages,
+                &[],
+                timing,
+                Some("done"),
+                None,
+            ),
+        )
+        .unwrap();
+        let completed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(completed["outcome"]["status"], "completed");
+        assert!(!transcript_partial_path(&path).exists());
     }
 }

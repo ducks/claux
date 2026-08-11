@@ -16,7 +16,7 @@ pub struct Cli {
     #[arg(long, value_enum, requires = "prompt")]
     pub output_format: Option<OutputFormat>,
 
-    /// Write the complete one-shot transcript and tool trace to a JSON file
+    /// Checkpoint and write the complete one-shot transcript and tool trace
     ///
     /// The artifact can contain sensitive tool inputs and outputs.
     #[arg(long, value_name = "FILE", requires = "prompt")]
