@@ -176,6 +176,9 @@ built-in model pricing. It is `null` when neither source is available.
 
 `--transcript FILE` writes a separate, versioned JSON artifact containing the
 final conversation state, outcome, usage, and a complete ordered tool trace.
+While a turn is running, Claux atomically checkpoints the artifact after model
+rounds and tool batches with `outcome.status` set to `running`. Normal
+completion replaces that checkpoint with the final completed or error outcome.
 The tool trace is retained independently of context compaction, so earlier
 tool calls are not lost when the model's active history is summarized.
 Transcript schema version 2 also records total turn duration, each streamed
