@@ -83,6 +83,7 @@ base_url = "https://openrouter.ai/api/v1"
 name = "openrouter"
 protocol = "chat_completions"
 api_key_env = "OPENROUTER_API_KEY"
+prompt_caching = true
 
 [model_profiles.sonnet]
 provider = "anthropic"
@@ -99,6 +100,12 @@ Saved sessions never contain API keys. They retain a credential-free transport
 snapshot and resolve credentials from the current matching provider config or
 saved environment-variable name when reopened. If that credential is no longer
 available, the TUI returns to the session browser with a recovery message.
+
+Compatible OpenAI-style providers can opt into prompt-prefix caching with
+`prompt_caching = true`. OpenRouter configuration created by `claux config
+init` enables it by default and sends an ephemeral top-level cache control on
+each request. Provider-reported cache reads and writes appear in Claux usage
+output when the selected model supports them.
 
 ## Auth
 

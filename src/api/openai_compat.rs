@@ -18,6 +18,7 @@ pub struct OpenAICompatProvider {
     base_url: String,
     provider_name: String,
     reasoning_effort: Option<String>,
+    prompt_caching: bool,
     http: reqwest::Client,
 }
 
@@ -37,8 +38,14 @@ impl OpenAICompatProvider {
             base_url,
             provider_name: name.to_string(),
             reasoning_effort: reasoning_effort.map(str::to_string),
+            prompt_caching: false,
             http: reqwest::Client::new(),
         }
+    }
+
+    pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
+        self.prompt_caching = enabled;
+        self
     }
 
     /// Convert our message format to OpenAI's format.
@@ -169,6 +176,9 @@ impl OpenAICompatProvider {
         }
         if let Some(effort) = &self.reasoning_effort {
             body["reasoning"] = json!({ "effort": effort });
+        }
+        if self.prompt_caching {
+            body["cache_control"] = json!({ "type": "ephemeral" });
         }
 
         body
@@ -611,6 +621,22 @@ mod tests {
 
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert!(body.get("reasoning").is_none());
+        assert!(body.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn enables_provider_prompt_caching_when_configured() {
+        let provider = OpenAICompatProvider::new(
+            "https://openrouter.ai/api/v1",
+            "key",
+            "model",
+            "openrouter",
+            None,
+        )
+        .with_prompt_caching(true);
+        let body = provider.request_body(&[Message::user("hello")], "system", &[], 1_000);
+
+        assert_eq!(body["cache_control"]["type"], "ephemeral");
     }
 
     #[test]
