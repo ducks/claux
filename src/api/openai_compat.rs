@@ -251,6 +251,117 @@ impl Provider for OpenAICompatProvider {
 
 type PendingToolCalls = std::collections::HashMap<u32, (String, String, String)>;
 
+/// Merge a streamed fragment into the reasoning detail immediately before it.
+///
+/// OpenRouter streams reasoning detail payloads in pieces. Gemini in particular
+/// can emit several `reasoning.text` objects with the same index before the
+/// matching `reasoning.encrypted` signature. Replaying those text fragments as
+/// separate blocks changes the signed sequence and Gemini rejects the next
+/// request with "Corrupted thought signature." Only adjacent fragments with a
+/// compatible identity are joined; distinct detail blocks retain their order
+/// and representation.
+fn merge_reasoning_detail_fragment(
+    current: &mut serde_json::Value,
+    incoming: &serde_json::Value,
+) -> bool {
+    let Some(current_object) = current.as_object_mut() else {
+        return false;
+    };
+    let Some(incoming_object) = incoming.as_object() else {
+        return false;
+    };
+
+    let Some(detail_type) = current_object.get("type").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    if incoming_object.get("type").and_then(|value| value.as_str()) != Some(detail_type) {
+        return false;
+    }
+
+    let payload_field = match detail_type {
+        "reasoning.text" => "text",
+        "reasoning.encrypted" => "data",
+        "reasoning.summary" => "summary",
+        _ => return false,
+    };
+
+    for (field, incoming_value) in incoming_object {
+        if field == payload_field {
+            continue;
+        }
+        if current_object.get(field).is_some_and(|current_value| {
+            !current_value.is_null() && !incoming_value.is_null() && current_value != incoming_value
+        }) {
+            return false;
+        }
+    }
+
+    match (
+        current_object
+            .get(payload_field)
+            .and_then(|value| value.as_str()),
+        incoming_object
+            .get(payload_field)
+            .and_then(|value| value.as_str()),
+    ) {
+        (Some(current_payload), Some(incoming_payload)) => {
+            let mut joined = String::with_capacity(current_payload.len() + incoming_payload.len());
+            joined.push_str(current_payload);
+            joined.push_str(incoming_payload);
+            current_object.insert(payload_field.to_string(), serde_json::Value::String(joined));
+        }
+        (None, Some(_)) => {
+            current_object.insert(
+                payload_field.to_string(),
+                incoming_object[payload_field].clone(),
+            );
+        }
+        _ => {}
+    }
+
+    for (field, value) in incoming_object {
+        if field == payload_field {
+            continue;
+        }
+        if current_object
+            .get(field)
+            .is_none_or(serde_json::Value::is_null)
+        {
+            current_object.insert(field.clone(), value.clone());
+        }
+    }
+
+    true
+}
+
+fn append_reasoning_detail_chunk(
+    accumulated: &mut Vec<serde_json::Value>,
+    incoming: Vec<serde_json::Value>,
+) {
+    for fragment in incoming {
+        let merged = accumulated
+            .last_mut()
+            .is_some_and(|current| merge_reasoning_detail_fragment(current, &fragment));
+        if !merged {
+            accumulated.push(fragment);
+        }
+    }
+}
+
+fn take_reasoning_event(
+    text: &mut String,
+    details: &mut Vec<serde_json::Value>,
+) -> Option<ApiEvent> {
+    if text.is_empty() && details.is_empty() {
+        return None;
+    }
+
+    Some(ApiEvent::Reasoning {
+        text: (!text.is_empty()).then(|| std::mem::take(text)),
+        details: std::mem::take(details),
+    })
+}
+
 fn drain_tool_calls(tool_calls: &mut PendingToolCalls) -> Result<Vec<ApiEvent>> {
     use anyhow::Context as _;
 
@@ -288,6 +399,8 @@ async fn read_openai_sse(
     let mut cache_creation_tokens: u32 = 0;
     let mut provider_cost_usd: Option<f64> = None;
     let mut saw_finish_reason = false;
+    let mut reasoning_text = String::new();
+    let mut reasoning_details = Vec::new();
 
     loop {
         let chunk_result = tokio::select! {
@@ -309,6 +422,11 @@ async fn read_openai_sse(
             };
 
             if data == "[DONE]" {
+                if let Some(event) =
+                    take_reasoning_event(&mut reasoning_text, &mut reasoning_details)
+                {
+                    let _ = tx.send(event).await;
+                }
                 for event in drain_tool_calls(&mut tool_calls)? {
                     let _ = tx.send(event).await;
                 }
@@ -371,25 +489,20 @@ async fn read_openai_sse(
                     }
                 }
 
-                let reasoning_text = delta
+                if let Some(text) = delta
                     .get("reasoning")
                     .or_else(|| delta.get("reasoning_content"))
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.is_empty())
-                    .map(str::to_string);
-                let reasoning_details = delta
+                {
+                    reasoning_text.push_str(text);
+                }
+                let streamed_reasoning_details = delta
                     .get("reasoning_details")
                     .and_then(|value| value.as_array())
                     .cloned()
                     .unwrap_or_default();
-                if reasoning_text.is_some() || !reasoning_details.is_empty() {
-                    let _ = tx
-                        .send(ApiEvent::Reasoning {
-                            text: reasoning_text,
-                            details: reasoning_details,
-                        })
-                        .await;
-                }
+                append_reasoning_detail_chunk(&mut reasoning_details, streamed_reasoning_details);
 
                 // Tool calls
                 if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
@@ -417,6 +530,11 @@ async fn read_openai_sse(
                 // Check finish reason
                 if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
                     saw_finish_reason = true;
+                    if let Some(event) =
+                        take_reasoning_event(&mut reasoning_text, &mut reasoning_details)
+                    {
+                        let _ = tx.send(event).await;
+                    }
                     match reason {
                         "tool_calls" => {
                             for event in drain_tool_calls(&mut tool_calls)? {
@@ -461,6 +579,9 @@ async fn read_openai_sse(
 
     // Some compatible providers close cleanly after finish_reason instead of
     // sending [DONE]. Preserve that behavior, but only after a terminal event.
+    if let Some(event) = take_reasoning_event(&mut reasoning_text, &mut reasoning_details) {
+        let _ = tx.send(event).await;
+    }
     for event in drain_tool_calls(&mut tool_calls)? {
         let _ = tx.send(event).await;
     }
@@ -597,7 +718,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emits_streamed_reasoning_for_later_tool_rounds() {
+    async fn reconstructs_streamed_reasoning_for_later_tool_rounds() {
         let response = crate::test_support::sse_response(concat!(
             "data: {\"choices\":[{\"delta\":{\"reasoning\":\"think \"},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"carefully\",\"index\":0}]},\"finish_reason\":null}]}\n\n",
@@ -620,15 +741,92 @@ mod tests {
         assert!(matches!(
             rx.recv().await,
             Some(ApiEvent::Reasoning { text: Some(text), details })
-                if text == "think " && details.is_empty()
-        ));
-        assert!(matches!(
-            rx.recv().await,
-            Some(ApiEvent::Reasoning { text: None, details })
-                if details[0]["text"] == "carefully"
+                if text == "think " && details[0]["text"] == "carefully"
         ));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Usage(_))));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
+    }
+
+    #[tokio::test]
+    async fn coalesces_gemini_reasoning_fragments_before_replay() {
+        let response = crate::test_support::sse_response(concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"first \",\"format\":\"google-gemini-v1\",\"index\":0}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"second \",\"format\":\"google-gemini-v1\",\"index\":0}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"third\",\"format\":\"google-gemini-v1\",\"index\":0}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"signed-\",\"id\":\"call_123\",\"format\":\"google-gemini-v1\",\"index\":0}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"payload\",\"id\":\"call_123\",\"format\":\"google-gemini-v1\",\"index\":0}],\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/test\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_openai_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            "openrouter",
+            "google/gemini-3.7-flash",
+        )
+        .await
+        .unwrap();
+
+        let Some(ApiEvent::Reasoning {
+            text: None,
+            details,
+        }) = rx.recv().await
+        else {
+            panic!("expected reconstructed reasoning event");
+        };
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0]["type"], "reasoning.text");
+        assert_eq!(details[0]["text"], "first second third");
+        assert_eq!(details[1]["type"], "reasoning.encrypted");
+        assert_eq!(details[1]["data"], "signed-payload");
+        assert_eq!(details[1]["id"], "call_123");
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(ApiEvent::ToolUse { id, name, input })
+                if id == "call_123" && name == "Read" && input["file_path"] == "/tmp/test"
+        ));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Usage(_))));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
+
+        let provider = OpenAICompatProvider::new(
+            "https://openrouter.ai/api/v1",
+            "key",
+            "google/gemini-3.7-flash",
+            "openrouter",
+            None,
+        );
+        let messages = vec![Message::assistant_blocks(vec![
+            ContentBlock::Reasoning {
+                text: None,
+                details,
+            },
+            ContentBlock::ToolUse {
+                id: "call_123".to_string(),
+                name: "Read".to_string(),
+                input: json!({"file_path": "/tmp/test"}),
+            },
+        ])];
+        let body = provider.request_body(&messages, "system", &[], 1_000);
+
+        assert_eq!(
+            body["messages"][1]["reasoning_details"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            body["messages"][1]["reasoning_details"][0]["text"],
+            "first second third"
+        );
+        assert_eq!(
+            body["messages"][1]["reasoning_details"][1]["data"],
+            "signed-payload"
+        );
     }
 
     #[tokio::test]
