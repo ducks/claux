@@ -373,6 +373,7 @@ mod tests {
             protocol: OpenAIProtocol::ChatCompletions,
             api_key_env: "OPENROUTER_API_KEY".to_string(),
             reasoning_effort: None,
+            prompt_caching: false,
         }
     }
 

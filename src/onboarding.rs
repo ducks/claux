@@ -132,6 +132,9 @@ fn add_model_profile(
         table["api_key_env"] = value(specification.api_key_env);
         document["providers"][&provider_id] = Item::Table(table);
     }
+    if specification.prompt_caching {
+        document["providers"][&provider_id]["prompt_caching"] = value(true);
+    }
 
     let profile_base = format!("{}-{}", specification.id, slug(specification.model));
     let profile_id = unique_table_name(&document, "model_profiles", &profile_base, |item| {
@@ -296,6 +299,7 @@ struct ProviderSpecification<'a> {
     base_url: Option<&'static str>,
     protocol: &'static str,
     api_key_env: &'static str,
+    prompt_caching: bool,
     model: &'a str,
 }
 
@@ -308,6 +312,7 @@ impl<'a> ProviderSpecification<'a> {
                 base_url: None,
                 protocol: "chat_completions",
                 api_key_env: "ANTHROPIC_API_KEY",
+                prompt_caching: false,
                 model: model.unwrap_or("claude-sonnet-5"),
             },
             ConfigProvider::Openai => Self {
@@ -316,6 +321,7 @@ impl<'a> ProviderSpecification<'a> {
                 base_url: Some("https://api.openai.com/v1"),
                 protocol: "responses",
                 api_key_env: "OPENAI_API_KEY",
+                prompt_caching: false,
                 model: model.unwrap_or("gpt-5.6-sol"),
             },
             ConfigProvider::OpenRouter => Self {
@@ -324,6 +330,7 @@ impl<'a> ProviderSpecification<'a> {
                 base_url: Some("https://openrouter.ai/api/v1"),
                 protocol: "chat_completions",
                 api_key_env: "OPENROUTER_API_KEY",
+                prompt_caching: true,
                 model: model.unwrap_or("anthropic/claude-sonnet-5"),
             },
             ConfigProvider::Ollama => Self {
@@ -332,6 +339,7 @@ impl<'a> ProviderSpecification<'a> {
                 base_url: Some("http://localhost:11434/v1"),
                 protocol: "chat_completions",
                 api_key_env: "OLLAMA_API_KEY",
+                prompt_caching: false,
                 model: model.unwrap_or("llama3"),
             },
         }
@@ -682,6 +690,7 @@ mod tests {
             crate::config::OpenAIProtocol::ChatCompletions
         );
         assert_eq!(provider.api_key_env.as_deref(), Some("OPENROUTER_API_KEY"));
+        assert!(provider.prompt_caching);
         assert!(provider.api_key.is_none());
     }
 

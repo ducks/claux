@@ -305,15 +305,16 @@ fn build_provider(resolved: &config::ResolvedModel) -> Result<Box<dyn api::Provi
                 anyhow::anyhow!("saved provider '{}' has no base URL", binding.provider)
             })?;
             match binding.protocol {
-                config::OpenAIProtocol::ChatCompletions => {
-                    Ok(Box::new(api::OpenAICompatProvider::new(
+                config::OpenAIProtocol::ChatCompletions => Ok(Box::new(
+                    api::OpenAICompatProvider::new(
                         base_url,
                         &api_key,
                         &binding.model,
                         &binding.provider_name,
                         binding.reasoning_effort.as_deref(),
-                    )))
-                }
+                    )
+                    .with_prompt_caching(binding.prompt_caching),
+                )),
                 config::OpenAIProtocol::Responses => {
                     Ok(Box::new(api::OpenAIResponsesProvider::new(
                         base_url,

@@ -57,6 +57,9 @@ pub struct ProviderConfig {
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub api_key_cmd: Option<String>,
+    /// Ask compatible APIs to cache the stable prompt prefix across turns.
+    #[serde(default)]
+    pub prompt_caching: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +91,8 @@ pub struct ModelBinding {
     pub protocol: OpenAIProtocol,
     pub api_key_env: String,
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub prompt_caching: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -527,6 +532,7 @@ impl Config {
                     .clone()
                     .unwrap_or_else(|| default_env.to_string()),
                 reasoning_effort: profile.reasoning_effort.clone(),
+                prompt_caching: provider.prompt_caching,
             },
             metadata: self.resolve_metadata(Some(profile), &profile.model),
             api_key: provider.api_key.clone(),
@@ -573,6 +579,7 @@ impl Config {
                 protocol,
                 api_key_env: key_env,
                 reasoning_effort: self.openai_reasoning_effort.clone(),
+                prompt_caching: false,
             },
             metadata: self.resolve_metadata(None, model),
             api_key: key,
@@ -770,6 +777,7 @@ mod tests {
             base_url = "https://openrouter.ai/api/v1"
             name = "openrouter"
             api_key_env = "OPENROUTER_TEST_KEY"
+            prompt_caching = true
 
             [model_profiles.sonnet]
             provider = "anthropic"
@@ -792,6 +800,7 @@ mod tests {
             models[1].binding.base_url.as_deref(),
             Some("https://openrouter.ai/api/v1")
         );
+        assert!(models[1].binding.prompt_caching);
     }
 
     #[test]
