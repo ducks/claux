@@ -129,6 +129,9 @@ pub enum StreamEvent {
     ToolStart {
         name: String,
         summary: String,
+        /// Raw tool input, used by interactive clients for specialized
+        /// presentation. Execution still uses the original value below.
+        input: serde_json::Value,
     },
     ToolResult {
         is_error: bool,
@@ -914,6 +917,7 @@ impl Engine {
                             .send(StreamEvent::ToolStart {
                                 name: name.clone(),
                                 summary,
+                                input: input.clone(),
                             })
                             .await;
                         // Announcing a tool commits the attempt. The hook has

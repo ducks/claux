@@ -306,6 +306,7 @@ fn history_lines(app: &ChatApp) -> Vec<Line<'static>> {
             ChatMessage::Tool {
                 name,
                 summary,
+                detail,
                 status,
             } => {
                 let (indicator, indicator_color) = match status {
@@ -326,6 +327,12 @@ fn history_lines(app: &ChatApp) -> Vec<Line<'static>> {
                     ),
                     Span::styled(summary.clone(), Style::default().fg(app.theme.tool_summary)),
                 ]));
+                if let Some(detail) = detail {
+                    lines.push(Line::from(vec![
+                        Span::styled("  └─ ", Style::default().fg(app.theme.dim)),
+                        Span::styled(detail.clone(), Style::default().fg(app.theme.dim)),
+                    ]));
+                }
             }
         }
     }

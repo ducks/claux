@@ -11,6 +11,7 @@ mod input;
 pub mod markdown;
 mod screen;
 mod terminal;
+mod tool_display;
 mod ui;
 
 use anyhow::Result;
