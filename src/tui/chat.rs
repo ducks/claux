@@ -27,6 +27,7 @@ pub enum ChatMessage {
     Tool {
         name: String,
         summary: String,
+        detail: Option<String>,
         status: ToolStatus,
     },
 }
@@ -123,7 +124,34 @@ impl ChatApp {
         });
     }
 
+    #[cfg(test)]
     pub fn add_tool(&mut self, name: &str, summary: &str, status: ToolStatus) {
+        self.add_tool_presentation(name, summary, None, status);
+    }
+
+    pub fn add_tool_with_input(
+        &mut self,
+        name: &str,
+        summary: &str,
+        input: &serde_json::Value,
+        status: ToolStatus,
+    ) {
+        let presentation = super::tool_display::present(name, summary, input);
+        self.add_tool_presentation(
+            name,
+            &presentation.summary,
+            presentation.detail.as_deref(),
+            status,
+        );
+    }
+
+    fn add_tool_presentation(
+        &mut self,
+        name: &str,
+        summary: &str,
+        detail: Option<&str>,
+        status: ToolStatus,
+    ) {
         // A tool arriving means the model has responded; without this, a
         // turn that opens with tool calls (no text) leaves the "thinking"
         // spinner running under tool output and permission prompts.
@@ -132,6 +160,7 @@ impl ChatApp {
         self.messages.push(ChatMessage::Tool {
             name: crate::utils::sanitize_terminal_text(name),
             summary: crate::utils::sanitize_terminal_text(summary),
+            detail: detail.map(crate::utils::sanitize_terminal_text),
             status,
         });
     }
@@ -560,9 +589,14 @@ async fn drive_streaming<B: ratatui::backend::Backend>(
                             flush_stream_buffer(app);
                             app.add_message("user", &t);
                         }
-                        StreamEvent::ToolStart { name, summary, .. } => {
+                        StreamEvent::ToolStart { name, summary, input } => {
                             flush_stream_buffer(app);
-                            app.add_tool(&name, &summary, ToolStatus::Running);
+                            app.add_tool_with_input(
+                                &name,
+                                &summary,
+                                &input,
+                                ToolStatus::Running,
+                            );
                             running_tools.push_back(app.messages.len() - 1);
                             terminal.draw(|f| ui::draw_chat(f, app))?;
                         }
@@ -1107,6 +1141,7 @@ mod tests {
                 name,
                 summary,
                 status,
+                ..
             } => {
                 assert_eq!(name, "Bash");
                 assert_eq!(summary, "cargo build");
