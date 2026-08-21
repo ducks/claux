@@ -74,6 +74,12 @@ impl Utf8LineDecoder {
         std::str::from_utf8(&self.buffer)?;
         Ok(())
     }
+
+    /// Bytes received after the final complete line. Protocol diagnostics use
+    /// this to distinguish a clean EOF from a stream truncated mid-frame.
+    pub(super) fn pending_bytes(&self) -> &[u8] {
+        &self.buffer
+    }
 }
 
 /// Read an SSE response and send parsed events to the channel.
