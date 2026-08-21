@@ -20,10 +20,14 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new(api_key: AnthropicApiKey, model: &str) -> Self {
+        Self::with_base_url(api_key, model, "https://api.anthropic.com/v1")
+    }
+
+    pub fn with_base_url(api_key: AnthropicApiKey, model: &str, base_url: &str) -> Self {
         Self {
             api_key,
             model: model.to_string(),
-            api_url: "https://api.anthropic.com/v1/messages".to_string(),
+            api_url: format!("{}/messages", base_url.trim_end_matches('/')),
             http: reqwest::Client::new(),
         }
     }
@@ -197,6 +201,17 @@ fn mark_last_block(message: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_base_url_targets_compatible_messages_endpoint() {
+        let provider = AnthropicProvider::with_base_url(
+            AnthropicApiKey::new("key".to_string()),
+            "model",
+            "https://gateway.example/v1/",
+        );
+
+        assert_eq!(provider.api_url, "https://gateway.example/v1/messages");
+    }
     use crate::api::types::{ContentBlock, Message};
 
     fn body_with(messages: Vec<Message>) -> serde_json::Value {

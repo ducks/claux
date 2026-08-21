@@ -569,6 +569,10 @@ async fn read_openai_sse_body(
                 return Ok(());
             }
 
+            // Some compatible gateways emit the billed cost as a standalone
+            // terminal frame instead of nesting it under `usage`.
+            provider_cost_usd = parse_nonnegative_number(event.get("cost")).or(provider_cost_usd);
+
             // Check for usage in the chunk
             if let Some(usage) = event.get("usage") {
                 input_tokens = usage["prompt_tokens"]
@@ -584,10 +588,8 @@ async fn read_openai_sse_body(
                     .as_u64()
                     .unwrap_or(cache_creation_tokens as u64)
                     as u32;
-                provider_cost_usd = usage["cost"]
-                    .as_f64()
-                    .filter(|cost| cost.is_finite() && *cost >= 0.0)
-                    .or(provider_cost_usd);
+                provider_cost_usd =
+                    parse_nonnegative_number(usage.get("cost")).or(provider_cost_usd);
             }
 
             let Some(choices) = event.get("choices").and_then(|c| c.as_array()) else {
@@ -719,6 +721,14 @@ async fn read_openai_sse_body(
         .await;
     let _ = tx.send(ApiEvent::Done).await;
     Ok(())
+}
+
+fn parse_nonnegative_number(value: Option<&serde_json::Value>) -> Option<f64> {
+    let value = value?;
+    let number = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))?;
+    (number.is_finite() && number >= 0.0).then_some(number)
 }
 
 #[cfg(test)]
@@ -895,6 +905,39 @@ mod tests {
                 cache_creation_tokens: 10,
                 provider_cost_usd: Some(cost),
             })) if (cost - 0.00095).abs() < f64::EPSILON
+        ));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
+    }
+
+    #[tokio::test]
+    async fn captures_string_cost_from_standalone_terminal_frame() {
+        let response = crate::test_support::sse_response(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"complete\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3}}\n\n",
+            "data: {\"choices\":[],\"cost\":\"0.001234\"}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_openai_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            "compatible",
+            "model",
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Text(_))));
+        assert!(matches!(
+            rx.recv().await,
+            Some(ApiEvent::Usage(Usage {
+                provider_cost_usd: Some(cost),
+                ..
+            })) if (cost - 0.001234).abs() < f64::EPSILON
         ));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
     }

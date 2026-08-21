@@ -335,10 +335,13 @@ fn build_provider(resolved: &config::ResolvedModel) -> Result<Box<dyn api::Provi
                     binding.api_key_env
                 );
             }
-            Ok(Box::new(api::AnthropicProvider::new(
-                config::AnthropicApiKey::new(api_key),
-                &binding.model,
-            )))
+            let key = config::AnthropicApiKey::new(api_key);
+            Ok(Box::new(match binding.base_url.as_deref() {
+                Some(base_url) => {
+                    api::AnthropicProvider::with_base_url(key, &binding.model, base_url)
+                }
+                None => api::AnthropicProvider::new(key, &binding.model),
+            }))
         }
     }
 }
