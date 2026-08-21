@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
+use std::collections::VecDeque;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -395,6 +396,86 @@ async fn read_openai_sse(
     provider: &str,
     model: &str,
 ) -> Result<()> {
+    let mut diagnostics = OpenAIStreamDiagnostics::from_response(&response);
+    let result =
+        read_openai_sse_body(response, tx, cancel, provider, model, &mut diagnostics).await;
+    result.map_err(|error| anyhow::anyhow!("{error}; {}", diagnostics.render()))
+}
+
+const MAX_DIAGNOSTIC_FRAMES: usize = 4;
+const MAX_DIAGNOSTIC_FRAME_BYTES: usize = 2_048;
+
+#[derive(Debug)]
+struct OpenAIStreamDiagnostics {
+    status: reqwest::StatusCode,
+    headers: Vec<(String, String)>,
+    final_frames: VecDeque<String>,
+    partial_tail: Option<String>,
+}
+
+impl OpenAIStreamDiagnostics {
+    fn from_response(response: &reqwest::Response) -> Self {
+        const SAFE_HEADERS: &[&str] = &[
+            "content-type",
+            "server",
+            "x-request-id",
+            "request-id",
+            "cf-ray",
+        ];
+        let headers = SAFE_HEADERS
+            .iter()
+            .filter_map(|name| {
+                response
+                    .headers()
+                    .get(*name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(|value| ((*name).to_string(), value.to_string()))
+            })
+            .collect();
+        Self {
+            status: response.status(),
+            headers,
+            final_frames: VecDeque::new(),
+            partial_tail: None,
+        }
+    }
+
+    fn record_frame(&mut self, data: &str) {
+        let frame = crate::utils::truncate_str(data, MAX_DIAGNOSTIC_FRAME_BYTES).to_string();
+        if self.final_frames.len() == MAX_DIAGNOSTIC_FRAMES {
+            self.final_frames.pop_front();
+        }
+        self.final_frames.push_back(frame);
+    }
+
+    fn record_partial_tail(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let tail = String::from_utf8_lossy(bytes);
+        self.partial_tail =
+            Some(crate::utils::truncate_str(&tail, MAX_DIAGNOSTIC_FRAME_BYTES).to_string());
+    }
+
+    fn render(&self) -> String {
+        serde_json::json!({
+            "status": self.status.as_u16(),
+            "headers": self.headers.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
+            "final_sse_frames": self.final_frames,
+            "partial_tail": self.partial_tail,
+        })
+        .to_string()
+    }
+}
+
+async fn read_openai_sse_body(
+    response: reqwest::Response,
+    tx: mpsc::Sender<ApiEvent>,
+    cancel: CancellationToken,
+    provider: &str,
+    model: &str,
+    diagnostics: &mut OpenAIStreamDiagnostics,
+) -> Result<()> {
     use futures_util::StreamExt as _;
 
     let mut stream = response.bytes_stream();
@@ -430,6 +511,7 @@ async fn read_openai_sse(
             let Some(data) = line.strip_prefix("data: ") else {
                 continue;
             };
+            diagnostics.record_frame(data);
 
             if data == "[DONE]" {
                 if let Some(event) =
@@ -582,6 +664,7 @@ async fn read_openai_sse(
         }
     }
 
+    diagnostics.record_partial_tail(lines.pending_bytes());
     lines.finish()?;
     if !saw_finish_reason {
         anyhow::bail!("stream ended before a finish reason or [DONE] marker");
@@ -688,6 +771,11 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("before a finish reason"));
+        assert!(error.to_string().contains("\"status\":200"));
+        assert!(error
+            .to_string()
+            .contains("\\\"content\\\":\\\"partial\\\""));
+        assert!(error.to_string().contains("\"partial_tail\":null"));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "partial"));
         assert!(rx.recv().await.is_none());
     }
