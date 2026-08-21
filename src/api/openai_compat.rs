@@ -19,6 +19,7 @@ pub struct OpenAICompatProvider {
     provider_name: String,
     reasoning_effort: Option<String>,
     prompt_caching: bool,
+    allow_eof_without_finish_reason: bool,
     http: reqwest::Client,
 }
 
@@ -39,12 +40,18 @@ impl OpenAICompatProvider {
             provider_name: name.to_string(),
             reasoning_effort: reasoning_effort.map(str::to_string),
             prompt_caching: false,
+            allow_eof_without_finish_reason: false,
             http: reqwest::Client::new(),
         }
     }
 
     pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
         self.prompt_caching = enabled;
+        self
+    }
+
+    pub fn with_eof_without_finish_reason(mut self, enabled: bool) -> Self {
+        self.allow_eof_without_finish_reason = enabled;
         self
     }
 
@@ -242,9 +249,17 @@ impl Provider for OpenAICompatProvider {
         let error_tx = tx.clone();
         let provider_name = self.provider_name.clone();
         let model = self.model.clone();
+        let allow_eof_without_finish_reason = self.allow_eof_without_finish_reason;
         tokio::spawn(async move {
-            if let Err(e) =
-                read_openai_sse(response, tx, reader_cancel, &provider_name, &model).await
+            if let Err(e) = read_openai_sse(
+                response,
+                tx,
+                reader_cancel,
+                &provider_name,
+                &model,
+                allow_eof_without_finish_reason,
+            )
+            .await
             {
                 // Classify before wrapping: the prefix is for display, and
                 // must not erase what the failure was.
@@ -394,6 +409,7 @@ async fn read_openai_sse(
     cancel: CancellationToken,
     provider: &str,
     model: &str,
+    allow_eof_without_finish_reason: bool,
 ) -> Result<()> {
     use futures_util::StreamExt as _;
 
@@ -582,8 +598,12 @@ async fn read_openai_sse(
         }
     }
 
+    let ended_mid_frame = !lines.pending_bytes().is_empty();
     lines.finish()?;
-    if !saw_finish_reason {
+    if ended_mid_frame {
+        anyhow::bail!("stream ended in the middle of an SSE frame");
+    }
+    if !saw_finish_reason && !allow_eof_without_finish_reason {
         anyhow::bail!("stream ended before a finish reason or [DONE] marker");
     }
 
@@ -683,13 +703,44 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let error = read_openai_sse(response, tx, CancellationToken::new(), "openai", "model")
-            .await
-            .unwrap_err();
+        let error = read_openai_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            "openai",
+            "model",
+            false,
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.to_string().contains("before a finish reason"));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "partial"));
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_policy_can_accept_clean_eof_without_finish_reason() {
+        let response = crate::test_support::sse_response(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"complete\"},\"finish_reason\":null}]}\n\n",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_openai_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            "compatible",
+            "model",
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "complete"));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Usage(_))));
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
     }
 
     #[tokio::test]
@@ -700,9 +751,16 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        read_openai_sse(response, tx, CancellationToken::new(), "openai", "model")
-            .await
-            .unwrap();
+        read_openai_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            "openai",
+            "model",
+            false,
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "complete"));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Usage(_))));
@@ -725,6 +783,7 @@ mod tests {
             CancellationToken::new(),
             "openrouter",
             "deepseek/deepseek-v4-flash",
+            false,
         )
         .await
         .unwrap();
@@ -760,6 +819,7 @@ mod tests {
             CancellationToken::new(),
             "openrouter",
             "deepseek/deepseek-v4-flash-0731",
+            false,
         )
         .await
         .unwrap();
@@ -792,6 +852,7 @@ mod tests {
             CancellationToken::new(),
             "openrouter",
             "google/gemini-3.7-flash",
+            false,
         )
         .await
         .unwrap();
@@ -863,9 +924,16 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        read_openai_sse(response, tx, CancellationToken::new(), "openai", "model")
-            .await
-            .unwrap();
+        read_openai_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            "openai",
+            "model",
+            false,
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(rx.recv().await, Some(ApiEvent::Text(text)) if text == "partial"));
         assert!(matches!(
@@ -887,9 +955,16 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let error = read_openai_sse(response, tx, CancellationToken::new(), "openai", "model")
-            .await
-            .unwrap_err();
+        let error = read_openai_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            "openai",
+            "model",
+            false,
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.to_string().contains("invalid arguments"));
         assert!(rx.recv().await.is_none());
@@ -900,9 +975,16 @@ mod tests {
         let response = crate::test_support::sse_response("data: {not json}\n\n").await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let error = read_openai_sse(response, tx, CancellationToken::new(), "openai", "model")
-            .await
-            .unwrap_err();
+        let error = read_openai_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            "openai",
+            "model",
+            false,
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.to_string().contains("invalid JSON"));
         assert!(rx.recv().await.is_none());
@@ -922,6 +1004,7 @@ mod tests {
             CancellationToken::new(),
             "openrouter",
             "poolside/laguna",
+            false,
         )
         .await
         .unwrap();

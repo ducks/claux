@@ -74,6 +74,10 @@ impl Utf8LineDecoder {
         std::str::from_utf8(&self.buffer)?;
         Ok(())
     }
+
+    pub(super) fn pending_bytes(&self) -> &[u8] {
+        &self.buffer
+    }
 }
 
 /// Read an SSE response and send parsed events to the channel.
