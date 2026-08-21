@@ -441,13 +441,13 @@ async fn read_openai_sse(
                     let _ = tx.send(event).await;
                 }
                 let _ = tx
-                    .send(ApiEvent::Usage(Usage {
+                    .send(ApiEvent::Usage(Usage::from_openai_totals(
                         input_tokens,
                         output_tokens,
                         cache_read_tokens,
                         cache_creation_tokens,
                         provider_cost_usd,
-                    }))
+                    )))
                     .await;
                 let _ = tx.send(ApiEvent::Done).await;
                 return Ok(());
@@ -597,13 +597,13 @@ async fn read_openai_sse(
     }
 
     let _ = tx
-        .send(ApiEvent::Usage(Usage {
+        .send(ApiEvent::Usage(Usage::from_openai_totals(
             input_tokens,
             output_tokens,
             cache_read_tokens,
             cache_creation_tokens,
             provider_cost_usd,
-        }))
+        )))
         .await;
     let _ = tx.send(ApiEvent::Done).await;
     Ok(())
@@ -733,7 +733,7 @@ mod tests {
         assert!(matches!(
             rx.recv().await,
             Some(ApiEvent::Usage(Usage {
-                input_tokens: 194,
+                input_tokens: 144,
                 output_tokens: 2,
                 cache_read_tokens: 40,
                 cache_creation_tokens: 10,

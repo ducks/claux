@@ -59,12 +59,37 @@ pub struct ToolDefinition {
 /// Token usage from the API.
 #[derive(Debug, Clone, Default)]
 pub struct Usage {
+    /// Fresh, non-cached input tokens. Cache reads and writes are tracked in
+    /// their own mutually exclusive fields.
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cache_read_tokens: u32,
     pub cache_creation_tokens: u32,
     /// Exact charge reported by the provider for this API request.
     pub provider_cost_usd: Option<f64>,
+}
+
+impl Usage {
+    /// Normalize OpenAI usage, whose top-level input count includes cached
+    /// tokens, into the mutually exclusive token classes Claux uses for cost
+    /// and context accounting.
+    pub fn from_openai_totals(
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_tokens: u32,
+        cache_creation_tokens: u32,
+        provider_cost_usd: Option<f64>,
+    ) -> Self {
+        Self {
+            input_tokens: input_tokens
+                .saturating_sub(cache_read_tokens)
+                .saturating_sub(cache_creation_tokens),
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            provider_cost_usd,
+        }
+    }
 }
 
 impl Message {

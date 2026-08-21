@@ -1103,6 +1103,19 @@ impl Engine {
                 let _ = tx.send(StreamEvent::Interrupted).await;
                 return Ok(());
             }
+
+            // A one-shot agent can execute dozens of tool rounds inside one
+            // user turn. Checking only at the turn boundary lets that history
+            // grow all the way to the provider limit, so compact at the safe
+            // boundary after tool results have paired every tool call.
+            if self.maybe_auto_compact().await? {
+                let _ = tx
+                    .send(StreamEvent::Notice(
+                        "conversation auto-compacted to free context".to_string(),
+                    ))
+                    .await;
+                self.checkpoint_transcript();
+            }
         }
 
         Ok(())
@@ -1511,6 +1524,63 @@ mod tests {
     struct CompactionTrackingProvider {
         resets: Arc<AtomicUsize>,
         complete: bool,
+    }
+
+    struct WithinTurnCompactionProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for WithinTurnCompactionProvider {
+        fn name(&self) -> &str {
+            "within-turn-compaction"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = mpsc::channel(4);
+            match call {
+                0 => {
+                    tx.send(ApiEvent::Usage(crate::api::types::Usage {
+                        input_tokens: 110_000,
+                        ..Default::default()
+                    }))
+                    .await
+                    .unwrap();
+                    tx.send(ApiEvent::ToolUse {
+                        id: "read-1".to_string(),
+                        name: "Read".to_string(),
+                        input: serde_json::json!({"file_path": "/dev/null"}),
+                    })
+                    .await
+                    .unwrap();
+                    tx.send(ApiEvent::Done).await.unwrap();
+                }
+                1 => {
+                    tx.send(ApiEvent::Text("current task and progress".to_string()))
+                        .await
+                        .unwrap();
+                    tx.send(ApiEvent::Done).await.unwrap();
+                }
+                _ => {
+                    tx.send(ApiEvent::Text("finished".to_string()))
+                        .await
+                        .unwrap();
+                    tx.send(ApiEvent::Done).await.unwrap();
+                }
+            }
+            drop(tx);
+            Ok(ProviderStream::new(rx, cancel.child_token()))
+        }
     }
 
     #[async_trait::async_trait]
@@ -2000,6 +2070,33 @@ mod tests {
             engine.estimated_context_tokens() < 1_000,
             "post-compaction estimate must not inherit the old total"
         );
+    }
+
+    #[tokio::test]
+    async fn long_tool_loop_compacts_between_model_rounds() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Box::new(WithinTurnCompactionProvider {
+            calls: calls.clone(),
+        });
+        let mut engine =
+            Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Bypass);
+
+        let result = engine
+            .submit(
+                "repair the host",
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result, "finished");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(engine.messages().iter().any(|message| {
+            matches!(
+                &message.content,
+                MessageContent::Text(text) if text == "Here is a summary of our conversation so far:"
+            )
+        }));
     }
 
     #[test]
