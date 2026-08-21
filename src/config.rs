@@ -518,7 +518,9 @@ impl Config {
             ProviderKind::Openai => "OPENAI_API_KEY",
         };
         let base_url = match provider.kind {
-            ProviderKind::Anthropic => None,
+            // Anthropic-compatible gateways may expose the Messages API at a
+            // custom root. A missing URL retains the official Anthropic API.
+            ProviderKind::Anthropic => provider.base_url.clone(),
             ProviderKind::Openai => Some(provider.base_url.clone().ok_or_else(|| {
                 anyhow::anyhow!("provider '{}' is missing base_url", profile.provider)
             })?),
@@ -784,6 +786,7 @@ mod tests {
 
             [providers.anthropic]
             type = "anthropic"
+            base_url = "https://gateway.example/v1"
             api_key_env = "ANTHROPIC_TEST_KEY"
 
             [providers.openrouter]
@@ -810,6 +813,10 @@ mod tests {
         let models = config.selectable_models().unwrap();
         assert_eq!(models[0].binding.profile, "sonnet");
         assert_eq!(models[0].binding.provider_kind, ProviderKind::Anthropic);
+        assert_eq!(
+            models[0].binding.base_url.as_deref(),
+            Some("https://gateway.example/v1")
+        );
         assert_eq!(models[1].binding.profile, "gpt");
         assert_eq!(
             models[1].binding.base_url.as_deref(),
