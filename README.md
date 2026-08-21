@@ -254,6 +254,9 @@ base_url = "https://api.openai.com/v1"
 name = "openai"
 protocol = "responses"
 api_key_env = "OPENAI_API_KEY"
+# Compatibility escape hatch for endpoints that close a complete SSE stream
+# without a finish_reason or [DONE]. Keep false unless the endpoint requires it.
+allow_eof_without_finish_reason = false
 
 [model_profiles.sonnet]
 provider = "anthropic"

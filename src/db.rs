@@ -374,6 +374,7 @@ mod tests {
             api_key_env: "OPENROUTER_API_KEY".to_string(),
             reasoning_effort: None,
             prompt_caching: false,
+            allow_eof_without_finish_reason: false,
         }
     }
 

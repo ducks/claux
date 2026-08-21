@@ -218,6 +218,12 @@ fn migrate_legacy_model(document: &mut DocumentMut) {
         copy_value(document, &mut provider, "openai_api_key", "api_key");
         copy_value(document, &mut provider, "openai_api_key_env", "api_key_env");
         copy_value(document, &mut provider, "openai_api_key_cmd", "api_key_cmd");
+        copy_value(
+            document,
+            &mut provider,
+            "openai_allow_eof_without_finish_reason",
+            "allow_eof_without_finish_reason",
+        );
     } else {
         provider["name"] = value("anthropic");
         copy_value(document, &mut provider, "api_key", "api_key");

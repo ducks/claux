@@ -60,6 +60,11 @@ pub struct ProviderConfig {
     /// Ask compatible APIs to cache the stable prompt prefix across turns.
     #[serde(default)]
     pub prompt_caching: bool,
+    /// Accept a clean SSE EOF even when a compatible endpoint omits both a
+    /// finish reason and the `[DONE]` marker. Strict by default because EOF
+    /// alone cannot prove that a response was complete.
+    #[serde(default)]
+    pub allow_eof_without_finish_reason: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +98,8 @@ pub struct ModelBinding {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub prompt_caching: bool,
+    #[serde(default)]
+    pub allow_eof_without_finish_reason: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +229,10 @@ pub struct Config {
     /// Optional reasoning effort for OpenAI-compatible APIs.
     #[serde(default)]
     pub openai_reasoning_effort: Option<String>,
+
+    /// Legacy equivalent of providers.<name>.allow_eof_without_finish_reason.
+    #[serde(default)]
+    pub openai_allow_eof_without_finish_reason: bool,
 
     /// Per-model pricing overrides in USD per million tokens.
     #[serde(default)]
@@ -389,6 +400,7 @@ impl Default for Config {
             openai_api_key_cmd: None,
             openai_protocol: OpenAIProtocol::default(),
             openai_reasoning_effort: None,
+            openai_allow_eof_without_finish_reason: false,
             model_pricing: std::collections::HashMap::new(),
             openai_provider_name: None,
             plugins: Vec::new(),
@@ -533,6 +545,7 @@ impl Config {
                     .unwrap_or_else(|| default_env.to_string()),
                 reasoning_effort: profile.reasoning_effort.clone(),
                 prompt_caching: provider.prompt_caching,
+                allow_eof_without_finish_reason: provider.allow_eof_without_finish_reason,
             },
             metadata: self.resolve_metadata(Some(profile), &profile.model),
             api_key: provider.api_key.clone(),
@@ -580,6 +593,7 @@ impl Config {
                 api_key_env: key_env,
                 reasoning_effort: self.openai_reasoning_effort.clone(),
                 prompt_caching: false,
+                allow_eof_without_finish_reason: self.openai_allow_eof_without_finish_reason,
             },
             metadata: self.resolve_metadata(None, model),
             api_key: key,
@@ -778,6 +792,7 @@ mod tests {
             name = "openrouter"
             api_key_env = "OPENROUTER_TEST_KEY"
             prompt_caching = true
+            allow_eof_without_finish_reason = true
 
             [model_profiles.sonnet]
             provider = "anthropic"
@@ -801,6 +816,7 @@ mod tests {
             Some("https://openrouter.ai/api/v1")
         );
         assert!(models[1].binding.prompt_caching);
+        assert!(models[1].binding.allow_eof_without_finish_reason);
     }
 
     #[test]
