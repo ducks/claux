@@ -374,19 +374,19 @@ fn translate_event(event: &Value, provider: &str, model: &str) -> Vec<ApiEvent> 
         "response.completed" => {
             let usage = &event["response"]["usage"];
             vec![
-                ApiEvent::Usage(Usage {
-                    input_tokens: usage["input_tokens"].as_u64().unwrap_or(0) as u32,
-                    output_tokens: usage["output_tokens"].as_u64().unwrap_or(0) as u32,
-                    cache_read_tokens: usage["input_tokens_details"]["cached_tokens"]
+                ApiEvent::Usage(Usage::from_openai_totals(
+                    usage["input_tokens"].as_u64().unwrap_or(0) as u32,
+                    usage["output_tokens"].as_u64().unwrap_or(0) as u32,
+                    usage["input_tokens_details"]["cached_tokens"]
                         .as_u64()
                         .unwrap_or(0) as u32,
-                    cache_creation_tokens: usage["input_tokens_details"]["cache_write_tokens"]
+                    usage["input_tokens_details"]["cache_write_tokens"]
                         .as_u64()
                         .unwrap_or(0) as u32,
-                    provider_cost_usd: usage["cost"]
+                    usage["cost"]
                         .as_f64()
                         .filter(|cost| cost.is_finite() && *cost >= 0.0),
-                }),
+                )),
                 ApiEvent::Done,
             ]
         }
@@ -713,7 +713,7 @@ mod tests {
         assert!(matches!(
             &completed[0],
             ApiEvent::Usage(Usage {
-                input_tokens: 12,
+                input_tokens: 7,
                 output_tokens: 4,
                 cache_read_tokens: 3,
                 cache_creation_tokens: 2,
