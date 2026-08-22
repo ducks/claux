@@ -18,6 +18,7 @@ pub type ProviderFactory = Box<dyn Fn() -> Box<dyn Provider> + Send + Sync>;
 pub struct AgentTool {
     make_provider: ProviderFactory,
     model: String,
+    metadata: crate::model::ModelMetadata,
     /// Permission mode inherited from the parent session. A sub-agent runs
     /// non-interactively (no prompt to surface), so anything the parent's
     /// mode would prompt for is denied rather than auto-run — but Plan's
@@ -36,6 +37,7 @@ impl AgentTool {
     pub fn new(
         make_provider: ProviderFactory,
         model: String,
+        metadata: crate::model::ModelMetadata,
         permission_mode: PermissionMode,
         trusted: bool,
         sandbox_policy: Arc<SandboxPolicy>,
@@ -44,6 +46,7 @@ impl AgentTool {
         Self {
             make_provider,
             model,
+            metadata,
             permission_mode,
             trusted,
             sandbox_policy,
@@ -129,6 +132,7 @@ impl Tool for AgentTool {
         let permissions = PermissionChecker::new(self.permission_mode);
 
         let mut engine = Engine::new(provider, tools, permissions, &self.model);
+        engine.set_model_metadata(self.metadata);
         engine.set_auto_compact_threshold(0.8); // Default for sub-agents
 
         let base_prompt = context::build_system_prompt(self.trusted).await?;
@@ -229,6 +233,7 @@ mod tests {
         let tool = AgentTool::new(
             factory,
             "test".into(),
+            crate::model::built_in_metadata("test"),
             mode,
             true,
             sandbox_policy,

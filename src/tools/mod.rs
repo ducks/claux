@@ -76,6 +76,7 @@ impl ToolRegistry {
     pub fn new_with_agent_factory(
         factory: agent::ProviderFactory,
         model: String,
+        metadata: crate::model::ModelMetadata,
         permission_mode: crate::permissions::PermissionMode,
         trusted: bool,
         sandbox_policy: Arc<SandboxPolicy>,
@@ -94,6 +95,7 @@ impl ToolRegistry {
                 Box::new(agent::AgentTool::new(
                     factory,
                     model,
+                    metadata,
                     permission_mode,
                     trusted,
                     sandbox_policy,
@@ -248,6 +250,7 @@ mod tests {
         let reg = ToolRegistry::new_with_agent_factory(
             factory,
             "model".into(),
+            crate::model::built_in_metadata("model"),
             crate::permissions::PermissionMode::Default,
             true,
             Arc::new(SandboxPolicy::unrestricted_for_tests()),

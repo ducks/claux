@@ -106,6 +106,8 @@ pub struct ModelBinding {
 pub struct ResolvedModel {
     pub binding: ModelBinding,
     pub metadata: crate::model::ModelMetadata,
+    /// A configured context window always wins over provider discovery.
+    pub context_window_override: Option<usize>,
     pub api_key: Option<String>,
     pub api_key_cmd: Option<String>,
 }
@@ -497,6 +499,9 @@ impl Config {
         Ok(ResolvedModel {
             binding: binding.clone(),
             metadata: self.resolve_metadata(profile, &binding.model),
+            context_window_override: profile
+                .and_then(|profile| profile.context_window)
+                .filter(|window| *window > 0),
             api_key,
             api_key_cmd,
         })
@@ -550,6 +555,7 @@ impl Config {
                 allow_eof_without_finish_reason: provider.allow_eof_without_finish_reason,
             },
             metadata: self.resolve_metadata(Some(profile), &profile.model),
+            context_window_override: profile.context_window.filter(|window| *window > 0),
             api_key: provider.api_key.clone(),
             api_key_cmd: provider.api_key_cmd.clone(),
         })
@@ -598,6 +604,7 @@ impl Config {
                 allow_eof_without_finish_reason: self.openai_allow_eof_without_finish_reason,
             },
             metadata: self.resolve_metadata(None, model),
+            context_window_override: None,
             api_key: key,
             api_key_cmd: key_cmd,
         })

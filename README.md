@@ -273,8 +273,10 @@ reasoning_effort = "medium"
 # such as OpenRouter. Returned reasoning state is preserved across tool rounds
 # but is not rendered as assistant text.
 
-# Optional per-profile metadata overrides. These take precedence over built-in
-# model knowledge and the legacy model_pricing table.
+# Optional per-profile metadata overrides. OpenRouter context windows are
+# discovered automatically and cached locally; an explicit value takes
+# precedence. Other compatible providers use built-in knowledge or this
+# override because their model-catalog APIs are not standardized.
 # context_window = 1050000
 # [model_profiles.openai-coder.pricing]
 # input = 5.0
