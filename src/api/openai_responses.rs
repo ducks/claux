@@ -214,8 +214,30 @@ fn convert_messages(messages: &[Message], continuation: bool) -> Vec<Value> {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                if !text.is_empty() {
-                    input.push(json!({ "role": message.role, "content": text }));
+                let images = blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Image { source } => Some(json!({
+                            "type": "input_image",
+                            "image_url": format!(
+                                "data:{};base64,{}",
+                                source.media_type, source.data
+                            ),
+                        })),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !text.is_empty() || !images.is_empty() {
+                    if images.is_empty() {
+                        input.push(json!({ "role": message.role, "content": text }));
+                    } else {
+                        let mut content = Vec::new();
+                        if !text.is_empty() {
+                            content.push(json!({"type": "input_text", "text": text}));
+                        }
+                        content.extend(images);
+                        input.push(json!({ "role": message.role, "content": content }));
+                    }
                 }
 
                 for block in blocks {
@@ -409,6 +431,7 @@ fn translate_event(event: &Value, provider: &str, model: &str) -> Vec<ApiEvent> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::ImageSource;
 
     #[test]
     fn maps_tools_to_responses_shape() {
@@ -420,6 +443,26 @@ mod tests {
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["name"], "Read");
         assert!(tools[0].get("function").is_none());
+    }
+
+    #[test]
+    fn converts_image_blocks_to_responses_content_parts() {
+        let messages = vec![Message::user_with_images(
+            "describe it",
+            vec![ImageSource {
+                source_type: "base64".to_string(),
+                media_type: "image/jpeg".to_string(),
+                data: "aGVsbG8=".to_string(),
+            }],
+        )];
+        let input = convert_messages(&messages, false);
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(
+            content[0],
+            json!({"type": "input_text", "text": "describe it"})
+        );
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "data:image/jpeg;base64,aGVsbG8=");
     }
 
     #[test]

@@ -74,6 +74,7 @@ impl OpenAICompatProvider {
                 MessageContent::Blocks(blocks) => {
                     // Flatten blocks into OpenAI format
                     let mut text_parts = Vec::new();
+                    let mut image_parts = Vec::new();
                     let mut tool_calls = Vec::new();
                     let mut tool_results = Vec::new();
                     let mut reasoning_text = String::new();
@@ -83,6 +84,17 @@ impl OpenAICompatProvider {
                         match block {
                             ContentBlock::Text { text } => {
                                 text_parts.push(text.clone());
+                            }
+                            ContentBlock::Image { source } => {
+                                image_parts.push(json!({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": format!(
+                                            "data:{};base64,{}",
+                                            source.media_type, source.data
+                                        )
+                                    }
+                                }));
                             }
                             ContentBlock::Reasoning { text, details } => {
                                 if let Some(text) = text {
@@ -132,11 +144,23 @@ impl OpenAICompatProvider {
                         for result in tool_results {
                             out.push(result);
                         }
-                    } else if !text_parts.is_empty() {
-                        out.push(json!({
-                            "role": msg.role,
-                            "content": text_parts.join("\n"),
-                        }));
+                    } else if !text_parts.is_empty() || !image_parts.is_empty() {
+                        if image_parts.is_empty() {
+                            out.push(json!({
+                                "role": msg.role,
+                                "content": text_parts.join("\n"),
+                            }));
+                        } else {
+                            let mut content = text_parts
+                                .into_iter()
+                                .map(|text| json!({"type": "text", "text": text}))
+                                .collect::<Vec<_>>();
+                            content.extend(image_parts);
+                            out.push(json!({
+                                "role": msg.role,
+                                "content": content,
+                            }));
+                        }
                     }
                 }
             }
@@ -734,6 +758,7 @@ fn parse_nonnegative_number(value: Option<&serde_json::Value>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::ImageSource;
 
     #[test]
     fn requests_streamed_usage() {
@@ -744,6 +769,26 @@ mod tests {
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert!(body.get("reasoning").is_none());
         assert!(body.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn converts_image_blocks_to_openai_content_parts() {
+        let messages = vec![Message::user_with_images(
+            "describe it",
+            vec![ImageSource {
+                source_type: "base64".to_string(),
+                media_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+            }],
+        )];
+        let converted = OpenAICompatProvider::convert_messages(&messages, "system");
+        let content = converted[1]["content"].as_array().unwrap();
+        assert_eq!(content[0], json!({"type": "text", "text": "describe it"}));
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
     }
 
     #[test]

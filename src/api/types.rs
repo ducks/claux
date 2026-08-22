@@ -22,6 +22,11 @@ pub enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
 
+    /// Base64-encoded image input. The nested source shape is accepted by
+    /// Anthropic directly and translated by the OpenAI-family adapters.
+    #[serde(rename = "image")]
+    Image { source: ImageSource },
+
     /// Provider reasoning state retained for multi-round tool use. This is
     /// deliberately not rendered as assistant text.
     #[serde(rename = "reasoning")]
@@ -46,6 +51,14 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageSource {
+    #[serde(rename = "type")]
+    pub source_type: String,
+    pub media_type: String,
+    pub data: String,
 }
 
 /// Tool definition sent to the API.
@@ -104,6 +117,21 @@ impl Message {
         Self {
             role: "assistant".to_string(),
             content: MessageContent::Text(text.to_string()),
+        }
+    }
+
+    pub fn user_with_images(text: &str, images: Vec<ImageSource>) -> Self {
+        let mut blocks = vec![ContentBlock::Text {
+            text: text.to_string(),
+        }];
+        blocks.extend(
+            images
+                .into_iter()
+                .map(|source| ContentBlock::Image { source }),
+        );
+        Self {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(blocks),
         }
     }
 
@@ -176,6 +204,22 @@ mod tests {
         assert_eq!(blocks[0]["tool_use_id"], "tu_123");
         // is_error should be absent when None
         assert!(blocks[0].get("is_error").is_none());
+    }
+
+    #[test]
+    fn image_message_serializes_for_anthropic() {
+        let msg = Message::user_with_images(
+            "describe it",
+            vec![ImageSource {
+                source_type: "base64".to_string(),
+                media_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+            }],
+        );
+        let json = serde_json::to_value(msg).unwrap();
+        assert_eq!(json["content"][1]["type"], "image");
+        assert_eq!(json["content"][1]["source"]["type"], "base64");
+        assert_eq!(json["content"][1]["source"]["media_type"], "image/png");
     }
 
     #[test]

@@ -298,7 +298,9 @@ fn observed_contract(messages: &[Message]) -> ObservedContract {
                     observed.tool_error_count += usize::from(is_error == &Some(true));
                     observed.tool_results.push(content.clone());
                 }
-                ContentBlock::Text { .. } | ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Text { .. }
+                | ContentBlock::Image { .. }
+                | ContentBlock::Reasoning { .. } => {}
             }
         }
     }

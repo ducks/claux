@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::api::types::ImageSource;
 #[cfg(test)]
 use crate::api::ProviderStream;
 use crate::api::{ApiEvent, ApiFailure, ApiFailureKind, ContentBlock, Message, Provider};
@@ -37,6 +38,7 @@ pub struct Engine {
     context_window: usize,
     auto_compact_threshold: f64,
     steering: SteeringQueue,
+    pending_images: Vec<ImageSource>,
     plugins: Option<Arc<PluginRegistry>>,
     checkpoint_enabled: bool,
     pending_checkpoint: Option<PendingCheckpoint>,
@@ -178,6 +180,7 @@ impl Engine {
             context_window: crate::model::built_in_metadata(model).context_window,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
+            pending_images: Vec::new(),
             plugins: None,
             checkpoint_enabled: true,
             pending_checkpoint: None,
@@ -212,6 +215,7 @@ impl Engine {
             context_window: crate::model::built_in_metadata("test").context_window,
             auto_compact_threshold: 0.8,
             steering,
+            pending_images: Vec::new(),
             plugins: None,
             checkpoint_enabled: false,
             pending_checkpoint: None,
@@ -292,6 +296,19 @@ impl Engine {
     /// push typed-mid-turn messages through this handle.
     pub fn steering_queue(&self) -> SteeringQueue {
         self.steering.clone()
+    }
+
+    pub fn queue_image(&mut self, image: ImageSource) -> usize {
+        self.pending_images.push(image);
+        self.pending_images.len()
+    }
+
+    fn take_user_message(&mut self, text: &str) -> Message {
+        if self.pending_images.is_empty() {
+            Message::user(text)
+        } else {
+            Message::user_with_images(text, std::mem::take(&mut self.pending_images))
+        }
     }
 
     /// Drain queued steering messages into the conversation as user
@@ -718,7 +735,37 @@ impl Engine {
             text
         });
 
-        let result = self.run_turn(user_input, tx, false, cancel).await;
+        let message = self.take_user_message(user_input);
+        let result = self.run_turn(message, tx, false, cancel).await;
+        self.finish_recording();
+        let text = collector.await.unwrap_or_default();
+        self.finish_checkpoint();
+        self.fire_hook(&HookTrigger::OnTurnEnd).await;
+        result?;
+        Ok(text)
+    }
+
+    /// Submit a fully constructed user message, used by one-shot image input.
+    pub async fn submit_message(
+        &mut self,
+        message: Message,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String> {
+        let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
+        self.start_recording();
+        self.begin_checkpoint();
+        let collector = tokio::spawn(async move {
+            let mut text = String::new();
+            while let Some(event) = rx.recv().await {
+                match event {
+                    StreamEvent::Text(t) => text.push_str(&t),
+                    StreamEvent::Retry(_) => text.clear(),
+                    _ => {}
+                }
+            }
+            text
+        });
+        let result = self.run_turn(message, tx, false, cancel).await;
         self.finish_recording();
         let text = collector.await.unwrap_or_default();
         self.finish_checkpoint();
@@ -737,7 +784,8 @@ impl Engine {
     ) -> Result<()> {
         self.start_recording();
         self.begin_checkpoint();
-        let result = self.run_turn(user_input, tx, true, cancel).await;
+        let message = self.take_user_message(user_input);
+        let result = self.run_turn(message, tx, true, cancel).await;
         self.finish_recording();
         self.finish_checkpoint();
         self.fire_hook(&HookTrigger::OnTurnEnd).await;
@@ -752,7 +800,7 @@ impl Engine {
     /// and wait, or deny with a pointer at permission_mode config.
     async fn run_turn(
         &mut self,
-        user_input: &str,
+        user_message: Message,
         tx: mpsc::Sender<StreamEvent>,
         interactive: bool,
         cancel: tokio_util::sync::CancellationToken,
@@ -765,7 +813,7 @@ impl Engine {
                 ))
                 .await;
         }
-        self.messages.push(Message::user(user_input));
+        self.messages.push(user_message);
         self.checkpoint_transcript();
 
         let mut recovery_attempts = 0;
@@ -2213,6 +2261,7 @@ mod tests {
             context_window: 128_000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
+            pending_images: Vec::new(),
             plugins: None,
             checkpoint_enabled: false,
             pending_checkpoint: None,
@@ -2296,6 +2345,7 @@ mod tests {
             context_window: 128_000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
+            pending_images: Vec::new(),
             plugins: None,
             checkpoint_enabled: false,
             pending_checkpoint: None,
@@ -2869,6 +2919,7 @@ mod tests {
             context_window: 128_000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
+            pending_images: Vec::new(),
             plugins: None,
             checkpoint_enabled: false,
             pending_checkpoint: None,
@@ -2944,6 +2995,7 @@ mod tests {
             context_window: 128_000,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
+            pending_images: Vec::new(),
             plugins: None,
             checkpoint_enabled: false,
             pending_checkpoint: None,

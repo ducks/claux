@@ -5,6 +5,7 @@ A terminal-based AI coding assistant written in Rust. Streams responses, execute
 ## Features
 
 - **Streaming chat** with tool execution (Read, Write, Edit, Glob, Grep, Bash, WebFetch, Agent)
+- **Image input** — attach PNG, JPEG, GIF, or WebP files in the TUI/REPL or one-shot mode
 - **Interactive permissions** — prompts before writes, `y/n/a`; type a message at the prompt instead to deny the tool and steer the model with it
 - **Mid-turn steering** — type while claux is running tools and press Enter; the running tool is cancelled, remaining queued tools are skipped, and your message reaches the model immediately
 - **Interrupt anywhere** — Ctrl+C during a turn cancels it cleanly (in-flight tool calls are paired with interrupted results, so the conversation stays valid); press Ctrl+C twice within 2s to quit the app (Ctrl+D still exits immediately)
@@ -149,6 +150,9 @@ claux --tui
 # One-shot
 claux -p "explain this error"
 
+# One-shot with one or more images
+claux -p "compare these screenshots" --image before.png --image after.png
+
 # Machine-readable one-shot result with usage and cost
 claux -p "explain this error" --output-format json
 
@@ -215,6 +219,7 @@ accordingly.
 | `/compact` | Summarize conversation to free context |
 | `/diff` | Show file changes made by the last turn |
 | `/undo-turn` | Safely undo the last turn's file changes |
+| `/image <path>` | Attach an image to the next prompt (repeatable) |
 | `/model [profile]` | Show configured models or safely switch provider/model profile |
 | `/resume [id]` | List or resume past sessions |
 | `/clear` | Clear screen |

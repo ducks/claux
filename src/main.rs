@@ -11,6 +11,7 @@ mod cost;
 mod db;
 #[cfg(test)]
 mod evals;
+mod image_input;
 mod model;
 mod model_catalog;
 mod onboarding;
@@ -152,7 +153,17 @@ async fn main() -> Result<()> {
         }
 
         let cancel = shutdown::one_shot_cancellation_token()?;
-        let response = engine.submit(prompt, cancel.clone()).await;
+        let response = if args.image.is_empty() {
+            engine.submit(prompt, cancel.clone()).await
+        } else {
+            let images = image_input::load_images(&args.image)?;
+            engine
+                .submit_message(
+                    api::types::Message::user_with_images(prompt, images),
+                    cancel.clone(),
+                )
+                .await
+        };
         let response = shutdown::classify_one_shot_response(response, cancel.is_cancelled());
         if let Some(path) = args.transcript.as_deref() {
             let error = response.as_ref().err().map(ToString::to_string);

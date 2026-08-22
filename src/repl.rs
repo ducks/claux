@@ -438,6 +438,12 @@ fn replay_transcript(messages: &[crate::api::Message], model: &str, keep: usize)
                             let text = crate::utils::sanitize_terminal_text(text);
                             out.push_str(&format!("\x1b[2m● {model}\x1b[0m {text}\n"));
                         }
+                        ContentBlock::Image { source } => {
+                            out.push_str(&format!(
+                                "  \x1b[2m[attached {} image]\x1b[0m\n",
+                                source.media_type
+                            ));
+                        }
                         ContentBlock::Reasoning { .. } => {}
                         ContentBlock::ToolUse { name, .. } => {
                             let name = crate::utils::sanitize_terminal_text(name);

@@ -12,6 +12,10 @@ pub struct Cli {
     #[arg(short = 'p', long = "print")]
     pub prompt: Option<String>,
 
+    /// Attach an image to the one-shot prompt (repeatable; PNG, JPEG, GIF, or WebP)
+    #[arg(long, value_name = "FILE", requires = "prompt")]
+    pub image: Vec<PathBuf>,
+
     /// Output format for one-shot mode
     #[arg(long, value_enum, requires = "prompt")]
     pub output_format: Option<OutputFormat>,
@@ -146,6 +150,37 @@ mod tests {
         assert_eq!(
             cli.transcript,
             Some(PathBuf::from("/tmp/claux-transcript.json"))
+        );
+    }
+
+    #[test]
+    fn parses_repeated_images_for_one_shot_mode() {
+        let cli = Cli::try_parse_from([
+            "claux",
+            "--print",
+            "describe these",
+            "--image",
+            "one.png",
+            "--image",
+            "two.jpg",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.image,
+            vec![PathBuf::from("one.png"), PathBuf::from("two.jpg")]
+        );
+    }
+
+    #[test]
+    fn image_requires_one_shot_mode() {
+        let error = match Cli::try_parse_from(["claux", "--image", "one.png"]) {
+            Ok(_) => panic!("image should require one-shot mode"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
         );
     }
 

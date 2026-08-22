@@ -42,6 +42,10 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
                         ContentBlock::Text { text } => {
                             total += count_tokens(text);
                         }
+                        // Image token accounting varies by provider and image
+                        // dimensions. Reserve a conservative fixed amount
+                        // without counting the much larger base64 transport.
+                        ContentBlock::Image { .. } => total += 1_024,
                         ContentBlock::Reasoning { text, details } => {
                             if let Some(text) = text {
                                 total += count_tokens(text);
@@ -256,7 +260,9 @@ mod tests {
                                 "orphaned tool_result: {tool_use_id}"
                             );
                         }
-                        ContentBlock::Text { .. } | ContentBlock::Reasoning { .. } => {}
+                        ContentBlock::Text { .. }
+                        | ContentBlock::Image { .. }
+                        | ContentBlock::Reasoning { .. } => {}
                     }
                 }
             }
