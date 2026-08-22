@@ -12,6 +12,7 @@ mod db;
 #[cfg(test)]
 mod evals;
 mod model;
+mod model_catalog;
 mod onboarding;
 mod output;
 mod permissions;
@@ -246,6 +247,7 @@ async fn build_engine(
     plugins: Arc<plugin::PluginRegistry>,
 ) -> Result<query::Engine> {
     let model = &resolved.binding.model;
+    let metadata = model_catalog::resolve(resolved).await;
     let provider = build_provider(resolved)?;
     tracing::info!(
         "Provider: {} ({}, profile {})",
@@ -269,6 +271,7 @@ async fn build_engine(
     let mut tool_registry = tools::ToolRegistry::new_with_agent_factory(
         agent_factory,
         model.clone(),
+        metadata,
         config.permission_mode,
         config.is_project_trusted(),
         sandbox_policy,
@@ -282,7 +285,7 @@ async fn build_engine(
     engine.set_plugins(plugins);
     engine.set_auto_compact_threshold(config.auto_compact_threshold);
     engine.set_max_tokens(config.max_tokens);
-    engine.set_model_metadata(resolved.metadata);
+    engine.set_model_metadata(metadata);
     Ok(engine)
 }
 
