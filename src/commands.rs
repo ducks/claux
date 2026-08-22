@@ -4,6 +4,7 @@ use crate::config::{ModelBinding, ResolvedModel};
 use crate::query::Engine;
 use crate::session;
 use crate::theme::ThemeName;
+use std::path::PathBuf;
 
 /// One slash command, described once.
 ///
@@ -82,6 +83,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         summary: "Safely undo the last turn's file changes",
         arg: None,
+        tui_only: false,
+    },
+    CommandSpec {
+        name: "/image",
+        aliases: &[],
+        summary: "Attach an image to the next prompt",
+        arg: Some("path"),
         tui_only: false,
     },
     CommandSpec {
@@ -171,6 +179,7 @@ pub enum AsyncCommand {
     Compact,
     Diff,
     UndoTurn,
+    Image(PathBuf),
     Resume(Option<String>),
     Model(Option<String>),
     Theme(Option<String>),
@@ -211,6 +220,15 @@ pub fn parse_command(input: &str, surface: Surface) -> Option<CommandResult> {
         "/compact" => Some(CommandResult::Async(AsyncCommand::Compact)),
         "/diff" => Some(CommandResult::Async(AsyncCommand::Diff)),
         "/undo-turn" => Some(CommandResult::Async(AsyncCommand::UndoTurn)),
+        "/image" => {
+            if args.is_empty() {
+                Some(CommandResult::Text("Usage: /image <path>".to_string()))
+            } else {
+                Some(CommandResult::Async(AsyncCommand::Image(PathBuf::from(
+                    args,
+                ))))
+            }
+        }
         "/resume" => {
             let id = if args.is_empty() {
                 None
@@ -248,6 +266,14 @@ pub async fn execute_async(cmd: AsyncCommand, engine: &mut Engine) -> Result<Str
         AsyncCommand::Compact => engine.compact().await,
         AsyncCommand::Diff => Ok(engine.last_turn_diff()),
         AsyncCommand::UndoTurn => engine.undo_last_turn(),
+        AsyncCommand::Image(path) => {
+            let image = crate::image_input::load_image(&path)?;
+            let count = engine.queue_image(image);
+            Ok(format!(
+                "Attached {} for the next prompt ({count} queued).",
+                path.display()
+            ))
+        }
         AsyncCommand::Resume(id) => execute_resume(id, engine),
         AsyncCommand::Model(_) => {
             anyhow::bail!("model switching must be resolved through a configured model profile")
@@ -512,6 +538,23 @@ mod tests {
         assert!(matches!(
             parse_command("/undo-turn", Surface::Tui),
             Some(CommandResult::Async(AsyncCommand::UndoTurn))
+        ));
+    }
+
+    #[test]
+    fn image_command_parses_path() {
+        assert!(matches!(
+            parse_command("/image /tmp/my picture.png", Surface::Tui),
+            Some(CommandResult::Async(AsyncCommand::Image(path)))
+                if path.as_path() == std::path::Path::new("/tmp/my picture.png")
+        ));
+    }
+
+    #[test]
+    fn image_command_requires_path() {
+        assert!(matches!(
+            parse_command("/image", Surface::Repl),
+            Some(CommandResult::Text(text)) if text.contains("Usage:")
         ));
     }
 

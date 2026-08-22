@@ -340,6 +340,9 @@ pub async fn run(
                 .iter()
                 .filter_map(|b| match b {
                     crate::api::ContentBlock::Text { text } => Some(text.clone()),
+                    crate::api::ContentBlock::Image { source } => {
+                        Some(format!("[attached {} image]", source.media_type))
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>()

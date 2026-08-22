@@ -264,6 +264,7 @@ version = "20260821.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "clap",
  "crossterm",
