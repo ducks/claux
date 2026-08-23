@@ -974,6 +974,7 @@ impl Engine {
         let mut malformed_tool_retries = 0;
         const MAX_MALFORMED_TOOL_RETRIES: u32 = 1;
         let mut retry_prompt: Option<String> = None;
+        let mut turn_had_meaningful_response = false;
 
         loop {
             // Deliver any steering messages queued since the last API call,
@@ -1225,12 +1226,27 @@ impl Engine {
                 }
             }
 
+            // A terminal marker alone is not a usable turn. Some compatible
+            // providers occasionally return a nominally completed first
+            // response with zero usage and no content (or reasoning without a
+            // final answer). Treat that as a protocol failure instead of
+            // reporting a successful, empty one-shot result to callers. An
+            // empty follow-up after a meaningful tool round remains a valid
+            // way to end an otherwise productive turn.
+            let empty_completion = !stream_interrupted
+                && !had_error
+                && !turn_had_meaningful_response
+                && text_buf.trim().is_empty()
+                && tool_uses.is_empty();
+
             self.model_trace.push(ModelTraceEntry {
                 index: self.model_trace.len() + 1,
                 started_after_ms: model_started_after_ms,
                 duration_ms: model_started.elapsed().as_millis() as u64,
                 status: if stream_interrupted {
                     "interrupted".to_string()
+                } else if empty_completion {
+                    "error".to_string()
                 } else {
                     model_status.to_string()
                 },
@@ -1241,6 +1257,17 @@ impl Engine {
                 self.checkpoint_transcript();
                 continue;
             }
+
+            if empty_completion {
+                let message =
+                    "provider protocol error: response completed without assistant text or tool calls"
+                        .to_string();
+                let _ = tx.send(StreamEvent::Error(message.clone())).await;
+                self.checkpoint_transcript();
+                return Err(anyhow::Error::new(ApiFailure::other(message)));
+            }
+
+            turn_had_meaningful_response = true;
 
             // A complete response ends the retry scope. Any correction was
             // request-local and must not become conversation history.
@@ -1643,6 +1670,32 @@ mod tests {
             let _ = tx
                 .send(ApiEvent::Text("partial response".to_string()))
                 .await;
+            drop(tx);
+            Ok(ProviderStream::new(rx, cancel.child_token()))
+        }
+    }
+
+    struct EmptyCompletionProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for EmptyCompletionProvider {
+        fn name(&self) -> &str {
+            "empty-completion"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            let (tx, rx) = mpsc::channel(2);
+            tx.send(ApiEvent::Usage(Default::default())).await.unwrap();
+            tx.send(ApiEvent::Done).await.unwrap();
             drop(tx);
             Ok(ProviderStream::new(rx, cancel.child_token()))
         }
@@ -2919,6 +2972,31 @@ mod tests {
             "partial assistant content must not be committed to history"
         );
         assert_eq!(engine.messages()[0].role, "user");
+    }
+
+    #[tokio::test]
+    async fn test_submit_rejects_empty_completed_response() {
+        let mut engine = Engine::for_tests(
+            Box::new(EmptyCompletionProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+
+        let error = engine
+            .submit("go", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "provider protocol error: response completed without assistant text or tool calls"
+        );
+        assert_eq!(
+            engine.messages().len(),
+            1,
+            "empty assistant content must not be committed to history"
+        );
+        assert_eq!(engine.execution_timing().model_rounds[0].status, "error");
     }
 
     #[tokio::test]
