@@ -10,6 +10,7 @@ use rmcp::{
     RoleClient, ServiceExt,
 };
 use serde_json::Value;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
@@ -198,16 +199,36 @@ async fn connect_mcp_servers_with_timeout(
     configs: &[McpServerConfig],
     timeout: Duration,
 ) -> Vec<Box<dyn Tool>> {
+    connect_mcp_servers_with(configs, timeout, |config| async move {
+        connect_server(&config).await
+    })
+    .await
+}
+
+async fn connect_mcp_servers_with<F, Fut>(
+    configs: &[McpServerConfig],
+    timeout: Duration,
+    connector: F,
+) -> Vec<Box<dyn Tool>>
+where
+    F: Fn(McpServerConfig) -> Fut,
+    Fut: Future<Output = Result<Vec<Box<dyn Tool>>>>,
+{
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
-    let connections = configs.iter().map(|config| async move {
-        let result = tokio::time::timeout(timeout, connect_server(config))
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("Timed out after {timeout:?} while starting or discovering tools")
-            })
-            .and_then(|result| result);
-        (config, result)
+    let connections = configs.iter().map(|config| {
+        let connection = connector(config.clone());
+        async move {
+            let result = tokio::time::timeout(timeout, connection)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Timed out after {timeout:?} while starting or discovering tools"
+                    )
+                })
+                .and_then(|result| result);
+            (config, result)
+        }
     });
 
     for (config, result) in futures_util::future::join_all(connections).await {
@@ -289,8 +310,8 @@ async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn server_connections_are_concurrent_and_bounded() {
         let configs: Vec<McpServerConfig> = (0..10)
@@ -301,16 +322,21 @@ mod tests {
                 env: Default::default(),
             })
             .collect();
-        let timeout = Duration::from_millis(50);
-        let started = tokio::time::Instant::now();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
 
-        let tools = connect_mcp_servers_with_timeout(&configs, timeout).await;
+        let tools = connect_mcp_servers_with(&configs, Duration::from_millis(10), |_| {
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            async move {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(current, Ordering::SeqCst);
+                std::future::pending::<Result<Vec<Box<dyn Tool>>>>().await
+            }
+        })
+        .await;
 
         assert!(tools.is_empty());
-        assert!(
-            started.elapsed() < Duration::from_millis(300),
-            "server timeouts should overlap, took {:?}",
-            started.elapsed()
-        );
+        assert_eq!(peak.load(Ordering::SeqCst), configs.len());
     }
 }
