@@ -413,15 +413,16 @@ fn take_reasoning_event(
 }
 
 fn drain_tool_calls(tool_calls: &mut PendingToolCalls) -> Result<Vec<ApiEvent>> {
-    use anyhow::Context as _;
-
     let mut calls: Vec<(u32, (String, String, String))> = tool_calls.drain().collect();
     calls.sort_by_key(|(index, _)| *index);
     calls
         .into_iter()
         .map(|(_, (id, name, arguments))| {
-            let input = serde_json::from_str(&arguments)
-                .with_context(|| format!("invalid arguments for tool call {name} ({id})"))?;
+            let input = serde_json::from_str(&arguments).map_err(|error| {
+                anyhow::Error::new(ApiFailure::malformed_tool_arguments(format!(
+                    "invalid arguments for tool call {name} ({id}): {error}"
+                )))
+            })?;
             Ok(ApiEvent::ToolUse { id, name, input })
         })
         .collect()
@@ -447,7 +448,16 @@ async fn read_openai_sse(
         &mut diagnostics,
     )
     .await;
-    result.map_err(|error| anyhow::anyhow!("{error}; {}", diagnostics.render()))
+    result.map_err(|error| {
+        let diagnostics = diagnostics.render();
+        match error.downcast::<ApiFailure>() {
+            Ok(failure) => anyhow::Error::new(ApiFailure::new(
+                failure.kind,
+                format!("{}; {diagnostics}", failure.message),
+            )),
+            Err(error) => anyhow::anyhow!("{error}; {diagnostics}"),
+        }
+    })
 }
 
 const MAX_DIAGNOSTIC_FRAMES: usize = 4;
@@ -1152,6 +1162,12 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("invalid arguments"));
+        assert_eq!(
+            error
+                .downcast_ref::<ApiFailure>()
+                .map(|failure| failure.kind),
+            Some(crate::api::ApiFailureKind::MalformedToolArguments)
+        );
         assert!(rx.recv().await.is_none());
     }
 

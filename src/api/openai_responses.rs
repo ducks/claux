@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -23,6 +23,18 @@ struct ResponseCursor {
     /// appends several), so any predicted index desynchronizes from history
     /// and silently slices past unsent messages.
     sent_message_count: usize,
+}
+
+fn lock_cursor(cursor: &Mutex<ResponseCursor>) -> MutexGuard<'_, ResponseCursor> {
+    match cursor.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("OpenAI Responses cursor was poisoned; resetting continuation state");
+            let mut guard = poisoned.into_inner();
+            *guard = ResponseCursor::default();
+            guard
+        }
+    }
 }
 
 /// Native OpenAI Responses API provider.
@@ -72,7 +84,7 @@ impl OpenAIResponsesProvider {
     /// would ask the model to continue with no new input, silently discarding
     /// whatever the user just said.
     fn build_input(&self, messages: &[Message]) -> (Vec<Value>, Option<String>, usize) {
-        let cursor = self.cursor.lock().expect("response cursor poisoned");
+        let cursor = lock_cursor(&self.cursor);
         if let Some(response_id) = &cursor.response_id {
             if cursor.sent_message_count < messages.len() {
                 return (
@@ -98,7 +110,7 @@ impl Provider for OpenAIResponsesProvider {
     }
 
     fn reset_session(&mut self) {
-        *self.cursor.lock().expect("response cursor poisoned") = ResponseCursor::default();
+        *lock_cursor(&self.cursor) = ResponseCursor::default();
     }
 
     async fn stream(
@@ -328,7 +340,7 @@ async fn read_responses_sse(
             if event["type"] == "response.completed" {
                 let response = &event["response"];
                 if let Some(response_id) = response["id"].as_str() {
-                    *cursor.lock().expect("response cursor poisoned") = ResponseCursor {
+                    *lock_cursor(&cursor) = ResponseCursor {
                         response_id: Some(response_id.to_string()),
                         sent_message_count,
                     };
@@ -650,6 +662,23 @@ mod tests {
         assert!(previous_response_id.is_none());
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["content"], "first");
+    }
+
+    #[test]
+    fn poisoned_cursor_is_reset_and_the_history_is_resent() {
+        let provider = provider_for_cursor_tests();
+        let cursor = provider.cursor.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = cursor.lock().unwrap();
+            panic!("poison cursor");
+        });
+
+        let messages = vec![Message::user("do not lose this")];
+        let (input, previous_response_id, sent) = provider.build_input(&messages);
+
+        assert!(previous_response_id.is_none());
+        assert_eq!(sent, 1);
+        assert_eq!(input[0]["content"], "do not lose this");
     }
 
     #[test]

@@ -342,10 +342,19 @@ pub async fn run(
                                     in_tool = false;
                                 }
                                 print_permission_prompt(&tool_name, &summary);
-                                let line = stdin_rx.recv().await.unwrap_or_default();
-                                let _ = respond.send(parse_permission_response(
-                                    &tool_name, &input, &line,
-                                ));
+                                let line = tokio::select! {
+                                    line = stdin_rx.recv() => line,
+                                    _ = tokio::signal::ctrl_c() => {
+                                        turn_cancel.cancel();
+                                        None
+                                    }
+                                };
+                                let response = permission_response_from_input(
+                                    &tool_name,
+                                    &input,
+                                    line.as_deref(),
+                                );
+                                let _ = respond.send(response);
                             }
                             StreamEvent::PermissionRequestWithDiff {
                                 tool_name,
@@ -359,10 +368,19 @@ pub async fn run(
                                     in_tool = false;
                                 }
                                 print_permission_prompt_with_diff(&tool_name, &summary, &diff);
-                                let line = stdin_rx.recv().await.unwrap_or_default();
-                                let _ = respond.send(parse_permission_response(
-                                    &tool_name, &input, &line,
-                                ));
+                                let line = tokio::select! {
+                                    line = stdin_rx.recv() => line,
+                                    _ = tokio::signal::ctrl_c() => {
+                                        turn_cancel.cancel();
+                                        None
+                                    }
+                                };
+                                let response = permission_response_from_input(
+                                    &tool_name,
+                                    &input,
+                                    line.as_deref(),
+                                );
+                                let _ = respond.send(response);
                             }
                             StreamEvent::Error(e) => {
                                 eprintln!(
@@ -518,6 +536,15 @@ fn parse_permission_response(
     }
 }
 
+fn permission_response_from_input(
+    tool_name: &str,
+    input: &serde_json::Value,
+    line: Option<&str>,
+) -> PermissionResponse {
+    line.map(|line| parse_permission_response(tool_name, input, line))
+        .unwrap_or(PermissionResponse::Deny)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +561,18 @@ mod tests {
                 PermissionResponse::Allow
             );
         }
+    }
+
+    #[test]
+    fn permission_eof_is_denied_not_treated_as_an_empty_yes() {
+        assert_eq!(
+            permission_response_from_input(
+                "Write",
+                &serde_json::json!({"file_path": "/tmp/x"}),
+                None,
+            ),
+            PermissionResponse::Deny
+        );
     }
 
     #[test]

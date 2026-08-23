@@ -24,6 +24,18 @@ const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const MCP_CANCEL_NOTIFY_TIMEOUT: Duration = Duration::from_secs(1);
 
+fn render_content<'a>(content: impl IntoIterator<Item = &'a RawContent>) -> String {
+    content
+        .into_iter()
+        .map(|raw| match raw {
+            RawContent::Text(text) => text.text.clone(),
+            other => serde_json::to_string(other)
+                .unwrap_or_else(|error| format!("[unserializable MCP content: {error}]")),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A tool backed by an MCP server.
 /// Wraps one tool from an MCP server's tools/list response.
 pub struct McpTool {
@@ -128,11 +140,17 @@ impl Tool for McpTool {
                         "Cancellation was sent to the server; side effects may already have occurred."
                     }
                     Ok(Err(_)) | Err(_) => {
-                        "The cancellation notification could not be delivered; the remote operation may still be running."
+                        "The cancellation notification could not be delivered."
                     }
                 };
+                // A server that ignores notifications must not outlive the
+                // cancelled request indefinitely. Closing the service tears
+                // down its stdio transport (and therefore the child process).
+                self.client.cancellation_token().cancel();
                 return Ok(ToolOutput {
-                    content: format!("MCP request cancelled by user. {suffix}"),
+                    content: format!(
+                        "MCP request cancelled by user. {suffix} The MCP server was stopped."
+                    ),
                     is_error: true,
                 });
             }
@@ -147,11 +165,14 @@ impl Tool for McpTool {
                         "Cancellation was sent to the server; side effects may already have occurred."
                     }
                     Ok(Err(_)) | Err(_) => {
-                        "The cancellation notification could not be delivered; the remote operation may still be running."
+                        "The cancellation notification could not be delivered."
                     }
                 };
+                self.client.cancellation_token().cancel();
                 return Ok(ToolOutput {
-                    content: format!("MCP request timed out after {MCP_CALL_TIMEOUT:?}. {suffix}"),
+                    content: format!(
+                        "MCP request timed out after {MCP_CALL_TIMEOUT:?}. {suffix} The MCP server was stopped."
+                    ),
                     is_error: true,
                 });
             }
@@ -159,15 +180,7 @@ impl Tool for McpTool {
 
         match response {
             Ok(Ok(ServerResult::CallToolResult(call_result))) => {
-                let text = call_result
-                    .content
-                    .iter()
-                    .filter_map(|c| match &c.raw {
-                        RawContent::Text(t) => Some(t.text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let text = render_content(call_result.content.iter().map(|content| &content.raw));
 
                 Ok(ToolOutput {
                     content: text,
@@ -311,6 +324,21 @@ async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> 
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn non_text_content_is_preserved_as_structured_json() {
+        let content = vec![
+            RawContent::text("hello"),
+            RawContent::image("aGVsbG8=", "image/png"),
+        ];
+
+        let rendered = render_content(&content);
+
+        assert!(rendered.starts_with("hello\n"));
+        assert!(rendered.contains("\"type\":\"image\""));
+        assert!(rendered.contains("aGVsbG8="));
+        assert!(rendered.contains("image/png"));
+    }
 
     #[tokio::test]
     async fn server_connections_are_concurrent_and_bounded() {
