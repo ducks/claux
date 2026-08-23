@@ -148,7 +148,7 @@ mod tests {
         let mut s = state();
         let c = s.active("/co", 3).expect("menu");
         let names: Vec<_> = c.matches.iter().map(|m| m.name).collect();
-        assert_eq!(names, vec!["/cost", "/compact"]);
+        assert_eq!(names, vec!["/cost", "/context", "/compact"]);
     }
 
     #[test]

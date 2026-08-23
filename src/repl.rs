@@ -113,6 +113,9 @@ pub async fn run(
                 CommandResult::Text(ref text) if text == "__cost__" => {
                     println!("{}", commands::format_cost(&engine));
                 }
+                CommandResult::Text(ref text) if text == "__context__" => {
+                    println!("{}", commands::format_context(&engine));
+                }
                 CommandResult::Text(text) => println!("{text}"),
                 CommandResult::Exit => break,
                 // /resume with an id: switch which session this REPL is
@@ -273,6 +276,7 @@ pub async fn run(
                                 }
                                 println!("\n  \x1b[2m[{n}]\x1b[0m");
                             }
+                            StreamEvent::ContextUsage(_) => {}
                             StreamEvent::Retry(n) => {
                                 if in_tool {
                                     println!();
