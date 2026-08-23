@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;

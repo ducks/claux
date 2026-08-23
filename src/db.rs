@@ -383,6 +383,11 @@ fn secure_database_files(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn secure_database_files(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
 /// Session metadata.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
