@@ -28,6 +28,7 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
     let mut _heading_level = HeadingLevel::H1;
     let mut first_table_cell = false;
     let mut table_col_count: usize = 0;
+    let mut link_destinations: Vec<String> = Vec::new();
 
     let options = Options::all();
     let parser = Parser::new_ext(text, options);
@@ -93,9 +94,9 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                     let current_style = *style_stack.last().unwrap_or(&base_style);
                     style_stack.push(current_style.add_modifier(Modifier::BOLD));
                 }
-                Tag::Link { .. } => {
+                Tag::Link { dest_url, .. } => {
                     style_stack.push(Style::default().fg(BLUE).add_modifier(Modifier::UNDERLINED));
-                    // We'll append the URL in parentheses after the link text
+                    link_destinations.push(dest_url.to_string());
                     current_line.push(Span::raw("["));
                 }
                 Tag::Image { dest_url, .. } => {
@@ -178,7 +179,8 @@ pub fn render(text: &str, base_style: Style) -> Vec<Line<'static>> {
                     style_stack.pop();
                 }
                 TagEnd::Link => {
-                    current_line.push(Span::raw("]"));
+                    let destination = link_destinations.pop().unwrap_or_default();
+                    current_line.push(Span::raw(format!("]({destination})")));
                     style_stack.pop();
                 }
                 TagEnd::TableHead => {
@@ -338,9 +340,8 @@ mod tests {
         let text = "Check out [this link](https://example.com)";
         let lines = render(text, Style::default());
         assert!(!lines.is_empty());
-        // Should have link text with brackets
         let content: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(content.contains("[") && content.contains("]"));
+        assert!(content.contains("[this link](https://example.com)"));
     }
 
     #[test]

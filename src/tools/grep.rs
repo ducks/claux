@@ -9,6 +9,10 @@ use walkdir::WalkDir;
 use super::{Tool, ToolOutput};
 use crate::sandbox::SandboxPolicy;
 
+const MAX_RESULTS: usize = 1_000;
+const MAX_OUTPUT_BYTES: usize = 256 * 1024;
+const TRUNCATED_NOTICE: &str = "[results truncated: refine the pattern or path]";
+
 pub struct GrepTool {
     sandbox_policy: Arc<SandboxPolicy>,
 }
@@ -96,7 +100,7 @@ impl Tool for GrepTool {
     async fn execute(
         &self,
         input: Value,
-        _cancel: tokio_util::sync::CancellationToken,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
         let base = params.path.as_deref().unwrap_or(".");
@@ -110,6 +114,8 @@ impl Tool for GrepTool {
 
         let mut searcher = SearcherBuilder::new().build();
         let mut results = Vec::new();
+        let mut output_bytes = 0usize;
+        let mut truncated = false;
 
         let walker = WalkDir::new(&base)
             .follow_links(false)
@@ -124,6 +130,16 @@ impl Tool for GrepTool {
             });
 
         for entry in walker.flatten() {
+            if cancel.is_cancelled() {
+                return Ok(ToolOutput {
+                    content: "Search cancelled by user.".to_string(),
+                    is_error: true,
+                });
+            }
+            if results.len() >= MAX_RESULTS || output_bytes >= MAX_OUTPUT_BYTES {
+                truncated = true;
+                break;
+            }
             let path = entry.path();
             if !path.is_file() {
                 continue;
@@ -152,6 +168,9 @@ impl Tool for GrepTool {
                 matches: &'a mut Vec<String>,
                 count: &'a mut usize,
                 mode: &'a str,
+                remaining_results: usize,
+                remaining_bytes: usize,
+                truncated: &'a mut bool,
             }
 
             impl Sink for CountSink<'_> {
@@ -165,14 +184,22 @@ impl Tool for GrepTool {
                     *self.count += 1;
                     if self.mode == "content" {
                         let line = std::str::from_utf8(mat.bytes()).unwrap_or("");
-                        self.matches.push(format!(
+                        let rendered = format!(
                             "{}:{}:{}",
                             self.path.display(),
                             mat.line_number().unwrap_or(0),
                             line.trim_end()
-                        ));
+                        );
+                        if self.matches.len() >= self.remaining_results
+                            || rendered.len() > self.remaining_bytes
+                        {
+                            *self.truncated = true;
+                            return Ok(false);
+                        }
+                        self.remaining_bytes -= rendered.len();
+                        self.matches.push(rendered);
                     }
-                    Ok(true)
+                    Ok(self.mode == "content")
                 }
             }
 
@@ -181,6 +208,9 @@ impl Tool for GrepTool {
                 matches: &mut file_matches,
                 count: &mut match_count,
                 mode: &params.output_mode,
+                remaining_results: MAX_RESULTS.saturating_sub(results.len()),
+                remaining_bytes: MAX_OUTPUT_BYTES.saturating_sub(output_bytes),
+                truncated: &mut truncated,
             };
 
             let _ = searcher.search_path(&matcher, &path, &mut sink);
@@ -192,6 +222,8 @@ impl Tool for GrepTool {
                     "count" => results.push(format!("{}:{}", path.display(), match_count)),
                     _ => {}
                 }
+                output_bytes = results.iter().map(String::len).sum::<usize>()
+                    + results.len().saturating_sub(1);
             }
         }
 
@@ -202,8 +234,15 @@ impl Tool for GrepTool {
             });
         }
 
+        let mut content = results.join("\n");
+        if truncated {
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(TRUNCATED_NOTICE);
+        }
         Ok(ToolOutput {
-            content: results.join("\n"),
+            content,
             is_error: false,
         })
     }
@@ -287,5 +326,31 @@ mod tests {
             .unwrap();
 
         assert!(normalized(&output.content).contains("workflows/ci.yml"));
+    }
+
+    #[tokio::test]
+    async fn broad_content_search_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = (0..(MAX_RESULTS + 50))
+            .map(|index| format!("needle {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(dir.path().join("large.txt"), content).unwrap();
+
+        let output = tool()
+            .execute(
+                json!({
+                    "pattern": "needle",
+                    "path": dir.path(),
+                    "output_mode": "content"
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.content.contains(TRUNCATED_NOTICE));
+        assert!(output.content.lines().count() <= MAX_RESULTS + 1);
+        assert!(output.content.len() <= MAX_OUTPUT_BYTES + TRUNCATED_NOTICE.len() + 1);
     }
 }

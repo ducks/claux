@@ -481,7 +481,7 @@ pub async fn doctor(config: &Config, offline: bool) -> DoctorReport {
     }
 
     if offline {
-        report.warn("provider connectivity: skipped (--offline)".to_string());
+        report.ok("provider connectivity: skipped (--offline)".to_string());
     } else {
         for (model, key) in ready_models {
             let label = format!(
@@ -599,6 +599,7 @@ fn executable_candidates(directory: &Path, command: &str) -> Vec<PathBuf> {
 struct ReportBuilder {
     lines: Vec<String>,
     failures: usize,
+    warnings: usize,
 }
 
 impl ReportBuilder {
@@ -607,6 +608,7 @@ impl ReportBuilder {
     }
 
     fn warn(&mut self, message: String) {
+        self.warnings += 1;
         self.lines.push(format!("[warn] {message}"));
     }
 
@@ -616,11 +618,13 @@ impl ReportBuilder {
     }
 
     fn finish(self) -> DoctorReport {
-        let healthy = self.failures == 0;
-        let summary = if healthy {
-            "claux doctor: ready"
-        } else {
+        let healthy = self.failures == 0 && self.warnings == 0;
+        let summary = if self.failures > 0 {
             "claux doctor: action required"
+        } else if self.warnings > 0 {
+            "claux doctor: ready with warnings"
+        } else {
+            "claux doctor: ready"
         };
         DoctorReport {
             text: format!("{summary}\n\n{}\n", self.lines.join("\n")),
@@ -811,5 +815,14 @@ mod tests {
         assert!(!report.healthy);
         assert!(report.text.contains("[fail] no models configured"));
         assert!(report.text.contains("auto_compact_threshold"));
+    }
+
+    #[test]
+    fn doctor_warnings_are_degraded_not_healthy() {
+        let mut report = ReportBuilder::default();
+        report.warn("optional integration is unavailable".to_string());
+        let report = report.finish();
+        assert!(!report.healthy);
+        assert!(report.text.starts_with("claux doctor: ready with warnings"));
     }
 }

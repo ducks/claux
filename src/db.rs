@@ -16,6 +16,7 @@ use crate::config::ModelBinding;
 /// Database wrapper with connection pooling.
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
+    path: PathBuf,
 }
 
 impl Db {
@@ -43,6 +44,7 @@ impl Db {
 
         // Enable WAL mode for better concurrent performance (ignore result)
         let _ = conn.execute("PRAGMA journal_mode = WAL", []);
+        secure_database_files(path)?;
 
         // SQLite does not enforce declared foreign keys unless each
         // connection opts in. Session deletion relies on ON DELETE CASCADE.
@@ -51,9 +53,23 @@ impl Db {
         // Create tables if they don't exist
         Self::init_schema(&conn)?;
 
-        Ok(Self {
+        let db = Self {
             conn: Arc::new(Mutex::new(conn)),
-        })
+            path: path.clone(),
+        };
+        db.secure_files()?;
+        Ok(db)
+    }
+
+    #[cfg(unix)]
+    fn secure_files(&self) -> Result<()> {
+        secure_database_files(&self.path)
+    }
+
+    #[cfg(not(unix))]
+    fn secure_files(&self) -> Result<()> {
+        let _ = &self.path;
+        Ok(())
     }
 
     /// Initialize the database schema.
@@ -152,6 +168,8 @@ impl Db {
             "INSERT INTO sessions (id, model, name, project, created_at, last_active) VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             [id, model, name.unwrap_or(""), project.unwrap_or("uncategorized")],
         )?;
+        drop(conn);
+        self.secure_files()?;
         Ok(())
     }
 
@@ -178,6 +196,8 @@ impl Db {
                 project.unwrap_or("uncategorized"),
             ),
         )?;
+        drop(conn);
+        self.secure_files()?;
         Ok(())
     }
 
@@ -255,7 +275,8 @@ impl Db {
              WHERE id = ?1",
             [session_id],
         )?;
-
+        drop(conn);
+        self.secure_files()?;
         Ok(())
     }
 
@@ -288,6 +309,8 @@ impl Db {
         )?;
 
         tx.commit()?;
+        drop(conn);
+        self.secure_files()?;
         Ok(())
     }
 
@@ -302,6 +325,8 @@ impl Db {
              WHERE id = ?4",
             (&binding.model, &binding.profile, binding_json, session_id),
         )?;
+        drop(conn);
+        self.secure_files()?;
         Ok(())
     }
 
@@ -330,8 +355,32 @@ impl Db {
     pub fn delete_session(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+        drop(conn);
+        self.secure_files()?;
         Ok(())
     }
+}
+
+#[cfg(unix)]
+fn secure_database_files(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    for path in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        match std::fs::metadata(&path) {
+            Ok(metadata) => {
+                let mut permissions = metadata.permissions();
+                permissions.set_mode(0o600);
+                std::fs::set_permissions(&path, permissions)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 /// Session metadata.
@@ -391,6 +440,38 @@ mod tests {
             std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wal_and_shared_memory_files_are_private_and_repaired_after_writes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = Db::open(&db_path).unwrap();
+        let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+        let shm_path = PathBuf::from(format!("{}-shm", db_path.display()));
+
+        for path in [&wal_path, &shm_path] {
+            assert!(
+                path.exists(),
+                "{} should exist while WAL is open",
+                path.display()
+            );
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        }
+
+        db.create_session("secure", "model", None, None).unwrap();
+
+        for path in [&wal_path, &shm_path] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "{} was not repaired",
+                path.display()
+            );
+        }
     }
 
     #[test]

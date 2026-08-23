@@ -115,14 +115,17 @@ impl TurnCheckpoint {
     }
 
     pub fn undo(&self) -> Result<String> {
+        self.undo_with_before_restore(|_| {})
+    }
+
+    fn undo_with_before_restore(&self, mut before_restore: impl FnMut(&Path)) -> Result<String> {
         if self.changes.is_empty() {
             return Ok("The last turn made no checkpointed file changes.".to_string());
         }
 
         let mut conflicts = Vec::new();
         for (path, (_, expected_after)) in &self.changes {
-            let current = snapshot_path(&self.root.join(path))?;
-            if &current != expected_after {
+            if !path_matches(&self.root, path, expected_after)? {
                 conflicts.push(crate::utils::sanitize_terminal_text(
                     path.to_string_lossy().as_ref(),
                 ));
@@ -135,7 +138,17 @@ impl TurnCheckpoint {
             );
         }
 
-        for (path, (before, _)) in &self.changes {
+        for (path, (before, expected_after)) in &self.changes {
+            // Verification and restoration cannot be one filesystem-atomic
+            // operation. Re-read immediately before every write to close the
+            // much larger window created by the complete verification pass.
+            before_restore(path);
+            if !path_matches(&self.root, path, expected_after)? {
+                anyhow::bail!(
+                    "Undo stopped because {} changed while undo was in progress",
+                    crate::utils::sanitize_terminal_text(path.to_string_lossy().as_ref())
+                );
+            }
             restore_path(&self.root.join(path), before)
                 .with_context(|| format!("failed to restore {}", path.display()))?;
         }
@@ -145,6 +158,10 @@ impl TurnCheckpoint {
             self.changes.len()
         ))
     }
+}
+
+fn path_matches(root: &Path, relative: &Path, expected: &FileState) -> Result<bool> {
+    Ok(snapshot_path(&root.join(relative))? == *expected)
 }
 
 fn git_root(cwd: &Path) -> Result<PathBuf> {
@@ -423,6 +440,30 @@ mod tests {
         let error = checkpoint.undo().unwrap_err().to_string();
         assert!(error.contains("Undo refused"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "human");
+    }
+
+    #[test]
+    fn undo_rechecks_a_file_immediately_before_restoring_it() {
+        let repo = init_repo();
+        let path = repo.path().join("file.txt");
+        std::fs::write(&path, "before").unwrap();
+        let pending = PendingCheckpoint::capture_from(repo.path()).unwrap();
+        std::fs::write(&path, "agent").unwrap();
+        let checkpoint = pending.finish().unwrap();
+
+        let mut changed = false;
+        let error = checkpoint
+            .undo_with_before_restore(|_| {
+                if !changed {
+                    std::fs::write(&path, "human during undo").unwrap();
+                    changed = true;
+                }
+            })
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("changed while undo was in progress"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "human during undo");
     }
 
     #[test]

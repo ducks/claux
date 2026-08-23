@@ -75,6 +75,10 @@ impl std::error::Error for ApiFailure {}
 /// names the condition precisely, so this recovers the classification from
 /// the few markers the crate itself produces — not from provider prose.
 pub(super) fn classify_reader_error(error: &anyhow::Error) -> ApiFailure {
+    if let Some(failure) = error.downcast_ref::<ApiFailure>() {
+        return failure.clone();
+    }
+
     // `invalid arguments for tool call` / `invalid arguments for Anthropic
     // tool call` are emitted by this crate's own SSE parsers.
     let text = error.to_string();

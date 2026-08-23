@@ -671,7 +671,10 @@ impl Engine {
 
     /// Check if auto-compact is needed and perform it if so.
     /// Returns an audit summary when compaction was performed.
-    pub async fn maybe_auto_compact(&mut self) -> Result<Option<String>> {
+    async fn maybe_auto_compact_with_cancel(
+        &mut self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Option<String>> {
         // Disabled if threshold is 0.0
         if self.auto_compact_threshold <= 0.0 {
             return Ok(None);
@@ -689,7 +692,7 @@ impl Engine {
                 self.context_window
             );
 
-            self.compact().await?;
+            self.compact_with_cancel(cancel).await?;
             let notice = self
                 .last_compaction_notice
                 .clone()
@@ -706,6 +709,14 @@ impl Engine {
     /// 1. Snip — collapse old messages, keep recent ones
     /// 2. Summarize — send conversation to API for full summary
     pub async fn compact(&mut self) -> Result<String> {
+        self.compact_with_cancel(&tokio_util::sync::CancellationToken::new())
+            .await
+    }
+
+    async fn compact_with_cancel(
+        &mut self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<String> {
         self.last_compaction_notice = None;
         if self.messages.is_empty() {
             return Ok("Nothing to compact.".to_string());
@@ -754,7 +765,7 @@ impl Engine {
         // Full summarization. Keep the current history untouched until the
         // provider completes so a failed compact cannot discard context.
         let summary_source = summary_source.unwrap_or_else(|| self.messages.clone());
-        self.summarize_conversation(summary_source, before_context)
+        self.summarize_conversation(summary_source, before_context, cancel)
             .await
     }
 
@@ -763,6 +774,7 @@ impl Engine {
         &mut self,
         messages: Vec<Message>,
         before_context: usize,
+        cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<String> {
         let summary_prompt = "Summarize the conversation so far in a concise paragraph. \
             Focus on what was discussed, what decisions were made, what files were modified, \
@@ -779,13 +791,18 @@ impl Engine {
                 &self.system_prompt,
                 &[],
                 self.max_tokens,
-                tokio_util::sync::CancellationToken::new(),
+                cancel.child_token(),
             )
             .await?;
 
         let mut summary = String::new();
         let mut completed = false;
-        while let Some(event) = rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                _ = cancel.cancelled() => anyhow::bail!("Compaction cancelled by user"),
+                event = rx.recv() => event,
+            };
+            let Some(event) = event else { break };
             match event {
                 ApiEvent::Text(t) => summary.push_str(&t),
                 ApiEvent::Usage(usage) => self.cost.add_usage(&usage),
@@ -801,6 +818,9 @@ impl Engine {
             }
         }
         if !completed {
+            if cancel.is_cancelled() {
+                anyhow::bail!("Compaction cancelled by user");
+            }
             anyhow::bail!("Compact error: API stream ended without completion");
         }
 
@@ -960,7 +980,19 @@ impl Engine {
         interactive: bool,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
-        if let Some(notice) = self.maybe_auto_compact().await? {
+        if cancel.is_cancelled() {
+            let _ = tx.send(StreamEvent::Interrupted).await;
+            return Ok(());
+        }
+        let compact_notice = match self.maybe_auto_compact_with_cancel(&cancel).await {
+            Ok(notice) => notice,
+            Err(_) if cancel.is_cancelled() => {
+                let _ = tx.send(StreamEvent::Interrupted).await;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(notice) = compact_notice {
             let _ = tx.send(StreamEvent::Notice(notice)).await;
             let _ = tx
                 .send(StreamEvent::ContextUsage(self.context_usage()))
@@ -1052,7 +1084,13 @@ impl Engine {
                                     "compacting conversation...".to_string(),
                                 ))
                                 .await;
-                            self.compact().await?;
+                            if let Err(error) = self.compact_with_cancel(&cancel).await {
+                                if cancel.is_cancelled() {
+                                    let _ = tx.send(StreamEvent::Interrupted).await;
+                                    return Ok(());
+                                }
+                                return Err(error);
+                            }
                             if let Some(notice) = self.last_compaction_notice.clone() {
                                 let _ = tx.send(StreamEvent::Notice(notice)).await;
                             }
@@ -1193,7 +1231,13 @@ impl Engine {
                                             "compacting conversation...".to_string(),
                                         ))
                                         .await;
-                                    self.compact().await?;
+                                    if let Err(error) = self.compact_with_cancel(&cancel).await {
+                                        if cancel.is_cancelled() {
+                                            let _ = tx.send(StreamEvent::Interrupted).await;
+                                            return Ok(());
+                                        }
+                                        return Err(error);
+                                    }
                                     if let Some(notice) = self.last_compaction_notice.clone() {
                                         let _ = tx.send(StreamEvent::Notice(notice)).await;
                                     }
@@ -1351,7 +1395,15 @@ impl Engine {
             // user turn. Checking only at the turn boundary lets that history
             // grow all the way to the provider limit, so compact at the safe
             // boundary after tool results have paired every tool call.
-            if let Some(notice) = self.maybe_auto_compact().await? {
+            let compact_notice = match self.maybe_auto_compact_with_cancel(&cancel).await {
+                Ok(notice) => notice,
+                Err(_) if cancel.is_cancelled() => {
+                    let _ = tx.send(StreamEvent::Interrupted).await;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(notice) = compact_notice {
                 let _ = tx.send(StreamEvent::Notice(notice)).await;
                 let _ = tx
                     .send(StreamEvent::ContextUsage(self.context_usage()))
@@ -1577,7 +1629,18 @@ impl Engine {
 
         let _ = tx.send(event).await;
 
-        match resp_rx.await {
+        let response = tokio::select! {
+            biased;
+            response = resp_rx => response,
+            _ = cancel.cancelled() => {
+                return crate::tools::ToolOutput {
+                    content: "Permission request cancelled by user.".to_string(),
+                    is_error: true,
+                };
+            }
+        };
+
+        match response {
             Ok(PermissionResponse::Allow) => {
                 self.execute_tool_steerable(name, input.clone(), cancel)
                     .await
@@ -1649,6 +1712,35 @@ mod tests {
     }
 
     struct TruncatedProvider;
+
+    struct HangingProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for HangingProvider {
+        fn name(&self) -> &str {
+            "hanging"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            let (tx, rx) = mpsc::channel(1);
+            let stream_cancel = cancel.child_token();
+            let wait_cancel = stream_cancel.clone();
+            tokio::spawn(async move {
+                wait_cancel.cancelled().await;
+                drop(tx);
+            });
+            Ok(ProviderStream::new(rx, stream_cancel))
+        }
+    }
 
     #[async_trait::async_trait]
     impl Provider for TruncatedProvider {
@@ -3021,6 +3113,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summary_compaction_observes_turn_cancellation() {
+        let mut engine = Engine::for_tests(
+            Box::new(HangingProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        engine
+            .messages_mut()
+            .push(Message::user("important context"));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_from_task = cancel.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            cancel_from_task.cancel();
+        });
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            engine.compact_with_cancel(&cancel),
+        )
+        .await
+        .expect("compaction should stop promptly")
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(engine.messages().len(), 1);
+        assert!(matches!(
+            &engine.messages()[0].content,
+            MessageContent::Text(text) if text == "important context"
+        ));
+    }
+
+    #[tokio::test]
     async fn snip_compaction_resets_provider_cursor_after_rewriting_history() {
         let resets = Arc::new(AtomicUsize::new(0));
         let provider = Box::new(ResetTrackingProvider {
@@ -3326,5 +3451,31 @@ mod tests {
             }
             _ => panic!("Expected ToolResult block"),
         }
+    }
+
+    #[tokio::test]
+    async fn pending_permission_request_observes_turn_cancellation() {
+        let mut engine = Engine::for_tests(
+            Box::new(MockProvider),
+            SteeringQueue::default(),
+            PermissionMode::Default,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+
+        let output = engine
+            .ask_permission(
+                "Write",
+                &serde_json::json!({"file_path": "/tmp/x", "content": "x"}),
+                "write /tmp/x".to_string(),
+                None,
+                &tx,
+                &cancel,
+            )
+            .await;
+
+        assert!(output.is_error);
+        assert!(output.content.contains("cancelled"));
     }
 }
