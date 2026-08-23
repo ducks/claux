@@ -51,6 +51,8 @@ pub struct Engine {
     pub cost: CostTracker,
     /// Provider-reported size of the last request; anchors the context estimate.
     last_request_usage: Option<RequestUsageBaseline>,
+    /// Short audit summary for the most recently completed compaction.
+    last_compaction_notice: Option<String>,
 }
 
 /// What the provider charged for the most recent request, and how much of the
@@ -109,6 +111,84 @@ pub struct ExecutionTiming {
     pub model_rounds: Vec<ModelTraceEntry>,
 }
 
+/// Provider-anchored estimate of the next request's context footprint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ContextUsageSnapshot {
+    pub estimated_tokens: usize,
+    pub context_window: usize,
+    pub compact_threshold_tokens: usize,
+    pub provider_anchored: bool,
+}
+
+impl ContextUsageSnapshot {
+    pub fn utilization_percent(&self) -> usize {
+        self.estimated_tokens
+            .saturating_mul(100)
+            .checked_div(self.context_window.max(1))
+            .unwrap_or(0)
+    }
+
+    pub fn compact_threshold_percent(&self) -> usize {
+        self.compact_threshold_tokens
+            .saturating_mul(100)
+            .checked_div(self.context_window.max(1))
+            .unwrap_or(0)
+    }
+
+    pub fn headroom_tokens(&self) -> usize {
+        self.context_window.saturating_sub(self.estimated_tokens)
+    }
+
+    pub fn compact_headroom_tokens(&self) -> usize {
+        self.compact_threshold_tokens
+            .saturating_sub(self.estimated_tokens)
+    }
+
+    pub fn short_status(&self) -> String {
+        format!(
+            "ctx {}{}/{} ({}%)",
+            if self.provider_anchored { "" } else { "~" },
+            format_token_count(self.estimated_tokens),
+            format_token_count(self.context_window),
+            self.utilization_percent()
+        )
+    }
+}
+
+fn format_token_count(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}m", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.0}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn format_compaction_notice(
+    strategy: &str,
+    before_tokens: usize,
+    after_tokens: usize,
+    context_window: usize,
+    before_messages: usize,
+    after_messages: usize,
+) -> String {
+    let before_percent = before_tokens.saturating_mul(100) / context_window.max(1);
+    let after_percent = after_tokens.saturating_mul(100) / context_window.max(1);
+    format!(
+        "Compacted via {strategy}: {} → {} messages; context ~{} → ~{} tokens \
+         ({}% → {}% of {}; ~{} freed)",
+        before_messages,
+        after_messages,
+        before_tokens,
+        after_tokens,
+        before_percent,
+        after_percent,
+        context_window,
+        before_tokens.saturating_sub(after_tokens),
+    )
+}
+
 struct TimedToolOutput {
     output: crate::tools::ToolOutput,
     started_after_ms: u64,
@@ -125,6 +205,8 @@ pub enum StreamEvent {
     /// Engine status line (compaction). Display-only: never part of the
     /// assistant's response text.
     Notice(String),
+    /// Updated context-window utilization after provider usage or tool growth.
+    ContextUsage(ContextUsageSnapshot),
     /// A steering message was delivered into the conversation. UIs render
     /// it as the user message it now is.
     SteeringSent(String),
@@ -192,6 +274,7 @@ impl Engine {
             transcript_checkpoint: None,
             cost: CostTracker::new(model),
             last_request_usage: None,
+            last_compaction_notice: None,
         }
     }
 
@@ -227,6 +310,7 @@ impl Engine {
             transcript_checkpoint: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
+            last_compaction_notice: None,
         }
     }
 
@@ -527,6 +611,46 @@ impl Engine {
         baseline.prompt_tokens + compact::estimate_tokens(&self.messages[baseline.message_count..])
     }
 
+    pub fn context_usage(&self) -> ContextUsageSnapshot {
+        let provider_anchored = self
+            .last_request_usage
+            .as_ref()
+            .is_some_and(|baseline| baseline.message_count <= self.messages.len());
+        ContextUsageSnapshot {
+            estimated_tokens: self.estimated_context_tokens(),
+            context_window: self.context_window,
+            compact_threshold_tokens: (self.context_window as f64 * self.auto_compact_threshold)
+                as usize,
+            provider_anchored,
+        }
+    }
+
+    pub fn context_status(&self) -> String {
+        self.context_usage().short_status()
+    }
+
+    pub fn context_report(&self) -> String {
+        let usage = self.context_usage();
+        format!(
+            "Context: {} / {} estimated tokens ({}%)\n\
+             Estimate source: {}\n\
+             Auto-compact: {} tokens ({}%); {} tokens until threshold\n\
+             Window headroom: {} tokens",
+            usage.estimated_tokens,
+            usage.context_window,
+            usage.utilization_percent(),
+            if usage.provider_anchored {
+                "provider usage plus estimated message delta"
+            } else {
+                "message estimate until the next provider usage report"
+            },
+            usage.compact_threshold_tokens,
+            usage.compact_threshold_percent(),
+            usage.compact_headroom_tokens(),
+            usage.headroom_tokens(),
+        )
+    }
+
     /// Record what the provider charged for the request just completed, so the
     /// next budget check can anchor to it instead of re-estimating overhead.
     fn record_request_usage(&mut self, usage: &crate::api::types::Usage, message_count: usize) {
@@ -546,11 +670,11 @@ impl Engine {
     }
 
     /// Check if auto-compact is needed and perform it if so.
-    /// Returns true if compaction was performed.
-    pub async fn maybe_auto_compact(&mut self) -> Result<bool> {
+    /// Returns an audit summary when compaction was performed.
+    pub async fn maybe_auto_compact(&mut self) -> Result<Option<String>> {
         // Disabled if threshold is 0.0
         if self.auto_compact_threshold <= 0.0 {
-            return Ok(false);
+            return Ok(None);
         }
 
         let current_tokens = self.estimated_context_tokens();
@@ -565,11 +689,15 @@ impl Engine {
                 self.context_window
             );
 
-            let result = self.compact().await?;
-            tracing::info!("Auto-compact completed: {}", result);
-            Ok(true)
+            self.compact().await?;
+            let notice = self
+                .last_compaction_notice
+                .clone()
+                .unwrap_or_else(|| "conversation auto-compacted to free context".to_string());
+            tracing::info!("Auto-compact completed: {}", notice);
+            Ok(Some(notice))
         } else {
-            Ok(false)
+            Ok(None)
         }
     }
 
@@ -578,10 +706,12 @@ impl Engine {
     /// 1. Snip — collapse old messages, keep recent ones
     /// 2. Summarize — send conversation to API for full summary
     pub async fn compact(&mut self) -> Result<String> {
+        self.last_compaction_notice = None;
         if self.messages.is_empty() {
             return Ok("Nothing to compact.".to_string());
         }
 
+        let before_context = self.estimated_context_tokens();
         let old_count = self.messages.len();
         let old_tokens = compact::estimate_tokens(&self.messages);
         let mut summary_source = None;
@@ -601,8 +731,18 @@ impl Engine {
             if new_tokens < old_tokens && new_tokens < self.context_window * 70 / 100 {
                 let new_count = snipped.len();
                 self.commit_compacted_messages(snipped);
+                let after_context = self.estimated_context_tokens();
+                self.last_compaction_notice = Some(format_compaction_notice(
+                    "snip",
+                    before_context,
+                    after_context,
+                    self.context_window,
+                    old_count,
+                    new_count,
+                ));
                 return Ok(format!(
-                    "Snipped {} old messages (~{} tokens freed)",
+                    "{}\nSnipped {} old messages (~{} message tokens freed)",
+                    self.last_compaction_notice.as_deref().unwrap_or_default(),
                     old_count - new_count + 1, // +1 for snip marker
                     old_tokens - new_tokens
                 ));
@@ -614,11 +754,16 @@ impl Engine {
         // Full summarization. Keep the current history untouched until the
         // provider completes so a failed compact cannot discard context.
         let summary_source = summary_source.unwrap_or_else(|| self.messages.clone());
-        self.summarize_conversation(summary_source).await
+        self.summarize_conversation(summary_source, before_context)
+            .await
     }
 
     /// Full API-based conversation summary.
-    async fn summarize_conversation(&mut self, messages: Vec<Message>) -> Result<String> {
+    async fn summarize_conversation(
+        &mut self,
+        messages: Vec<Message>,
+        before_context: usize,
+    ) -> Result<String> {
         let summary_prompt = "Summarize the conversation so far in a concise paragraph. \
             Focus on what was discussed, what decisions were made, what files were modified, \
             and any outstanding tasks. Be specific about file paths and changes.";
@@ -663,9 +808,19 @@ impl Engine {
             Message::user("Here is a summary of our conversation so far:"),
             Message::assistant_text(&summary),
         ]);
+        let after_context = self.estimated_context_tokens();
+        self.last_compaction_notice = Some(format_compaction_notice(
+            "summary",
+            before_context,
+            after_context,
+            self.context_window,
+            old_count,
+            self.messages.len(),
+        ));
 
         Ok(format!(
-            "Compacted {old_count} messages into summary.\n\n\x1b[2m{summary}\x1b[0m"
+            "{}\n\n\x1b[2m{summary}\x1b[0m",
+            self.last_compaction_notice.as_deref().unwrap_or_default()
         ))
     }
 
@@ -805,12 +960,10 @@ impl Engine {
         interactive: bool,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
-        let compacted = self.maybe_auto_compact().await?;
-        if compacted {
+        if let Some(notice) = self.maybe_auto_compact().await? {
+            let _ = tx.send(StreamEvent::Notice(notice)).await;
             let _ = tx
-                .send(StreamEvent::Notice(
-                    "conversation auto-compacted to free context".to_string(),
-                ))
+                .send(StreamEvent::ContextUsage(self.context_usage()))
                 .await;
         }
         self.messages.push(user_message);
@@ -899,6 +1052,12 @@ impl Engine {
                                 ))
                                 .await;
                             self.compact().await?;
+                            if let Some(notice) = self.last_compaction_notice.clone() {
+                                let _ = tx.send(StreamEvent::Notice(notice)).await;
+                            }
+                            let _ = tx
+                                .send(StreamEvent::ContextUsage(self.context_usage()))
+                                .await;
                             continue;
                         }
                         _ => {}
@@ -988,6 +1147,9 @@ impl Engine {
                         });
                         self.record_request_usage(&usage, sent_message_count);
                         self.cost.add_usage(&usage);
+                        let _ = tx
+                            .send(StreamEvent::ContextUsage(self.context_usage()))
+                            .await;
                     }
                     ApiEvent::Done => break,
                     ApiEvent::Error(failure) => {
@@ -1031,6 +1193,12 @@ impl Engine {
                                         ))
                                         .await;
                                     self.compact().await?;
+                                    if let Some(notice) = self.last_compaction_notice.clone() {
+                                        let _ = tx.send(StreamEvent::Notice(notice)).await;
+                                    }
+                                    let _ = tx
+                                        .send(StreamEvent::ContextUsage(self.context_usage()))
+                                        .await;
                                     had_error = true;
                                     model_status = "retry";
                                     break;
@@ -1156,11 +1324,10 @@ impl Engine {
             // user turn. Checking only at the turn boundary lets that history
             // grow all the way to the provider limit, so compact at the safe
             // boundary after tool results have paired every tool call.
-            if self.maybe_auto_compact().await? {
+            if let Some(notice) = self.maybe_auto_compact().await? {
+                let _ = tx.send(StreamEvent::Notice(notice)).await;
                 let _ = tx
-                    .send(StreamEvent::Notice(
-                        "conversation auto-compacted to free context".to_string(),
-                    ))
+                    .send(StreamEvent::ContextUsage(self.context_usage()))
                     .await;
                 self.checkpoint_transcript();
             }
@@ -2071,6 +2238,9 @@ mod tests {
             engine.estimated_context_tokens(),
             compact::estimate_tokens(engine.messages())
         );
+        let snapshot = engine.context_usage();
+        assert!(!snapshot.provider_anchored);
+        assert!(snapshot.short_status().starts_with("ctx ~"));
     }
 
     #[test]
@@ -2094,6 +2264,32 @@ mod tests {
         let delta = compact::estimate_tokens(&engine.messages()[1..]);
         assert!(delta > 0);
         assert_eq!(engine.estimated_context_tokens(), 12_000 + delta);
+    }
+
+    #[test]
+    fn context_snapshot_reports_utilization_threshold_and_headroom() {
+        let mut engine = Engine::for_tests(
+            Box::new(MockProvider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        engine.context_window = 20_000;
+        engine.auto_compact_threshold = 0.8;
+        engine.messages_mut().push(Message::user("first"));
+        engine.record_request_usage(&usage(10_000, 0), 1);
+
+        let snapshot = engine.context_usage();
+        assert_eq!(snapshot.estimated_tokens, 10_000);
+        assert_eq!(snapshot.context_window, 20_000);
+        assert_eq!(snapshot.compact_threshold_tokens, 16_000);
+        assert!(snapshot.provider_anchored);
+        assert_eq!(snapshot.utilization_percent(), 50);
+        assert_eq!(snapshot.compact_headroom_tokens(), 6_000);
+        assert_eq!(snapshot.headroom_tokens(), 10_000);
+        assert_eq!(snapshot.short_status(), "ctx 10k/20k (50%)");
+        assert!(engine
+            .context_report()
+            .contains("6000 tokens until threshold"));
     }
 
     #[test]
@@ -2273,6 +2469,7 @@ mod tests {
             transcript_checkpoint: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
+            last_compaction_notice: None,
         };
 
         // Create multiple read-only tool uses (Read and Glob)
@@ -2357,6 +2554,7 @@ mod tests {
             transcript_checkpoint: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
+            last_compaction_notice: None,
         };
 
         // Mix read-only and write tools
@@ -2774,13 +2972,15 @@ mod tests {
                 .push(Message::user(&format!("recent message {index}")));
         }
 
-        engine.compact().await.unwrap();
+        let result = engine.compact().await.unwrap();
 
         assert_eq!(
             engine.messages().len(),
             12,
             "tool-result boundary backoff reproduces the stale cursor index shape"
         );
+        assert!(result.contains("Compacted via snip:"));
+        assert!(result.contains("tokens"));
         assert_eq!(resets.load(Ordering::SeqCst), 1);
     }
 
@@ -2931,6 +3131,7 @@ mod tests {
             transcript_checkpoint: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
+            last_compaction_notice: None,
         };
 
         let tool_uses = vec![(
@@ -3007,6 +3208,7 @@ mod tests {
             transcript_checkpoint: None,
             cost: CostTracker::new("test"),
             last_request_usage: None,
+            last_compaction_notice: None,
         };
 
         // Under PermissionMode::Default, network reads ask for confirmation.

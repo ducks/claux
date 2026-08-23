@@ -329,7 +329,11 @@ pub async fn run(
     engine.set_messages(existing_messages.clone());
 
     let mut app = ChatApp::new(engine.model(), theme);
-    app.status = format!("{} | /help for commands", engine.model());
+    app.status = format!(
+        "{} | {} | /help for commands",
+        engine.model(),
+        engine.context_status()
+    );
 
     // Show existing messages in the UI
     for msg in &existing_messages {
@@ -379,6 +383,9 @@ pub async fn run(
                 match result {
                     CommandResult::Text(ref text) if text == "__cost__" => {
                         app.add_message("system", &commands::format_cost(engine));
+                    }
+                    CommandResult::Text(ref text) if text == "__context__" => {
+                        app.add_message("system", &commands::format_context(engine));
                     }
                     CommandResult::Text(text) => {
                         app.add_message("system", &text);
@@ -456,7 +463,7 @@ pub async fn run(
             app.scroll = 0;
             app.manual_scroll = false;
 
-            app.status = format!("{} | thinking...", app.model);
+            app.status = format!("{} | {} | thinking...", app.model, engine.context_status());
 
             let submit_result =
                 drive_streaming(engine, &trimmed, &mut app, terminal, &mut CrosstermKeys).await;
@@ -475,7 +482,12 @@ pub async fn run(
             }
 
             app.mode = Mode::Input;
-            app.status = format!("{} | {}", engine.model(), engine.cost.format_summary());
+            app.status = format!(
+                "{} | {} | {}",
+                engine.model(),
+                engine.context_status(),
+                engine.cost.format_summary()
+            );
             app.scroll = 0;
             app.manual_scroll = false;
             needs_redraw = true;
@@ -587,6 +599,13 @@ async fn drive_streaming<B: ratatui::backend::Backend>(
                         StreamEvent::Notice(n) => {
                             flush_stream_buffer(app);
                             app.add_message("system", &n);
+                        }
+                        StreamEvent::ContextUsage(usage) => {
+                            app.status = format!(
+                                "{} | {} | thinking...",
+                                app.model,
+                                usage.short_status()
+                            );
                         }
                         StreamEvent::SteeringSent(t) => {
                             flush_stream_buffer(app);
@@ -996,7 +1015,7 @@ mod tests {
         assert_eq!(app.scroll, before, "the transcript must not scroll");
 
         app.handle_key(key(KeyCode::Tab));
-        assert_eq!(app.input, "/compact", "Down moved to the second entry");
+        assert_eq!(app.input, "/context", "Down moved to the second entry");
     }
 
     #[test]

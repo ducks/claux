@@ -65,6 +65,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         tui_only: false,
     },
     CommandSpec {
+        name: "/context",
+        aliases: &[],
+        summary: "Show context use and compaction threshold",
+        arg: None,
+        tui_only: false,
+    },
+    CommandSpec {
         name: "/compact",
         aliases: &[],
         summary: "Summarize conversation to free context",
@@ -218,6 +225,7 @@ pub fn parse_command(input: &str, surface: Surface) -> Option<CommandResult> {
         "/exit" => Some(CommandResult::Exit),
         "/clear" => Some(CommandResult::Text("\x1b[2J\x1b[H".to_string())),
         "/compact" => Some(CommandResult::Async(AsyncCommand::Compact)),
+        "/context" => Some(CommandResult::Text("__context__".to_string())),
         "/diff" => Some(CommandResult::Async(AsyncCommand::Diff)),
         "/undo-turn" => Some(CommandResult::Async(AsyncCommand::UndoTurn)),
         "/image" => {
@@ -285,6 +293,10 @@ pub async fn execute_async(cmd: AsyncCommand, engine: &mut Engine) -> Result<Str
 /// Show cost info (separate since it only needs read access).
 pub fn format_cost(engine: &Engine) -> String {
     engine.cost.format_summary()
+}
+
+pub fn format_context(engine: &Engine) -> String {
+    engine.context_report()
 }
 
 fn execute_resume(id: Option<String>, engine: &mut Engine) -> Result<String> {
@@ -516,6 +528,15 @@ mod tests {
     fn cost_returns_sentinel() {
         if let Some(CommandResult::Text(text)) = parse_command("/cost", Surface::Tui) {
             assert_eq!(text, "__cost__");
+        } else {
+            panic!("expected Text");
+        }
+    }
+
+    #[test]
+    fn context_returns_sentinel() {
+        if let Some(CommandResult::Text(text)) = parse_command("/context", Surface::Tui) {
+            assert_eq!(text, "__context__");
         } else {
             panic!("expected Text");
         }
