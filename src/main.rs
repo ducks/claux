@@ -27,6 +27,7 @@ mod shutdown;
 #[cfg(test)]
 mod test_support;
 mod theme;
+mod tokenizer_fingerprint;
 mod tools;
 mod tui;
 mod utils;
@@ -100,6 +101,10 @@ async fn main() -> Result<()> {
                 if !report.healthy {
                     anyhow::bail!("doctor found configuration errors");
                 }
+                return Ok(());
+            }
+            cli::CliCommand::TokenizerFingerprint { models, json } => {
+                tokenizer_fingerprint::run(models, *json).await?;
                 return Ok(());
             }
             cli::CliCommand::SandboxExec { .. } | cli::CliCommand::SandboxProbe => {

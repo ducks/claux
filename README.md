@@ -131,6 +131,19 @@ For local integrations that must supply the saved key to another process,
 as a secret. Replaybook can use this command on the host while continuing to
 keep the real credential out of VM snapshots and benchmark artifacts.
 
+To compare the native tokenization behavior of two or more OpenRouter models:
+
+```bash
+claux tokenizer-fingerprint stealth/ox-alpha z-ai/glm-5.3
+```
+
+The command sends a fixed multilingual, source-code, whitespace, emoji, and
+Unicode probe corpus with one-token completions. It compares prompt-token
+deltas rather than absolute counts to reduce chat-template overhead. Matching
+fingerprints are evidence of shared tokenization behavior, not proof that two
+model identifiers serve the same model. Pass `--json` for the complete probe
+vectors.
+
 For each named provider, claux resolves authentication in order:
 
 1. `api_key` in its provider table
