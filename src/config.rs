@@ -140,6 +140,25 @@ impl ResolvedModel {
         std::env::var(&self.binding.api_key_env)
             .ok()
             .filter(|key| !key.is_empty())
+            .or_else(|| {
+                let name = self.binding.provider_name.to_ascii_lowercase();
+                let is_openrouter = name == "openrouter"
+                    || self
+                        .binding
+                        .base_url
+                        .as_deref()
+                        .is_some_and(|url| url.contains("openrouter.ai"));
+                if !is_openrouter {
+                    return None;
+                }
+                match crate::auth::read_openrouter_key() {
+                    Ok(key) => key,
+                    Err(error) => {
+                        tracing::warn!("could not read saved OpenRouter credential: {error}");
+                        None
+                    }
+                }
+            })
     }
 
     pub fn requires_api_key(&self) -> bool {
