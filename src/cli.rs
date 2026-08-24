@@ -75,6 +75,17 @@ pub enum CliCommand {
         #[arg(long)]
         offline: bool,
     },
+    /// Compare OpenRouter models using native prompt-token counts
+    #[command(name = "tokenizer-fingerprint")]
+    TokenizerFingerprint {
+        /// OpenRouter model identifiers to compare
+        #[arg(required = true, num_args = 2..)]
+        models: Vec<String>,
+
+        /// Emit the complete machine-readable fingerprint
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage claux configuration
     Config {
         #[command(subcommand)]
@@ -169,6 +180,24 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(CliCommand::Doctor { offline: true })
+        ));
+    }
+
+    #[test]
+    fn parses_tokenizer_fingerprint() {
+        let cli = Cli::try_parse_from([
+            "claux",
+            "tokenizer-fingerprint",
+            "stealth/ox-alpha",
+            "z-ai/glm-5.3",
+            "--json",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::TokenizerFingerprint { models, json: true })
+                if models == ["stealth/ox-alpha", "z-ai/glm-5.3"]
         ));
     }
 
