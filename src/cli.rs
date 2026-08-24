@@ -82,8 +82,12 @@ pub enum CliCommand {
         #[arg(required = true, num_args = 2..)]
         models: Vec<String>,
 
-        /// Emit the complete machine-readable fingerprint
-        #[arg(long)]
+        /// Report format
+        #[arg(long, value_enum, conflicts_with = "json")]
+        format: Option<TokenizerOutputFormat>,
+
+        /// Emit JSON (legacy shorthand for --format json)
+        #[arg(long, conflicts_with = "format")]
         json: bool,
     },
     /// Manage claux configuration
@@ -143,6 +147,14 @@ pub enum AuthProvider {
     OpenRouter,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum TokenizerOutputFormat {
+    #[default]
+    Text,
+    Json,
+    Markdown,
+}
+
 #[derive(Subcommand)]
 pub enum ConfigCommand {
     /// Add a secure provider and model profile
@@ -196,8 +208,34 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Some(CliCommand::TokenizerFingerprint { models, json: true })
+            Some(CliCommand::TokenizerFingerprint {
+                models,
+                format: None,
+                json: true
+            })
                 if models == ["stealth/ox-alpha", "z-ai/glm-5.3"]
+        ));
+    }
+
+    #[test]
+    fn parses_markdown_tokenizer_fingerprint() {
+        let cli = Cli::try_parse_from([
+            "claux",
+            "tokenizer-fingerprint",
+            "stealth/ox-alpha",
+            "z-ai/glm-5.3",
+            "--format",
+            "markdown",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::TokenizerFingerprint {
+                format: Some(TokenizerOutputFormat::Markdown),
+                json: false,
+                ..
+            })
         ));
     }
 

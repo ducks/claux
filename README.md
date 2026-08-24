@@ -141,8 +141,9 @@ The command sends a fixed multilingual, source-code, whitespace, emoji, and
 Unicode probe corpus with one-token completions. It compares prompt-token
 deltas rather than absolute counts to reduce chat-template overhead. Matching
 fingerprints are evidence of shared tokenization behavior, not proof that two
-model identifiers serve the same model. Pass `--json` for the complete probe
-vectors.
+model identifiers serve the same model. Pass `--format json` for structured
+data or `--format markdown` for a readable report with the complete probe
+vectors. The existing `--json` shorthand remains supported.
 
 For each named provider, claux resolves authentication in order:
 
