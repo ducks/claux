@@ -103,8 +103,17 @@ async fn main() -> Result<()> {
                 }
                 return Ok(());
             }
-            cli::CliCommand::TokenizerFingerprint { models, json } => {
-                tokenizer_fingerprint::run(models, *json).await?;
+            cli::CliCommand::TokenizerFingerprint {
+                models,
+                format,
+                json,
+            } => {
+                let format = if *json {
+                    cli::TokenizerOutputFormat::Json
+                } else {
+                    format.unwrap_or_default()
+                };
+                tokenizer_fingerprint::run(models, format).await?;
                 return Ok(());
             }
             cli::CliCommand::SandboxExec { .. } | cli::CliCommand::SandboxProbe => {

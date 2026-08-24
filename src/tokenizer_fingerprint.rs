@@ -102,6 +102,7 @@ struct Fingerprint {
 #[derive(Debug, Clone, Serialize)]
 struct ProbeResult {
     name: String,
+    description: String,
     prompt_tokens: u64,
     delta_tokens: i64,
 }
@@ -135,7 +136,7 @@ struct Usage {
     cost: Option<f64>,
 }
 
-pub async fn run(models: &[String], json_output: bool) -> Result<()> {
+pub async fn run(models: &[String], format: crate::cli::TokenizerOutputFormat) -> Result<()> {
     let api_key = openrouter_key()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(90))
@@ -145,15 +146,13 @@ pub async fn run(models: &[String], json_output: bool) -> Result<()> {
     let mut fingerprints = Vec::with_capacity(models.len());
 
     for (index, model) in models.iter().enumerate() {
-        if !json_output {
-            eprintln!(
-                "fingerprinting {} ({}/{}) with {} probes...",
-                model,
-                index + 1,
-                models.len(),
-                PROBES.len()
-            );
-        }
+        eprintln!(
+            "fingerprinting {} ({}/{}) with {} probes...",
+            model,
+            index + 1,
+            models.len(),
+            PROBES.len()
+        );
         fingerprints.push(
             fingerprint_model(
                 &client,
@@ -170,10 +169,12 @@ pub async fn run(models: &[String], json_output: bool) -> Result<()> {
         comparisons: compare_all(&fingerprints),
         fingerprints,
     };
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_report(&report);
+    match format {
+        crate::cli::TokenizerOutputFormat::Text => print_report(&report),
+        crate::cli::TokenizerOutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        crate::cli::TokenizerOutputFormat::Markdown => print!("{}", markdown_report(&report)),
     }
     Ok(())
 }
@@ -205,6 +206,7 @@ async fn fingerprint_model(
         total_cost = add_optional(total_cost, cost);
         probes.push(ProbeResult {
             name: (*name).to_string(),
+            description: probe_description(name).to_string(),
             prompt_tokens,
             delta_tokens: prompt_tokens as i64 - baseline_prompt_tokens as i64,
         });
@@ -325,6 +327,36 @@ fn wrapped(probe: &str) -> String {
     format!("{WRAPPER_PREFIX}{probe}{WRAPPER_SUFFIX}")
 }
 
+fn probe_description(name: &str) -> &'static str {
+    match name {
+        "english-short" => "Common English words and spacing",
+        "english-prose" => "English sentence-piece segmentation",
+        "camel-snake" => "CamelCase, snake_case, and technical identifiers",
+        "shell" => "Shell commands, flags, operators, and quoting",
+        "python" => "Python syntax, indentation, and type annotations",
+        "rust" => "Rust generics, paths, punctuation, and method chains",
+        "json" => "Compact JSON keys, values, punctuation, and decimals",
+        "punctuation" => "Dense ASCII symbols and escape-sensitive characters",
+        "numbers" => "Leading zeros, long integers, decimals, and timestamps",
+        "whitespace" => "Repeated spaces, tabs, newlines, and indentation",
+        "repetition" => "Repeated substring merge behavior",
+        "urls" => "Unicode domains, URL syntax, paths, and query parameters",
+        "chinese-common" => "Common Simplified Chinese characters and punctuation",
+        "chinese-ops" => "Chinese infrastructure vocabulary and longer compounds",
+        "chinese-mixed" => "Chinese-English code switching and product names",
+        "japanese" => "Japanese scripts and operational vocabulary",
+        "korean" => "Korean Hangul and operational vocabulary",
+        "cyrillic" => "Cyrillic segmentation and inflected words",
+        "arabic" => "Arabic script, joining behavior, and punctuation",
+        "emoji" => "Emoji sequences, variation selectors, and skin tones",
+        "combining" => "Decomposed Latin characters with combining marks",
+        "rare-unicode" => "Rare CJK, ancient symbols, math, and technical glyphs",
+        "zero-width" => "Zero-width joiners, spaces, and soft hyphens",
+        "long-identifiers" => "Long compound identifiers common in telemetry and code",
+        _ => "Tokenizer segmentation behavior",
+    }
+}
+
 fn add_optional(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left + right),
@@ -404,6 +436,82 @@ fn print_report(report: &Report) {
     );
 }
 
+fn markdown_report(report: &Report) -> String {
+    let mut output = String::new();
+    output.push_str("# Tokenizer Fingerprint\n\n");
+    output.push_str(&format!("**Method:** {}\n\n", report.method));
+    output.push_str("## Models\n\n");
+    output.push_str("| Model | Metadata family | Baseline prompt tokens | Probe cost |\n");
+    output.push_str("|---|---:|---:|---:|\n");
+    for fingerprint in &report.fingerprints {
+        let cost = fingerprint
+            .total_cost
+            .map(|cost| format!("${cost:.6}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        output.push_str(&format!(
+            "| `{}` | {} | {} | {} |\n",
+            markdown_escape(&fingerprint.model),
+            fingerprint.tokenizer_family.as_deref().unwrap_or("unknown"),
+            fingerprint.baseline_prompt_tokens,
+            cost
+        ));
+    }
+
+    output.push_str("\n## Comparisons\n\n");
+    for comparison in &report.comparisons {
+        output.push_str(&format!(
+            "- `{}` vs `{}`: **{}/{} deltas match ({:.1}%)**{}\n",
+            markdown_escape(&comparison.left),
+            markdown_escape(&comparison.right),
+            comparison.matching_probes,
+            comparison.total_probes,
+            comparison.match_percent,
+            if comparison.identical {
+                " — identical fingerprint"
+            } else {
+                ""
+            }
+        ));
+    }
+    output.push_str(
+        "\n> Matching deltas are evidence of shared tokenization behavior, not proof of model identity.\n\n",
+    );
+
+    output.push_str("## Probe deltas\n\n");
+    output.push_str("| Probe | What it checks |");
+    for fingerprint in &report.fingerprints {
+        output.push_str(&format!(" `{}` |", markdown_escape(&fingerprint.model)));
+    }
+    output.push_str("\n|---|---|");
+    for _ in &report.fingerprints {
+        output.push_str("---:|");
+    }
+    output.push('\n');
+    if let Some(first) = report.fingerprints.first() {
+        for (probe_index, probe) in first.probes.iter().enumerate() {
+            output.push_str(&format!(
+                "| {} | {} |",
+                markdown_escape(&probe.name),
+                markdown_escape(&probe.description)
+            ));
+            for fingerprint in &report.fingerprints {
+                let delta = fingerprint
+                    .probes
+                    .get(probe_index)
+                    .map(|probe| probe.delta_tokens.to_string())
+                    .unwrap_or_else(|| "n/a".to_string());
+                output.push_str(&format!(" {delta} |"));
+            }
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn markdown_escape(value: &str) -> String {
+    value.replace('|', "\\|").replace('`', "\\`")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +526,7 @@ mod tests {
                 .enumerate()
                 .map(|(index, delta)| ProbeResult {
                     name: format!("probe-{index}"),
+                    description: format!("description-{index}"),
                     prompt_tokens: (10 + delta) as u64,
                     delta_tokens: *delta,
                 })
@@ -469,5 +578,29 @@ mod tests {
         assert_eq!(retry_delay(0, Some(7)), Duration::from_secs(7));
         assert_eq!(retry_delay(0, None), Duration::from_secs(2));
         assert_eq!(retry_delay(8, None), Duration::from_secs(32));
+    }
+
+    #[test]
+    fn markdown_contains_summary_and_probe_evidence() {
+        let left = fingerprint("one", &[1, 2]);
+        let right = fingerprint("two", &[1, 2]);
+        let report = Report {
+            method: "test method",
+            comparisons: compare_all(&[left.clone(), right.clone()]),
+            fingerprints: vec![left, right],
+        };
+
+        let markdown = markdown_report(&report);
+        assert!(markdown.contains("# Tokenizer Fingerprint"));
+        assert!(markdown.contains("**2/2 deltas match (100.0%)**"));
+        assert!(markdown.contains("| probe-0 | description-0 | 1 | 1 |"));
+        assert!(markdown.contains("not proof of model identity"));
+    }
+
+    #[test]
+    fn every_probe_has_a_specific_description() {
+        for (name, _) in PROBES {
+            assert_ne!(probe_description(name), "Tokenizer segmentation behavior");
+        }
     }
 }
