@@ -1,4 +1,5 @@
 mod api;
+mod auth;
 mod bootstrap;
 mod checkpoint;
 mod cli;
@@ -60,6 +61,25 @@ async fn main() -> Result<()> {
 
     if let Some(command) = &args.command {
         match command {
+            cli::CliCommand::Auth { command } => {
+                match command {
+                    cli::AuthCommand::Login {
+                        provider: cli::AuthProvider::OpenRouter,
+                        headless,
+                        no_browser,
+                    } => auth::login_openrouter(*headless, *no_browser).await?,
+                    cli::AuthCommand::Status {
+                        provider: cli::AuthProvider::OpenRouter,
+                    } => auth::status_openrouter()?,
+                    cli::AuthCommand::Logout {
+                        provider: cli::AuthProvider::OpenRouter,
+                    } => auth::logout_openrouter()?,
+                    cli::AuthCommand::Token {
+                        provider: cli::AuthProvider::OpenRouter,
+                    } => auth::print_openrouter_token()?,
+                }
+                return Ok(());
+            }
             cli::CliCommand::Config {
                 command:
                     cli::ConfigCommand::Init {
@@ -305,12 +325,23 @@ fn build_provider(resolved: &config::ResolvedModel) -> Result<Box<dyn api::Provi
     let binding = &resolved.binding;
     let api_key = resolved.resolve_api_key().unwrap_or_default();
     if api_key.is_empty() && resolved.requires_api_key() {
+        let login_hint = if binding.provider_name.eq_ignore_ascii_case("openrouter")
+            || binding
+                .base_url
+                .as_deref()
+                .is_some_and(|url| url.contains("openrouter.ai"))
+        {
+            " or run `claux auth login openrouter`"
+        } else {
+            ""
+        };
         anyhow::bail!(
-            "No API key found for profile '{}' (provider '{}'). Set {} or update \
+            "No API key found for profile '{}' (provider '{}'). Set {}{} or update \
              ~/.config/claux/config.toml.",
             binding.profile,
             binding.provider_name,
             binding.api_key_env,
+            login_hint,
         );
     }
     match binding.provider_kind {

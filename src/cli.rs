@@ -64,6 +64,11 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 pub enum CliCommand {
+    /// Authenticate claux with a model provider
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Diagnose configuration, authentication, tools, and provider connectivity
     Doctor {
         /// Skip the provider network check
@@ -86,6 +91,45 @@ pub enum CliCommand {
     /// Internal entry point used to verify Landlock enforcement.
     #[command(name = "__sandbox-probe", hide = true)]
     SandboxProbe,
+}
+
+#[derive(Subcommand)]
+pub enum AuthCommand {
+    /// Authorize claux and save the resulting credential
+    Login {
+        #[arg(value_enum)]
+        provider: AuthProvider,
+
+        /// Display a code to copy and paste instead of using a localhost callback
+        #[arg(long)]
+        headless: bool,
+
+        /// Print the authorization URL without opening a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Report whether a saved credential is available
+    Status {
+        #[arg(value_enum)]
+        provider: AuthProvider,
+    },
+    /// Remove a saved credential
+    Logout {
+        #[arg(value_enum)]
+        provider: AuthProvider,
+    },
+    /// Print a saved credential for integration with another local tool
+    #[command(hide = true)]
+    Token {
+        #[arg(value_enum)]
+        provider: AuthProvider,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum AuthProvider {
+    #[value(name = "openrouter")]
+    OpenRouter,
 }
 
 #[derive(Subcommand)]
@@ -125,6 +169,29 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(CliCommand::Doctor { offline: true })
+        ));
+    }
+
+    #[test]
+    fn parses_headless_openrouter_login() {
+        let cli = Cli::try_parse_from([
+            "claux",
+            "auth",
+            "login",
+            "openrouter",
+            "--headless",
+            "--no-browser",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::Auth {
+                command: AuthCommand::Login {
+                    provider: AuthProvider::OpenRouter,
+                    headless: true,
+                    no_browser: true,
+                },
+            })
         ));
     }
 

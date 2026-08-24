@@ -111,11 +111,32 @@ output when the selected model supports them.
 
 ## Auth
 
+OpenRouter users can authorize Claux without manually copying an API key:
+
+```bash
+claux auth login openrouter
+```
+
+The command uses OAuth PKCE, opens OpenRouter in the browser, and receives the
+result through a temporary localhost callback. On a remote or headless host,
+use `claux auth login openrouter --headless`; OpenRouter will display a
+single-use code to paste into the terminal. The resulting user-controlled API
+key is stored outside `config.toml` in Claux's platform configuration directory
+(`~/.config/claux/credentials/openrouter` on Linux) with user-only permissions. Use
+`claux auth status openrouter` or `claux auth logout openrouter` to inspect or
+remove it.
+
+For local integrations that must supply the saved key to another process,
+`claux auth token openrouter` prints it to standard output. Treat that output
+as a secret. Replaybook can use this command on the host while continuing to
+keep the real credential out of VM snapshots and benchmark artifacts.
+
 For each named provider, claux resolves authentication in order:
 
 1. `api_key` in its provider table
 2. `api_key_cmd` (shell command that returns a key)
 3. The provider's `api_key_env` environment variable
+4. A credential saved by `claux auth login` for that provider
 
 Claude Free, Pro, and Max subscription credentials are not supported. Use an
 Anthropic API key or an OpenAI-compatible endpoint such as OpenRouter.
