@@ -188,8 +188,13 @@ claux usage status openrouter --json
 OpenRouter reports key usage, an optional spending limit, remaining allowance,
 and daily/weekly/monthly counters through its read-only key endpoint. Account-
 wide credits require a management key and are not queried. Providers without a
-documented quota endpoint (including OpenCode Go) are reported as unavailable;
-Claux never renders an unknown balance as zero.
+configured usage endpoint are reported as unavailable; Claux never renders an
+unknown balance as zero.
+
+OpenCode Go can be queried explicitly with `claux usage status opencode-go` when
+`OPENCODE_GO_API_KEY` (or `OPENCODE_API_KEY`) is set. It reports the account-wide
+rolling 5-hour, weekly, and monthly usage windows and reset times. OpenCode Go's
+credit-wallet balance is separate and is not exposed by that endpoint.
 
 For each named provider, claux resolves authentication in order:
 
