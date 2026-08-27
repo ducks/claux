@@ -1,11 +1,15 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const OPENROUTER_API_BASE: &str = "https://openrouter.ai/api/v1";
 const MAX_REQUEST_ATTEMPTS: usize = 6;
+const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 const WRAPPER_PREFIX: &str = "CLX_TOKENIZER_FINGERPRINT_BEGIN\n";
 const WRAPPER_SUFFIX: &str = "\nCLX_TOKENIZER_FINGERPRINT_END";
 
@@ -90,7 +94,7 @@ const PROBES: &[(&str, &str)] = &[
     ),
 ];
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Fingerprint {
     model: String,
     tokenizer_family: Option<String>,
@@ -99,7 +103,7 @@ struct Fingerprint {
     total_cost: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProbeResult {
     name: String,
     description: String,
@@ -136,16 +140,62 @@ struct Usage {
     cost: Option<f64>,
 }
 
-pub async fn run(models: &[String], format: crate::cli::TokenizerOutputFormat) -> Result<()> {
+#[derive(Debug, Serialize, Deserialize)]
+struct Checkpoint {
+    schema_version: u32,
+    corpus_hash: String,
+    models: Vec<String>,
+    fingerprints: Vec<Fingerprint>,
+}
+
+pub async fn run(
+    models: &[String],
+    format: crate::cli::TokenizerOutputFormat,
+    output: Option<&Path>,
+    resume: bool,
+) -> Result<()> {
     let api_key = openrouter_key()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(90))
         .build()
         .context("build OpenRouter HTTP client")?;
-    let families = fetch_tokenizer_families(&client, &api_key).await;
-    let mut fingerprints = Vec::with_capacity(models.len());
+    let families = fetch_model_catalog(&client, &api_key).await?;
+    validate_models(models, &families)?;
+
+    let corpus_hash = corpus_hash();
+    let checkpoint_path = checkpoint_path(models, &corpus_hash);
+    let mut checkpoint = if resume {
+        load_checkpoint(&checkpoint_path, models, &corpus_hash).with_context(|| {
+            format!(
+                "resume tokenizer fingerprint from {}",
+                checkpoint_path.display()
+            )
+        })?
+    } else {
+        Checkpoint {
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            corpus_hash,
+            models: models.to_vec(),
+            fingerprints: Vec::new(),
+        }
+    };
+    write_checkpoint(&checkpoint_path, &checkpoint)?;
+    eprintln!("checkpoint: {}", checkpoint_path.display());
 
     for (index, model) in models.iter().enumerate() {
+        if checkpoint
+            .fingerprints
+            .iter()
+            .any(|fingerprint| fingerprint.model == *model)
+        {
+            eprintln!(
+                "reusing {} ({}/{}) from checkpoint",
+                model,
+                index + 1,
+                models.len()
+            );
+            continue;
+        }
         eprintln!(
             "fingerprinting {} ({}/{}) with {} probes...",
             model,
@@ -153,28 +203,65 @@ pub async fn run(models: &[String], format: crate::cli::TokenizerOutputFormat) -
             models.len(),
             PROBES.len()
         );
-        fingerprints.push(
-            fingerprint_model(
-                &client,
-                &api_key,
-                model,
-                families.get(model).cloned().flatten(),
-            )
-            .await?,
-        );
+        let fingerprint = fingerprint_model(
+            &client,
+            &api_key,
+            model,
+            families.get(model).cloned().flatten(),
+        )
+        .await?;
+        checkpoint.fingerprints.push(fingerprint);
+        write_checkpoint(&checkpoint_path, &checkpoint)?;
     }
+
+    let fingerprints = models
+        .iter()
+        .map(|model| {
+            checkpoint
+                .fingerprints
+                .iter()
+                .find(|fingerprint| fingerprint.model == *model)
+                .cloned()
+                .with_context(|| format!("checkpoint omitted completed model {model}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let report = Report {
         method: "native prompt-token deltas against a fixed chat wrapper",
         comparisons: compare_all(&fingerprints),
         fingerprints,
     };
-    match format {
-        crate::cli::TokenizerOutputFormat::Text => print_report(&report),
-        crate::cli::TokenizerOutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        }
-        crate::cli::TokenizerOutputFormat::Markdown => print!("{}", markdown_report(&report)),
+    let rendered = render_report(&report, format)?;
+    if let Some(path) = output {
+        write_atomic(path, rendered.as_bytes())
+            .with_context(|| format!("write tokenizer report to {}", path.display()))?;
+        eprintln!("report: {}", path.display());
+    } else {
+        print!("{rendered}");
+    }
+    Ok(())
+}
+
+fn validate_models(models: &[String], catalog: &HashMap<String, Option<String>>) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    let duplicates = models
+        .iter()
+        .filter(|model| !seen.insert(model.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !duplicates.is_empty() {
+        bail!("duplicate OpenRouter model IDs: {}", duplicates.join(", "));
+    }
+    let unknown = models
+        .iter()
+        .filter(|model| !catalog.contains_key(model.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        bail!(
+            "unknown OpenRouter model IDs (no inference requests were made): {}",
+            unknown.join(", ")
+        );
     }
     Ok(())
 }
@@ -291,24 +378,24 @@ fn retry_delay(attempt: usize, retry_after: Option<u64>) -> Duration {
     Duration::from_secs(retry_after.unwrap_or_else(|| 2_u64.pow(attempt.min(4) as u32 + 1)))
 }
 
-async fn fetch_tokenizer_families(
+async fn fetch_model_catalog(
     client: &reqwest::Client,
     api_key: &str,
-) -> HashMap<String, Option<String>> {
-    let response = match client
+) -> Result<HashMap<String, Option<String>>> {
+    let response = client
         .get(format!("{OPENROUTER_API_BASE}/models"))
         .bearer_auth(api_key)
         .send()
         .await
-    {
-        Ok(response) => response,
-        Err(_) => return HashMap::new(),
-    };
-    let body: serde_json::Value = match response.json().await {
-        Ok(body) => body,
-        Err(_) => return HashMap::new(),
-    };
-    body.pointer("/data")
+        .context("fetch OpenRouter model catalog for preflight")?
+        .error_for_status()
+        .context("OpenRouter model catalog preflight failed")?;
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .context("decode OpenRouter model catalog for preflight")?;
+    let catalog = body
+        .pointer("/data")
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
@@ -320,7 +407,11 @@ async fn fetch_tokenizer_families(
                 .map(str::to_string);
             Some((id, tokenizer))
         })
-        .collect()
+        .collect::<HashMap<_, _>>();
+    if catalog.is_empty() {
+        bail!("OpenRouter model catalog preflight returned no models");
+    }
+    Ok(catalog)
 }
 
 fn wrapped(probe: &str) -> String {
@@ -365,6 +456,102 @@ fn add_optional(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     }
 }
 
+fn corpus_hash() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(CHECKPOINT_SCHEMA_VERSION.to_le_bytes());
+    hasher.update(WRAPPER_PREFIX.as_bytes());
+    hasher.update([0]);
+    hasher.update(WRAPPER_SUFFIX.as_bytes());
+    for (name, probe) in PROBES {
+        hasher.update([0]);
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hasher.update(probe.as_bytes());
+    }
+    hex_digest(hasher.finalize().as_slice())
+}
+
+fn checkpoint_path(models: &[String], corpus_hash: &str) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(corpus_hash.as_bytes());
+    for model in models {
+        hasher.update([0]);
+        hasher.update(model.as_bytes());
+    }
+    let key = hex_digest(hasher.finalize().as_slice());
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("claux")
+        .join("tokenizer-fingerprints")
+        .join(format!("{key}.json"))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn load_checkpoint(path: &Path, models: &[String], corpus_hash: &str) -> Result<Checkpoint> {
+    let checkpoint: Checkpoint = serde_json::from_slice(
+        &std::fs::read(path).with_context(|| format!("read checkpoint {}", path.display()))?,
+    )
+    .with_context(|| format!("decode checkpoint {}", path.display()))?;
+    if checkpoint.schema_version != CHECKPOINT_SCHEMA_VERSION {
+        bail!(
+            "checkpoint schema is {}, expected {}",
+            checkpoint.schema_version,
+            CHECKPOINT_SCHEMA_VERSION
+        );
+    }
+    if checkpoint.corpus_hash != corpus_hash {
+        bail!("checkpoint belongs to a different tokenizer probe corpus");
+    }
+    if checkpoint.models != models {
+        bail!("checkpoint belongs to a different ordered model list");
+    }
+    let completed = checkpoint
+        .fingerprints
+        .iter()
+        .map(|fingerprint| fingerprint.model.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if completed.len() != checkpoint.fingerprints.len()
+        || completed
+            .iter()
+            .any(|model| !models.iter().any(|item| item == model))
+    {
+        bail!("checkpoint contains duplicate or unexpected completed models");
+    }
+    Ok(checkpoint)
+}
+
+fn write_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(checkpoint).context("encode tokenizer checkpoint")?;
+    write_atomic(path, &bytes).with_context(|| format!("write checkpoint {}", path.display()))
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("output path has no valid UTF-8 file name")?;
+    let temporary = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
+    std::fs::write(&temporary, bytes)?;
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
 fn compare_all(fingerprints: &[Fingerprint]) -> Vec<Comparison> {
     let mut comparisons = Vec::new();
     for left_index in 0..fingerprints.len() {
@@ -395,28 +582,49 @@ fn compare_all(fingerprints: &[Fingerprint]) -> Vec<Comparison> {
     comparisons
 }
 
-fn print_report(report: &Report) {
-    println!("TOKENIZER FINGERPRINT");
-    println!("method: {}", report.method);
-    println!();
-    println!("model                                      family      baseline   cost");
-    println!("-----------------------------------------------------------------------");
+fn render_report(report: &Report, format: crate::cli::TokenizerOutputFormat) -> Result<String> {
+    match format {
+        crate::cli::TokenizerOutputFormat::Text => Ok(text_report(report)),
+        crate::cli::TokenizerOutputFormat::Json => {
+            Ok(format!("{}\n", serde_json::to_string_pretty(report)?))
+        }
+        crate::cli::TokenizerOutputFormat::Markdown => Ok(markdown_report(report)),
+    }
+}
+
+fn text_report(report: &Report) -> String {
+    let mut output = String::new();
+    writeln!(output, "TOKENIZER FINGERPRINT").unwrap();
+    writeln!(output, "method: {}\n", report.method).unwrap();
+    writeln!(
+        output,
+        "model                                      family      baseline   cost"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "-----------------------------------------------------------------------"
+    )
+    .unwrap();
     for fingerprint in &report.fingerprints {
         let cost = fingerprint
             .total_cost
             .map(|cost| format!("${cost:.6}"))
             .unwrap_or_else(|| "n/a".to_string());
-        println!(
+        writeln!(
+            output,
             "{:<42} {:<11} {:>8}   {:>9}",
             fingerprint.model,
             fingerprint.tokenizer_family.as_deref().unwrap_or("unknown"),
             fingerprint.baseline_prompt_tokens,
             cost
-        );
+        )
+        .unwrap();
     }
-    println!();
+    output.push('\n');
     for comparison in &report.comparisons {
-        println!(
+        writeln!(
+            output,
             "{} vs {}: {}/{} deltas match ({:.1}%){}",
             comparison.left,
             comparison.right,
@@ -428,12 +636,13 @@ fn print_report(report: &Report) {
             } else {
                 ""
             }
-        );
+        )
+        .unwrap();
     }
-    println!();
-    println!(
-        "Matching deltas are evidence of shared tokenization behavior, not proof of model identity."
+    output.push_str(
+        "\nMatching deltas are evidence of shared tokenization behavior, not proof of model identity.\n",
     );
+    output
 }
 
 fn markdown_report(report: &Report) -> String {
@@ -602,5 +811,67 @@ mod tests {
         for (name, _) in PROBES {
             assert_ne!(probe_description(name), "Tokenizer segmentation behavior");
         }
+    }
+
+    #[test]
+    fn preflight_rejects_unknown_and_duplicate_models() {
+        let catalog = HashMap::from([
+            ("known/one".to_string(), Some("One".to_string())),
+            ("known/two".to_string(), Some("Two".to_string())),
+        ]);
+        let unknown = validate_models(&["known/one".to_string(), ">".to_string()], &catalog)
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("no inference requests were made"));
+        assert!(unknown.contains('>'));
+
+        let duplicate = validate_models(
+            &["known/one".to_string(), "known/one".to_string()],
+            &catalog,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(duplicate.contains("duplicate OpenRouter model IDs"));
+    }
+
+    #[test]
+    fn checkpoint_round_trips_completed_models() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("checkpoint.json");
+        let models = vec!["one/model".to_string(), "two/model".to_string()];
+        let hash = corpus_hash();
+        let checkpoint = Checkpoint {
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            corpus_hash: hash.clone(),
+            models: models.clone(),
+            fingerprints: vec![fingerprint("one/model", &[1, 2])],
+        };
+
+        write_checkpoint(&path, &checkpoint).unwrap();
+        let loaded = load_checkpoint(&path, &models, &hash).unwrap();
+        assert_eq!(loaded.models, models);
+        assert_eq!(loaded.fingerprints.len(), 1);
+        assert_eq!(loaded.fingerprints[0].model, "one/model");
+    }
+
+    #[test]
+    fn checkpoint_key_depends_on_ordered_models() {
+        let hash = corpus_hash();
+        let one = checkpoint_path(&["one".to_string(), "two".to_string()], &hash);
+        let two = checkpoint_path(&["two".to_string(), "one".to_string()], &hash);
+        assert_ne!(one, two);
+        assert_eq!(
+            one,
+            checkpoint_path(&["one".to_string(), "two".to_string()], &hash)
+        );
+    }
+
+    #[test]
+    fn atomic_output_replaces_complete_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("report.md");
+        write_atomic(&path, b"first").unwrap();
+        write_atomic(&path, b"second").unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "second");
     }
 }
