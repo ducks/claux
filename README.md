@@ -87,6 +87,14 @@ protocol = "chat_completions"
 api_key_env = "OPENROUTER_API_KEY"
 prompt_caching = true
 
+# Vercel AI Gateway is also a generic OpenAI-compatible provider.
+[providers.vercel]
+type = "openai"
+base_url = "https://ai-gateway.vercel.sh/v1"
+name = "vercel"
+protocol = "chat_completions"
+api_key_env = "AI_GATEWAY_API_KEY"
+
 [model_profiles.sonnet]
 provider = "anthropic"
 model = "claude-sonnet-5"
@@ -96,6 +104,11 @@ display_name = "Sonnet"
 provider = "openrouter"
 model = "openai/gpt-5.6"
 display_name = "GPT via OpenRouter"
+
+[model_profiles.vercel-glm-5-3-flash]
+provider = "vercel"
+model = "zai/glm-5.3-flash"
+display_name = "GLM-5.3 Flash via Vercel AI Gateway"
 ```
 
 Saved sessions never contain API keys. They retain a credential-free transport
