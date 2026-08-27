@@ -158,6 +158,25 @@ model identifiers serve the same model. Pass `--format json` for structured
 data or `--format markdown` for a readable report with the complete probe
 vectors. The existing `--json` shorthand remains supported.
 
+Use `--output FILE` to write the completed report atomically without relying
+on shell redirection. Claux checkpoints each completed model in its platform
+cache directory. If a provider becomes unavailable after some models finish,
+rerun the same ordered model list with `--resume`; completed fingerprints are
+reused and can also be rendered into another format without new inference:
+
+```bash
+claux tokenizer-fingerprint stealth/ox-alpha z-ai/glm-5.3 \
+  --format markdown --output ox-vs-glm.md
+
+# If the provider interrupts the run, repeat it with:
+claux tokenizer-fingerprint stealth/ox-alpha z-ai/glm-5.3 \
+  --format markdown --output ox-vs-glm.md --resume
+```
+
+Before the first inference request, Claux validates every supplied model ID
+against OpenRouter's catalog. Typos and accidentally passed shell operators
+therefore fail without spending credits.
+
 For each named provider, claux resolves authentication in order:
 
 1. `api_key` in its provider table

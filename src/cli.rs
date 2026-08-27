@@ -89,6 +89,14 @@ pub enum CliCommand {
         /// Emit JSON (legacy shorthand for --format json)
         #[arg(long, conflicts_with = "format")]
         json: bool,
+
+        /// Write the report atomically instead of printing it to stdout
+        #[arg(long = "output", value_name = "FILE")]
+        report_output: Option<PathBuf>,
+
+        /// Reuse completed models from this exact corpus and model list
+        #[arg(long = "resume")]
+        resume_fingerprint: bool,
     },
     /// Manage claux configuration
     Config {
@@ -211,7 +219,9 @@ mod tests {
             Some(CliCommand::TokenizerFingerprint {
                 models,
                 format: None,
-                json: true
+                json: true,
+                report_output: None,
+                resume_fingerprint: false
             })
                 if models == ["stealth/ox-alpha", "z-ai/glm-5.3"]
         ));
@@ -226,6 +236,9 @@ mod tests {
             "z-ai/glm-5.3",
             "--format",
             "markdown",
+            "--output",
+            "/tmp/fingerprint.md",
+            "--resume",
         ])
         .unwrap();
 
@@ -234,8 +247,10 @@ mod tests {
             Some(CliCommand::TokenizerFingerprint {
                 format: Some(TokenizerOutputFormat::Markdown),
                 json: false,
+                report_output: Some(ref output),
+                resume_fingerprint: true,
                 ..
-            })
+            }) if output == &PathBuf::from("/tmp/fingerprint.md")
         ));
     }
 
