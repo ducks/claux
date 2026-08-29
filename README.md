@@ -177,6 +177,25 @@ Before the first inference request, Claux validates every supplied model ID
 against OpenRouter's catalog. Typos and accidentally passed shell operators
 therefore fail without spending credits.
 
+To check provider-reported spending and key limits without making an inference
+request:
+
+```bash
+claux usage status                 # OpenRouter by default
+claux usage status openrouter --json
+```
+
+OpenRouter reports key usage, an optional spending limit, remaining allowance,
+and daily/weekly/monthly counters through its read-only key endpoint. Account-
+wide credits require a management key and are not queried. Providers without a
+configured usage endpoint are reported as unavailable; Claux never renders an
+unknown balance as zero.
+
+OpenCode Go can be queried explicitly with `claux usage status opencode-go` when
+`OPENCODE_GO_API_KEY` (or `OPENCODE_API_KEY`) is set. It reports the account-wide
+rolling 5-hour, weekly, and monthly usage windows and reset times. OpenCode Go's
+credit-wallet balance is separate and is not exposed by that endpoint.
+
 For each named provider, claux resolves authentication in order:
 
 1. `api_key` in its provider table

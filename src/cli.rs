@@ -75,6 +75,11 @@ pub enum CliCommand {
         #[arg(long)]
         offline: bool,
     },
+    /// Show provider-reported account and key usage
+    Usage {
+        #[command(subcommand)]
+        command: UsageCommand,
+    },
     /// Compare OpenRouter models using native prompt-token counts
     #[command(name = "tokenizer-fingerprint")]
     TokenizerFingerprint {
@@ -149,6 +154,19 @@ pub enum AuthCommand {
     },
 }
 
+#[derive(Subcommand)]
+pub enum UsageCommand {
+    /// Query a provider's read-only usage status endpoint
+    Status {
+        /// Provider name (defaults to openrouter)
+        provider: Option<String>,
+
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum AuthProvider {
     #[value(name = "openrouter")]
@@ -200,6 +218,21 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(CliCommand::Doctor { offline: true })
+        ));
+    }
+
+    #[test]
+    fn parses_usage_status() {
+        let cli =
+            Cli::try_parse_from(["claux", "usage", "status", "openrouter", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::Usage {
+                command: UsageCommand::Status {
+                    provider: Some(ref provider),
+                    json: true,
+                },
+            }) if provider == "openrouter"
         ));
     }
 

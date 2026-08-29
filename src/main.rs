@@ -30,6 +30,7 @@ mod theme;
 mod tokenizer_fingerprint;
 mod tools;
 mod tui;
+mod usage;
 mod utils;
 
 use anyhow::Result;
@@ -100,6 +101,14 @@ async fn main() -> Result<()> {
                 print!("{}", report.text);
                 if !report.healthy {
                     anyhow::bail!("doctor found configuration errors");
+                }
+                return Ok(());
+            }
+            cli::CliCommand::Usage { command } => {
+                match command {
+                    cli::UsageCommand::Status { provider, json } => {
+                        usage::status(provider.as_deref(), *json).await?
+                    }
                 }
                 return Ok(());
             }
