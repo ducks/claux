@@ -339,6 +339,24 @@ impl<'a> ProviderSpecification<'a> {
                 prompt_caching: true,
                 model: model.unwrap_or("anthropic/claude-sonnet-5"),
             },
+            ConfigProvider::OpenCodeGo => Self {
+                id: "opencode-go",
+                kind: "openai",
+                base_url: Some("https://opencode.ai/zen/go/v1"),
+                protocol: "chat_completions",
+                api_key_env: "OPENCODE_GO_API_KEY",
+                prompt_caching: false,
+                model: model.unwrap_or("glm-5.3"),
+            },
+            ConfigProvider::Vercel => Self {
+                id: "vercel",
+                kind: "openai",
+                base_url: Some("https://ai-gateway.vercel.sh/v1"),
+                protocol: "chat_completions",
+                api_key_env: "AI_GATEWAY_API_KEY",
+                prompt_caching: false,
+                model: model.unwrap_or("zai/glm-5.3-flash"),
+            },
             ConfigProvider::Ollama => Self {
                 id: "ollama",
                 kind: "openai",
@@ -667,6 +685,8 @@ mod tests {
             ConfigProvider::Anthropic,
             ConfigProvider::Openai,
             ConfigProvider::OpenRouter,
+            ConfigProvider::OpenCodeGo,
+            ConfigProvider::Vercel,
             ConfigProvider::Ollama,
         ] {
             let parsed: Config = toml::from_str(&config_template(provider, None)).unwrap();
@@ -702,6 +722,33 @@ mod tests {
         assert_eq!(provider.api_key_env.as_deref(), Some("OPENROUTER_API_KEY"));
         assert!(provider.prompt_caching);
         assert!(provider.api_key.is_none());
+    }
+
+    #[test]
+    fn api_key_gateway_templates_use_provider_endpoints() {
+        let opencode: Config =
+            toml::from_str(&config_template(ConfigProvider::OpenCodeGo, None)).unwrap();
+        let opencode_provider = &opencode.providers["opencode-go"];
+        assert_eq!(
+            opencode_provider.base_url.as_deref(),
+            Some("https://opencode.ai/zen/go/v1")
+        );
+        assert_eq!(
+            opencode_provider.api_key_env.as_deref(),
+            Some("OPENCODE_GO_API_KEY")
+        );
+
+        let vercel: Config =
+            toml::from_str(&config_template(ConfigProvider::Vercel, None)).unwrap();
+        let vercel_provider = &vercel.providers["vercel"];
+        assert_eq!(
+            vercel_provider.base_url.as_deref(),
+            Some("https://ai-gateway.vercel.sh/v1")
+        );
+        assert_eq!(
+            vercel_provider.api_key_env.as_deref(),
+            Some("AI_GATEWAY_API_KEY")
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,7 +67,7 @@ pub async fn login_openrouter(headless: bool, no_browser: bool) -> Result<()> {
 }
 
 pub fn status_openrouter() -> Result<()> {
-    match read_openrouter_key()? {
+    match read_provider_key("openrouter")? {
         Some(_) => println!(
             "OpenRouter authentication is available at {}.",
             openrouter_credential_path()?.display()
@@ -78,14 +78,47 @@ pub fn status_openrouter() -> Result<()> {
 }
 
 pub fn logout_openrouter() -> Result<()> {
-    let path = openrouter_credential_path()?;
+    logout_provider("openrouter", "OpenRouter")
+}
+
+/// Prompt for and save an API key for a provider that does not expose an
+/// OAuth flow (for example OpenCode Go or Vercel AI Gateway).
+pub fn login_api_key(provider: &str, label: &str) -> Result<()> {
+    let key = read_api_key(label)?;
+    let path = provider_credential_path(provider)?;
+    write_credential(&path, &key)?;
+    println!("{label} authentication saved to {}.", path.display());
+    Ok(())
+}
+
+pub fn status_provider(provider: &str, label: &str) -> Result<()> {
+    match read_provider_key(provider)? {
+        Some(_) => println!(
+            "{label} authentication is available at {}.",
+            provider_credential_path(provider)?.display()
+        ),
+        None => println!("{label} authentication is not configured."),
+    }
+    Ok(())
+}
+
+pub fn logout_provider(provider: &str, label: &str) -> Result<()> {
+    let path = provider_credential_path(provider)?;
     match fs::remove_file(&path) {
-        Ok(()) => println!("Removed OpenRouter authentication from {}.", path.display()),
+        Ok(()) => println!("Removed {label} authentication from {}.", path.display()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            println!("OpenRouter authentication was not configured.")
+            println!("{label} authentication was not configured.")
         }
         Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
     }
+    Ok(())
+}
+
+pub fn print_provider_token(provider: &str, label: &str) -> Result<()> {
+    let key = read_provider_key(provider)?.with_context(|| {
+        format!("{label} authentication is not configured; run `claux auth login {provider}`")
+    })?;
+    println!("{key}");
     Ok(())
 }
 
@@ -98,17 +131,36 @@ pub fn print_openrouter_token() -> Result<()> {
 }
 
 pub fn read_openrouter_key() -> Result<Option<String>> {
-    read_credential(&openrouter_credential_path()?)
+    read_provider_key("openrouter")
 }
 
 fn write_openrouter_key(key: &str) -> Result<()> {
     if key.trim().is_empty() {
         bail!("OpenRouter returned an empty API key");
     }
-    write_credential(&openrouter_credential_path()?, key.trim())
+    write_provider_key("openrouter", key.trim())
 }
 
 fn openrouter_credential_path() -> Result<PathBuf> {
+    provider_credential_path("openrouter")
+}
+
+pub fn read_provider_key(provider: &str) -> Result<Option<String>> {
+    read_credential(&provider_credential_path(provider)?)
+}
+
+fn write_provider_key(provider: &str, key: &str) -> Result<()> {
+    write_credential(&provider_credential_path(provider)?, key)
+}
+
+fn provider_credential_path(provider: &str) -> Result<PathBuf> {
+    if provider.is_empty()
+        || !provider
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!("invalid provider credential name: {provider}");
+    }
     let root = if let Some(path) = std::env::var_os("CLAUX_CREDENTIALS_DIR") {
         PathBuf::from(path)
     } else if cfg!(test) {
@@ -120,7 +172,52 @@ fn openrouter_credential_path() -> Result<PathBuf> {
             .join("claux")
             .join("credentials")
     };
-    Ok(root.join("openrouter"))
+    Ok(root.join(provider))
+}
+
+fn read_api_key(label: &str) -> Result<String> {
+    print!("Enter {label} API key: ");
+    io::stdout().flush()?;
+
+    let mut value = String::new();
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        io::stdin().read_line(&mut value)?;
+    } else {
+        crossterm::terminal::enable_raw_mode()?;
+        let result = (|| -> Result<()> {
+            loop {
+                match crossterm::event::read()? {
+                    crossterm::event::Event::Key(event)
+                        if event.kind == crossterm::event::KeyEventKind::Press =>
+                    {
+                        match event.code {
+                            crossterm::event::KeyCode::Enter => break,
+                            crossterm::event::KeyCode::Backspace => {
+                                value.pop();
+                            }
+                            crossterm::event::KeyCode::Char(ch) => value.push(ch),
+                            crossterm::event::KeyCode::Esc => {
+                                bail!("API key entry cancelled");
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        })();
+        let restore = crossterm::terminal::disable_raw_mode();
+        println!();
+        result?;
+        restore?;
+    }
+
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        bail!("API key was empty");
+    }
+    Ok(value)
 }
 
 fn write_credential(path: &Path, value: &str) -> Result<()> {

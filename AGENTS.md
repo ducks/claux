@@ -80,6 +80,16 @@
 
 - Preserve additive configuration behavior and legacy single-provider config
   unless a migration is explicitly requested.
+- When adding a provider or model, prefer a named provider profile with an
+  explicit endpoint, protocol, API-key environment variable, and model ID;
+  keep model-specific behavior out of the engine.
+- Add API-key providers to both `claux auth` and `claux config init` when they
+  have a stable key-based integration. Keep OAuth or device-code flows
+  provider-specific, and do not infer undocumented endpoints from another
+  CLI's login command.
+- Verify a new provider with `claux auth status`, `claux doctor`, and a
+  one-shot smoke test. Add deterministic CLI/config tests; live provider tests
+  must remain opt-in.
 - Keep OpenAI Chat Completions, OpenAI Responses, Anthropic, and compatible
   endpoints separated at the protocol layer. Do not assume every
   OpenAI-compatible provider supports every OpenAI parameter.

@@ -48,7 +48,8 @@ Requires Rust 1.88+. A `shell.nix` is included.
 
 ## First run
 
-Create a starter configuration for Anthropic, OpenAI, OpenRouter, or Ollama,
+Create a starter configuration for Anthropic, OpenAI, OpenRouter, OpenCode Go,
+Vercel AI Gateway, or Ollama,
 then verify authentication, required executables, configured hooks/MCP
 servers, project trust, and provider connectivity:
 
@@ -59,6 +60,8 @@ claux doctor
 # Other examples
 claux config init --provider openai --model gpt-5.6-sol
 claux config init --provider openrouter --model anthropic/claude-sonnet-5
+claux config init --provider opencode-go --model glm-5.3
+claux config init --provider vercel --model zai/glm-5.3-flash
 claux config init --provider ollama --model llama3
 claux doctor --offline  # configuration checks without a network request
 ```
@@ -195,6 +198,19 @@ OpenCode Go can be queried explicitly with `claux usage status opencode-go` when
 `OPENCODE_GO_API_KEY` (or `OPENCODE_API_KEY`) is set. It reports the account-wide
 rolling 5-hour, weekly, and monthly usage windows and reset times. OpenCode Go's
 credit-wallet balance is separate and is not exposed by that endpoint.
+
+OpenCode Go and Vercel AI Gateway use API keys rather than Claux's OpenRouter
+OAuth flow. Save either key securely with an interactive prompt:
+
+```bash
+claux auth login opencode-go
+claux auth login vercel
+```
+
+Use `claux auth status`, `claux auth token`, or `claux auth logout` with the
+same provider name to inspect, export, or remove a saved key. The keys are
+stored separately with user-only permissions and are used as a fallback after
+the configured `api_key`, `api_key_cmd`, and environment variable.
 
 For each named provider, claux resolves authentication in order:
 

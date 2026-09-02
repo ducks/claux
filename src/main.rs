@@ -79,6 +79,32 @@ async fn main() -> Result<()> {
                     cli::AuthCommand::Token {
                         provider: cli::AuthProvider::OpenRouter,
                     } => auth::print_openrouter_token()?,
+                    cli::AuthCommand::Login {
+                        provider: cli::AuthProvider::OpenCodeGo,
+                        ..
+                    } => auth::login_api_key("opencode-go", "OpenCode Go")?,
+                    cli::AuthCommand::Status {
+                        provider: cli::AuthProvider::OpenCodeGo,
+                    } => auth::status_provider("opencode-go", "OpenCode Go")?,
+                    cli::AuthCommand::Logout {
+                        provider: cli::AuthProvider::OpenCodeGo,
+                    } => auth::logout_provider("opencode-go", "OpenCode Go")?,
+                    cli::AuthCommand::Token {
+                        provider: cli::AuthProvider::OpenCodeGo,
+                    } => auth::print_provider_token("opencode-go", "OpenCode Go")?,
+                    cli::AuthCommand::Login {
+                        provider: cli::AuthProvider::Vercel,
+                        ..
+                    } => auth::login_api_key("vercel", "Vercel AI Gateway")?,
+                    cli::AuthCommand::Status {
+                        provider: cli::AuthProvider::Vercel,
+                    } => auth::status_provider("vercel", "Vercel AI Gateway")?,
+                    cli::AuthCommand::Logout {
+                        provider: cli::AuthProvider::Vercel,
+                    } => auth::logout_provider("vercel", "Vercel AI Gateway")?,
+                    cli::AuthCommand::Token {
+                        provider: cli::AuthProvider::Vercel,
+                    } => auth::print_provider_token("vercel", "Vercel AI Gateway")?,
                 }
                 return Ok(());
             }
