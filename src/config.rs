@@ -148,13 +148,23 @@ impl ResolvedModel {
                         .base_url
                         .as_deref()
                         .is_some_and(|url| url.contains("openrouter.ai"));
-                if !is_openrouter {
-                    return None;
-                }
-                match crate::auth::read_openrouter_key() {
+                let provider = self.binding.provider.to_ascii_lowercase();
+                let credential_provider = if is_openrouter {
+                    Some("openrouter")
+                } else if matches!(provider.as_str(), "opencode" | "opencode-go") {
+                    Some("opencode-go")
+                } else if matches!(provider.as_str(), "vercel" | "vercel-ai-gateway") {
+                    Some("vercel")
+                } else {
+                    None
+                }?;
+                match crate::auth::read_provider_key(credential_provider) {
                     Ok(key) => key,
                     Err(error) => {
-                        tracing::warn!("could not read saved OpenRouter credential: {error}");
+                        tracing::warn!(
+                            "could not read saved {} credential: {error}",
+                            credential_provider
+                        );
                         None
                     }
                 }

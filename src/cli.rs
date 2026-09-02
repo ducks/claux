@@ -171,6 +171,10 @@ pub enum UsageCommand {
 pub enum AuthProvider {
     #[value(name = "openrouter")]
     OpenRouter,
+    #[value(name = "opencode-go", alias = "opencode")]
+    OpenCodeGo,
+    #[value(name = "vercel")]
+    Vercel,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -205,6 +209,9 @@ pub enum ConfigProvider {
     Openai,
     #[value(name = "openrouter")]
     OpenRouter,
+    #[value(name = "opencode-go", alias = "opencode")]
+    OpenCodeGo,
+    Vercel,
     Ollama,
 }
 
@@ -305,6 +312,41 @@ mod tests {
                     provider: AuthProvider::OpenRouter,
                     headless: true,
                     no_browser: true,
+                },
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_api_key_provider_logins() {
+        let opencode = Cli::try_parse_from(["claux", "auth", "login", "opencode-go"]).unwrap();
+        assert!(matches!(
+            opencode.command,
+            Some(CliCommand::Auth {
+                command: AuthCommand::Login {
+                    provider: AuthProvider::OpenCodeGo,
+                    ..
+                },
+            })
+        ));
+
+        let vercel = Cli::try_parse_from(["claux", "auth", "login", "vercel"]).unwrap();
+        assert!(matches!(
+            vercel.command,
+            Some(CliCommand::Auth {
+                command: AuthCommand::Login {
+                    provider: AuthProvider::Vercel,
+                    ..
+                },
+            })
+        ));
+
+        let alias = Cli::try_parse_from(["claux", "auth", "status", "opencode"]).unwrap();
+        assert!(matches!(
+            alias.command,
+            Some(CliCommand::Auth {
+                command: AuthCommand::Status {
+                    provider: AuthProvider::OpenCodeGo,
                 },
             })
         ));
