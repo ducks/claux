@@ -55,6 +55,67 @@ pub fn display_width_before(input: &str, cursor: usize) -> usize {
         .sum()
 }
 
+/// Display-only layout for the prompt editor. Soft wrapping never inserts
+/// newlines into the submitted input.
+pub struct VisualLayout {
+    pub lines: Vec<String>,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+}
+
+/// Wrap input at terminal-cell boundaries and locate the insertion cursor.
+/// Explicit newlines (from pasted text) remain hard line breaks; ordinary long
+/// lines wrap visually, like an editor with `wrap` enabled.
+pub fn visual_layout(input: &str, cursor: usize, width: usize) -> VisualLayout {
+    let width = width.max(1);
+    let mut lines = vec![String::new()];
+    let mut row = 0;
+    let mut col = 0;
+    let mut cursor_position = None;
+
+    for (index, character) in input.chars().enumerate() {
+        if index == cursor {
+            cursor_position = Some(normalize_cursor(row, col, width));
+        }
+
+        if character == '\n' {
+            lines.push(String::new());
+            row += 1;
+            col = 0;
+            continue;
+        }
+
+        let character_width = character.width().unwrap_or(0);
+        if character_width > 0 && col + character_width > width {
+            lines.push(String::new());
+            row += 1;
+            col = 0;
+        }
+        lines[row].push(character);
+        col += character_width;
+    }
+
+    let (cursor_row, cursor_col) =
+        cursor_position.unwrap_or_else(|| normalize_cursor(row, col, width));
+    while lines.len() <= cursor_row {
+        lines.push(String::new());
+    }
+
+    VisualLayout {
+        lines,
+        cursor_row,
+        cursor_col,
+    }
+}
+
+fn normalize_cursor(row: usize, col: usize, width: usize) -> (usize, usize) {
+    if col >= width {
+        (row + col / width, col % width)
+    } else {
+        (row, col)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +149,38 @@ mod tests {
         insert_text(&mut input, &mut cursor, "é\n");
         assert_eq!(input, "a界é\nc");
         assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn visually_wraps_without_changing_the_input() {
+        let input = "abcdefghij";
+        let layout = visual_layout(input, input.chars().count(), 4);
+
+        assert_eq!(layout.lines, ["abcd", "efgh", "ij"]);
+        assert_eq!((layout.cursor_row, layout.cursor_col), (2, 2));
+        assert_eq!(input, "abcdefghij");
+    }
+
+    #[test]
+    fn cursor_tracks_wrapped_rows_when_moving_through_input() {
+        let at_end = visual_layout("abcdefghij", 10, 4);
+        assert_eq!((at_end.cursor_row, at_end.cursor_col), (2, 2));
+
+        let near_start = visual_layout("abcdefghij", 2, 4);
+        assert_eq!((near_start.cursor_row, near_start.cursor_col), (0, 2));
+    }
+
+    #[test]
+    fn explicit_newlines_are_hard_breaks() {
+        let layout = visual_layout("abc\ndefgh", 9, 3);
+        assert_eq!(layout.lines, ["abc", "def", "gh"]);
+        assert_eq!((layout.cursor_row, layout.cursor_col), (2, 2));
+    }
+
+    #[test]
+    fn wide_characters_wrap_by_terminal_width() {
+        let layout = visual_layout("a界bc", 4, 3);
+        assert_eq!(layout.lines, ["a界", "bc"]);
+        assert_eq!((layout.cursor_row, layout.cursor_col), (1, 2));
     }
 }
