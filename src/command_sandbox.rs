@@ -6,11 +6,46 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::Stdio;
 use tokio::process::Command;
+
+/// Environment variables that must never be inherited by agent-spawned
+/// processes. Provider credentials are intentionally kept in claux's process
+/// only; shells, hooks, and MCP servers do not need them to do their work.
+fn is_sensitive_environment_name(name: &OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_uppercase();
+    name == "SSH_AUTH_SOCK"
+        || name == "DOCKER_HOST"
+        || name.ends_with("_API_KEY")
+        || name.starts_with("ANTHROPIC_")
+        || name.starts_with("OPENAI_")
+        || name.starts_with("OPENROUTER_")
+        || name.starts_with("AI_GATEWAY_")
+        || name.starts_with("OPENCODE_")
+}
+
+fn sanitized_environment() -> impl Iterator<Item = (OsString, OsString)> {
+    std::env::vars_os().filter(|(name, _)| !is_sensitive_environment_name(name))
+}
+
+/// Replace a child command's inherited environment with a credential-free
+/// copy of claux's environment. Callers can add narrowly-scoped variables
+/// afterwards for their own hook/MCP protocol.
+pub(crate) fn sanitize_command_environment(command: &mut Command) {
+    command.env_clear();
+    command.envs(sanitized_environment());
+}
+
+/// std-process equivalent used by the Linux sandbox helper before `exec`.
+#[cfg(target_os = "linux")]
+fn sanitize_std_command_environment(command: &mut std::process::Command) {
+    command.env_clear();
+    command.envs(sanitized_environment());
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +146,7 @@ impl CommandSandbox {
             let executable =
                 std::env::current_exe().context("could not locate the claux executable")?;
             let mut command = Command::new(executable);
+            sanitize_command_environment(&mut command);
             command
                 .arg("__sandbox-exec")
                 .arg("--workspace")
@@ -121,6 +157,7 @@ impl CommandSandbox {
         }
 
         let mut command = Command::new("sh");
+        sanitize_command_environment(&mut command);
         command.arg("-c").arg(shell_command);
         Ok(command)
     }
@@ -267,10 +304,9 @@ pub fn run_helper(workspace_root: &Path, shell_command: &str) -> Result<()> {
     apply_landlock(workspace_root)?;
 
     use std::os::unix::process::CommandExt;
-    let error = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(shell_command)
-        .exec();
+    let mut command = std::process::Command::new("sh");
+    sanitize_std_command_environment(&mut command);
+    let error = command.arg("-c").arg(shell_command).exec();
     Err(error).context("could not execute sandboxed shell command")
 }
 
@@ -424,6 +460,18 @@ fn push_canonical_if_present(roots: &mut Vec<PathBuf>, path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sensitive_environment_names_are_filtered() {
+        assert!(is_sensitive_environment_name(OsStr::new("OPENAI_API_KEY")));
+        assert!(is_sensitive_environment_name(OsStr::new(
+            "CLAUX_TEST_API_KEY"
+        )));
+        assert!(is_sensitive_environment_name(OsStr::new("SSH_AUTH_SOCK")));
+        assert!(!is_sensitive_environment_name(OsStr::new(
+            "CLAUX_TEST_NORMAL"
+        )));
+    }
 
     #[test]
     fn untrusted_projects_can_only_tighten_bash_policy() {

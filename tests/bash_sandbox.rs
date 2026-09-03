@@ -13,6 +13,24 @@ fn run_sandboxed(workspace: &std::path::Path, command: &str) -> std::process::Ou
         .expect("sandbox helper should start")
 }
 
+fn run_sandboxed_with_env(
+    workspace: &std::path::Path,
+    command: &str,
+    env: &[(&str, &str)],
+) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_claux"));
+    child
+        .arg("__sandbox-exec")
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--command")
+        .arg(command);
+    for (name, value) in env {
+        child.env(name, value);
+    }
+    child.output().expect("sandbox helper should start")
+}
+
 #[test]
 fn landlock_probe_verifies_real_enforcement() {
     let output = Command::new(env!("CARGO_BIN_EXE_claux"))
@@ -102,6 +120,31 @@ fn workspace_write_restrictions_are_inherited_by_child_processes() {
 
     assert!(!output.status.success());
     assert!(!target.exists());
+}
+
+#[test]
+fn workspace_write_children_do_not_inherit_credentials_or_socket_handles() {
+    let workspace = tempfile::tempdir().unwrap();
+    let output = run_sandboxed_with_env(
+        workspace.path(),
+        "printf '%s|%s|%s|%s' \"${CLAUX_TEST_API_KEY-unset}\" \"${OPENAI_API_KEY-unset}\" \"${SSH_AUTH_SOCK-unset}\" \"$CLAUX_TEST_NORMAL\"",
+        &[
+            ("CLAUX_TEST_API_KEY", "secret"),
+            ("OPENAI_API_KEY", "secret"),
+            ("SSH_AUTH_SOCK", "/tmp/agent.sock"),
+            ("CLAUX_TEST_NORMAL", "retained"),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "unset|unset|unset|retained"
+    );
 }
 
 #[cfg(unix)]
