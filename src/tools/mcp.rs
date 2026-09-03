@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use super::{Tool, ToolOutput};
+use crate::command_sandbox::sanitize_command_environment;
 use crate::config::McpServerConfig;
 
 type McpClient = RunningService<RoleClient, ClientInfo>;
@@ -269,6 +270,7 @@ async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> 
     let env = config.env.clone();
 
     let transport = TokioChildProcess::new(Command::new(&command).configure(|cmd| {
+        sanitize_command_environment(cmd);
         cmd.args(&args);
         for (k, v) in &env {
             cmd.env(k, v);

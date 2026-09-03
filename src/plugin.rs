@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use tracing::warn;
 
+use crate::command_sandbox::sanitize_command_environment;
 use crate::config::HookTrigger;
 
 const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -62,6 +63,7 @@ impl Plugin for CommandPlugin {
 
     async fn execute(&self, env_vars: Option<&HashMap<String, String>>) -> Result<Option<String>> {
         let mut cmd = tokio::process::Command::new(&self.command);
+        sanitize_command_environment(&mut cmd);
         cmd.args(&self.args);
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
