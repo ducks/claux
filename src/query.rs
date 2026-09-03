@@ -827,6 +827,11 @@ impl Engine {
         self.commit_compacted_messages(vec![
             Message::user("Here is a summary of our conversation so far:"),
             Message::assistant_text(&summary),
+            // Providers expect a user turn after a summary. Without this
+            // continuation marker the next request ends with an assistant
+            // message, which some APIs interpret as a prefill and continue
+            // writing the summary instead of resuming the task.
+            Message::user("Continue with the outstanding task described above."),
         ]);
         let after_context = self.estimated_context_tokens();
         self.last_compaction_notice = Some(format_compaction_notice(
@@ -2219,7 +2224,6 @@ mod tests {
         assert!(systems[1].contains("before any tools executed"));
         assert!(systems[1].contains("Reissue the entire intended tool-call batch"));
 
-        assert_eq!(engine.messages().len(), 2);
         let MessageContent::Blocks(blocks) = &engine.messages()[1].content else {
             panic!("expected assistant blocks");
         };
@@ -3205,7 +3209,12 @@ mod tests {
 
         engine.compact().await.unwrap();
 
-        assert_eq!(engine.messages().len(), 2);
+        assert_eq!(engine.messages().len(), 3);
+        assert!(matches!(
+            engine.messages().last().map(|message| &message.content),
+            Some(MessageContent::Text(text))
+                if text == "Continue with the outstanding task described above."
+        ));
         assert_eq!(resets.load(Ordering::SeqCst), 1);
     }
 
@@ -3228,7 +3237,7 @@ mod tests {
 
         assert_eq!(
             engine.messages().len(),
-            2,
+            3,
             "a larger snip candidate should fall back to summary compaction"
         );
         assert_eq!(resets.load(Ordering::SeqCst), 1);
