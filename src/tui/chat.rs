@@ -394,6 +394,23 @@ pub async fn run(
                         return Ok(Action::Home);
                     }
                     CommandResult::Async(async_cmd) => match async_cmd {
+                        commands::AsyncCommand::Resume(Some(prefix)) => {
+                            // Resuming is a session switch, not a history
+                            // mutation.  Returning to the top-level loop lets
+                            // it reopen the selected session (and rebuild the
+                            // provider when its binding differs) instead of
+                            // loading another session's messages into the
+                            // current one and saving them over its row.
+                            match crate::session::find_session(&prefix)? {
+                                Some((target_session_id, _)) => {
+                                    return Ok(Action::Chat {
+                                        session_id: target_session_id,
+                                    });
+                                }
+                                None => app
+                                    .add_message("error", &format!("Session not found: {prefix}")),
+                            }
+                        }
                         commands::AsyncCommand::Model(selector) => match selector {
                             Some(selector) => {
                                 // The top-level TUI owns provider construction.
