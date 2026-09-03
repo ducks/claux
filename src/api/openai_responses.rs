@@ -37,6 +37,10 @@ fn lock_cursor(cursor: &Mutex<ResponseCursor>) -> MutexGuard<'_, ResponseCursor>
     }
 }
 
+fn clear_cursor(cursor: &Mutex<ResponseCursor>) {
+    *lock_cursor(cursor) = ResponseCursor::default();
+}
+
 /// Native OpenAI Responses API provider.
 ///
 /// The cursor keeps OpenAI's reasoning items server-side between tool rounds
@@ -312,13 +316,27 @@ async fn read_responses_sse(
 
     loop {
         let chunk = tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => {
+                // A cancelled response is not a valid continuation point.
+                // OpenAI may have emitted a function call before the
+                // cancellation, but that call is not guaranteed to belong to
+                // the stored response cursor. Resend the next turn in full.
+                clear_cursor(&cursor);
+                return Ok(())
+            },
             chunk = stream.next() => chunk,
         };
         let Some(chunk) = chunk else {
             break;
         };
-        buffer.extend_from_slice(&chunk?);
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                clear_cursor(&cursor);
+                return Err(error.into());
+            }
+        };
+        buffer.extend_from_slice(&chunk);
 
         while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
             let mut line: Vec<u8> = buffer.drain(..=newline).collect();
@@ -354,10 +372,12 @@ async fn read_responses_sse(
             );
             for api_event in translate_event(&event, provider, model) {
                 if tx.send(api_event).await.is_err() {
+                    clear_cursor(&cursor);
                     return Ok(());
                 }
             }
             if terminal_error {
+                clear_cursor(&cursor);
                 return Ok(());
             }
         }
@@ -366,6 +386,7 @@ async fn read_responses_sse(
     if completed {
         Ok(())
     } else {
+        clear_cursor(&cursor);
         anyhow::bail!("stream ended before response.completed")
     }
 }
@@ -713,7 +734,7 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        read_responses_sse(
+        let _ = read_responses_sse(
             response,
             tx,
             CancellationToken::new(),
@@ -821,7 +842,7 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        read_responses_sse(
+        let _ = read_responses_sse(
             response,
             tx,
             CancellationToken::new(),
@@ -840,5 +861,61 @@ mod tests {
                     && error.message.contains("deepseek/deepseek-r1")
         ));
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_clears_previous_response_cursor() {
+        let provider = provider_for_cursor_tests();
+        commit_cursor(&provider, "resp_before_cancel", 2);
+        let response = crate::test_support::sse_response(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Read\",\"arguments\":\"{}\"}}\n\n",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let _ = read_responses_sse(
+            response,
+            tx,
+            cancel,
+            provider.cursor.clone(),
+            3,
+            "openai",
+            "gpt-5.6-sol",
+        )
+        .await;
+
+        assert!(provider.cursor.lock().unwrap().response_id.is_none());
+        // Cancellation can race with delivery of the already-buffered
+        // function-call event; either outcome must still invalidate the
+        // cursor.
+        while rx.recv().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn terminal_response_failure_clears_previous_response_cursor() {
+        let provider = provider_for_cursor_tests();
+        commit_cursor(&provider, "resp_before_failure", 2);
+        let response = crate::test_support::sse_response(
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"failed\"}}}\n\n",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_responses_sse(
+            response,
+            tx,
+            CancellationToken::new(),
+            provider.cursor.clone(),
+            3,
+            "openai",
+            "gpt-5.6-sol",
+        )
+        .await
+        .unwrap();
+
+        assert!(provider.cursor.lock().unwrap().response_id.is_none());
+        assert!(matches!(rx.recv().await, Some(ApiEvent::Error(_))));
     }
 }
