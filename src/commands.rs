@@ -302,24 +302,14 @@ pub fn format_context(engine: &Engine) -> String {
 fn execute_resume(id: Option<String>, engine: &mut Engine) -> Result<String> {
     match id {
         Some(session_id) => {
-            let sessions = session::list_sessions()?;
-            let found = sessions
-                .iter()
-                .find(|(sid, _)| sid == &session_id || sid.starts_with(&session_id));
-
-            match found {
-                Some((_, path)) => {
-                    let (meta, messages) = session::load_session(path)?;
-                    engine.set_messages(messages);
-                    Ok(format!(
-                        "Resumed session \x1b[33m{}\x1b[0m ({}, {} messages)",
-                        meta.id,
-                        meta.model,
-                        engine.message_count()
-                    ))
-                }
-                None => Ok(format!("Session not found: {session_id}")),
-            }
+            // Session switching is owned by the REPL and TUI surfaces.  Do
+            // not load another session into this engine: callers that route
+            // through execute_async may still be writing the current session
+            // immediately afterwards.
+            let _ = engine;
+            anyhow::bail!(
+                "session switching for /resume {session_id} must be handled by the session browser"
+            )
         }
         None => {
             // List recent sessions
