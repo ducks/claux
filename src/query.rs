@@ -1075,10 +1075,22 @@ impl Engine {
                         }
                         ApiFailureKind::OutputLimitExceeded if self.max_tokens < 64_000 => {
                             self.max_tokens = (self.max_tokens * 2).min(64_000);
+                            let _ = tx
+                                .send(StreamEvent::Retry(
+                                    "provider hit the output limit; retrying with a larger budget"
+                                        .to_string(),
+                                ))
+                                .await;
                             continue;
                         }
                         ApiFailureKind::ContextExceeded if recovery_attempts < MAX_RECOVERY => {
                             recovery_attempts += 1;
+                            let _ = tx
+                                .send(StreamEvent::Retry(
+                                    "provider rejected the context; compacting and retrying"
+                                        .to_string(),
+                                ))
+                                .await;
                             let _ = tx
                                 .send(StreamEvent::Notice(
                                     "compacting conversation...".to_string(),
@@ -1218,6 +1230,12 @@ impl Engine {
                                 }
                                 ApiFailureKind::OutputLimitExceeded if self.max_tokens < 64_000 => {
                                     self.max_tokens = (self.max_tokens * 2).min(64_000);
+                                    let _ = tx
+                                        .send(StreamEvent::Retry(
+                                            "provider hit the output limit; retrying with a larger budget"
+                                                .to_string(),
+                                        ))
+                                        .await;
                                     had_error = true;
                                     model_status = "retry";
                                     break;
@@ -1226,6 +1244,12 @@ impl Engine {
                                     if recovery_attempts < MAX_RECOVERY =>
                                 {
                                     recovery_attempts += 1;
+                                    let _ = tx
+                                        .send(StreamEvent::Retry(
+                                            "provider rejected the context; compacting and retrying"
+                                                .to_string(),
+                                        ))
+                                        .await;
                                     let _ = tx
                                         .send(StreamEvent::Notice(
                                             "compacting conversation...".to_string(),
@@ -1835,6 +1859,49 @@ mod tests {
         recover: bool,
     }
 
+    struct MidStreamOutputRetryProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for MidStreamOutputRetryProvider {
+        fn name(&self) -> &str {
+            "mid-stream-output-retry"
+        }
+
+        fn set_model(&mut self, _model: &str) {}
+
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &[ToolDefinition],
+            _max_tokens: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = mpsc::channel(4);
+            if attempt == 0 {
+                tx.send(ApiEvent::Text("rejected preamble".to_string()))
+                    .await
+                    .unwrap();
+                tx.send(ApiEvent::Error(ApiFailure::new(
+                    ApiFailureKind::OutputLimitExceeded,
+                    "output limit",
+                )))
+                .await
+                .unwrap();
+            } else {
+                tx.send(ApiEvent::Text("recovered response".to_string()))
+                    .await
+                    .unwrap();
+                tx.send(ApiEvent::Done).await.unwrap();
+            }
+            drop(tx);
+            Ok(ProviderStream::new(rx, cancel.child_token()))
+        }
+    }
+
     #[async_trait::async_trait]
     impl Provider for MalformedToolProvider {
         fn name(&self) -> &str {
@@ -2140,6 +2207,24 @@ mod tests {
             64_000,
             "escalation stops at the ceiling"
         );
+    }
+
+    #[tokio::test]
+    async fn mid_stream_output_retry_discards_rejected_text() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Box::new(MidStreamOutputRetryProvider {
+            calls: calls.clone(),
+        });
+        let mut engine =
+            Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Bypass);
+
+        let result = engine
+            .submit("go", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result, "recovered response");
     }
 
     #[tokio::test]
