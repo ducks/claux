@@ -16,8 +16,9 @@ use super::markdown;
 /// Rendering history means a markdown parse per message plus a word-wrap
 /// pass over everything; at a few hundred messages that costs tens of
 /// milliseconds, and draw_chat runs on a 50ms tick while streaming. The
-/// cache makes each frame O(streaming tail): it is rebuilt only when the
-/// message list changes (`rev`) or the text width changes.
+/// cache avoids parsing and wrapping unchanged history: it is rebuilt only
+/// when the message list changes (`rev`) or the text width changes. Viewport
+/// selection still scans cached row counts.
 pub struct HistoryCache {
     pub rev: u64,
     pub width: u16,
@@ -161,56 +162,15 @@ pub(super) fn draw_chat_at(f: &mut Frame, app: &mut ChatApp, now: std::time::Ins
     // the renderer a local offset. Passing everything makes the render
     // itself O(history): ratatui re-wraps every row above the scroll
     // offset each frame to find the window.
-    let (render_lines, local_offset, total_rows) = {
-        let cache = app
-            .history_cache
+    let (render_lines, local_offset, total_rows) = viewport_lines(
+        app.history_cache
             .as_ref()
-            .expect("history cache just built");
-
-        let total_rows = cache.rows + tail_rows.iter().sum::<u16>();
-        let max_scroll = total_rows.saturating_sub(visible_height);
-        let scroll_offset = if manual_scroll {
-            max_scroll.saturating_sub(user_scroll.min(max_scroll))
-        } else {
-            max_scroll
-        };
-
-        let line_count = cache.lines.len() + tail_lines.len();
-        let rows_at = |i: usize| -> u16 {
-            if i < cache.line_rows.len() {
-                cache.line_rows[i]
-            } else {
-                tail_rows[i - cache.line_rows.len()]
-            }
-        };
-
-        // Skip whole lines that end above the viewport
-        let mut first = 0usize;
-        let mut skipped: u16 = 0;
-        while first < line_count && skipped + rows_at(first) <= scroll_offset {
-            skipped += rows_at(first);
-            first += 1;
-        }
-        let local_offset = scroll_offset - skipped;
-
-        // Take lines until the viewport is covered
-        let mut render_lines: Vec<Line<'static>> = Vec::new();
-        let mut covered: u16 = 0;
-        let needed = local_offset.saturating_add(visible_height);
-        let mut i = first;
-        while i < line_count && covered < needed {
-            let line = if i < cache.lines.len() {
-                cache.lines[i].clone()
-            } else {
-                tail_lines[i - cache.lines.len()].clone()
-            };
-            covered += rows_at(i);
-            render_lines.push(line);
-            i += 1;
-        }
-
-        (render_lines, local_offset, total_rows)
-    };
+            .expect("history cache just built"),
+        &tail_lines,
+        &tail_rows,
+        visible_height,
+        manual_scroll.then_some(user_scroll),
+    );
 
     app.total_lines = total_rows;
 
@@ -225,6 +185,58 @@ pub(super) fn draw_chat_at(f: &mut Frame, app: &mut ChatApp, now: std::time::Ins
     f.render_widget(messages_widget, msg_area);
 
     draw_input_and_status(f, app, &chunks, now);
+}
+
+fn viewport_lines(
+    cache: &HistoryCache,
+    tail_lines: &[Line<'static>],
+    tail_rows: &[u16],
+    visible_height: u16,
+    user_scroll: Option<u16>,
+) -> (Vec<Line<'static>>, u16, u16) {
+    let total_rows = cache.rows + tail_rows.iter().sum::<u16>();
+    let max_scroll = total_rows.saturating_sub(visible_height);
+    let scroll_offset = if let Some(user_scroll) = user_scroll {
+        max_scroll.saturating_sub(user_scroll.min(max_scroll))
+    } else {
+        max_scroll
+    };
+
+    let line_count = cache.lines.len() + tail_lines.len();
+    let rows_at = |i: usize| -> u16 {
+        if i < cache.line_rows.len() {
+            cache.line_rows[i]
+        } else {
+            tail_rows[i - cache.line_rows.len()]
+        }
+    };
+
+    // Skip whole lines that end above the viewport
+    let mut first = 0usize;
+    let mut skipped: u16 = 0;
+    while first < line_count && skipped + rows_at(first) <= scroll_offset {
+        skipped += rows_at(first);
+        first += 1;
+    }
+    let local_offset = scroll_offset - skipped;
+
+    // Take lines until the viewport is covered
+    let mut render_lines: Vec<Line<'static>> = Vec::new();
+    let mut covered: u16 = 0;
+    let needed = local_offset.saturating_add(visible_height);
+    let mut i = first;
+    while i < line_count && covered < needed {
+        let line = if i < cache.lines.len() {
+            cache.lines[i].clone()
+        } else {
+            tail_lines[i - cache.lines.len()].clone()
+        };
+        covered += rows_at(i);
+        render_lines.push(line);
+        i += 1;
+    }
+
+    (render_lines, local_offset, total_rows)
 }
 
 /// Render `app.messages` into styled lines. Called only on cache misses.
@@ -754,8 +766,7 @@ mod perf_probe {
         assert_eq!(running[0].spans[0].content, "⟳ ");
     }
 
-    #[test]
-    fn time_draw_with_large_history() {
+    fn large_history_app() -> ChatApp {
         let mut app = ChatApp::new("test-model", Theme::dark());
         for i in 0..150 {
             app.add_message(
@@ -772,6 +783,139 @@ mod perf_probe {
         }
         app.stream_buffer = "streaming tail ".repeat(20);
         app.mode = Mode::Streaming;
+        app
+    }
+
+    #[test]
+    fn history_cache_survives_streaming_and_scrolling_but_invalidates_on_changes() {
+        let mut app = large_history_app();
+        let _ = tuishot::render_to_buffer(120, 40, |f| draw_chat(f, &mut app));
+
+        // A sentinel detects rebuilding even if the allocator reuses addresses.
+        app.history_cache.as_mut().unwrap().lines[0] = Line::from("cached sentinel");
+        app.stream_buffer.push_str("more streamed text");
+        app.manual_scroll = true;
+        app.scroll = 20;
+        let _ = tuishot::render_to_buffer(120, 40, |f| draw_chat(f, &mut app));
+        assert_eq!(
+            app.history_cache.as_ref().unwrap().lines[0],
+            Line::from("cached sentinel")
+        );
+
+        app.add_message("user", "a new message invalidates history");
+        let _ = tuishot::render_to_buffer(120, 40, |f| draw_chat(f, &mut app));
+        let cache = app.history_cache.as_ref().unwrap();
+        assert_eq!(cache.rev, app.messages_rev);
+        assert_eq!(cache.lines, history_lines(&app));
+        assert_eq!(cache.width, 118);
+        let wide_rows = cache.rows;
+
+        app.history_cache.as_mut().unwrap().lines[0] = Line::from("cached sentinel");
+        let _ = tuishot::render_to_buffer(40, 40, |f| draw_chat(f, &mut app));
+        let cache = app.history_cache.as_ref().unwrap();
+        assert_eq!(cache.width, 38);
+        assert_eq!(cache.lines, history_lines(&app));
+        assert!(cache.rows > wide_rows);
+        assert_eq!(
+            cache.line_rows,
+            cache
+                .lines
+                .iter()
+                .map(|line| count_line_rows(line, 38))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn viewport_slice_matches_full_history_rendering() {
+        use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
+
+        let app = large_history_app();
+        for width in [18, 38, 118] {
+            let lines = history_lines(&app);
+            let line_rows: Vec<_> = lines
+                .iter()
+                .map(|line| count_line_rows(line, width))
+                .collect();
+            let cache = HistoryCache {
+                rev: app.messages_rev,
+                width,
+                rows: line_rows.iter().sum(),
+                lines,
+                line_rows,
+            };
+            for tail in [
+                Vec::new(),
+                vec![
+                    Line::from(""),
+                    Line::from(
+                        "streaming tail with words that wrap across several rows ".repeat(5),
+                    ),
+                    Line::from("  ▊"),
+                ],
+            ] {
+                let tail_rows: Vec<_> = tail
+                    .iter()
+                    .map(|line| count_line_rows(line, width))
+                    .collect();
+                let all_lines: Vec<_> = cache.lines.iter().chain(&tail).cloned().collect();
+                let total = Paragraph::new(all_lines.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(width) as u16;
+                for height in [1, 7, 35] {
+                    let max_scroll = total.saturating_sub(height);
+                    for scroll in [
+                        None,
+                        Some(0),
+                        Some(1),
+                        Some(8),
+                        Some(max_scroll / 2),
+                        Some(max_scroll),
+                        Some(u16::MAX),
+                    ] {
+                        let (selected, local_offset, rows) =
+                            viewport_lines(&cache, &tail, &tail_rows, height, scroll);
+                        assert_eq!(rows, total);
+                        // Every selected logical line intersects the viewport.
+                        assert!(!selected.is_empty());
+                        assert!(selected.len() <= usize::from(height));
+                        let selected_rows: Vec<_> = selected
+                            .iter()
+                            .map(|line| count_line_rows(line, width))
+                            .collect();
+                        assert!(local_offset < selected_rows[0]);
+                        assert!(
+                            selected_rows[..selected_rows.len() - 1].iter().sum::<u16>()
+                                < local_offset + height
+                        );
+
+                        let area = Rect::new(0, 0, width, height);
+                        let mut actual = Buffer::empty(area);
+                        Paragraph::new(selected)
+                            .wrap(Wrap { trim: false })
+                            .scroll((local_offset, 0))
+                            .render(area, &mut actual);
+                        let mut expected = Buffer::empty(area);
+                        let offset = max_scroll.saturating_sub(scroll.unwrap_or(0));
+                        Paragraph::new(all_lines.clone())
+                            .wrap(Wrap { trim: false })
+                            .scroll((offset, 0))
+                            .render(area, &mut expected);
+                        assert_eq!(
+                            actual, expected,
+                            "width={width} height={height} scroll={scroll:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Run manually with: cargo test time_draw_with_large_history -- --ignored --nocapture
+    #[test]
+    #[ignore = "manual wall-clock benchmark; correctness is covered by deterministic tests"]
+    fn time_draw_with_large_history() {
+        let mut app = large_history_app();
 
         // warm up
         let _ = tuishot::render_to_buffer(120, 40, |f| draw_chat(f, &mut app));
@@ -783,15 +927,5 @@ mod perf_probe {
         }
         let per_draw = start.elapsed() / n;
         println!("per-draw: {per_draw:?} for {} messages", app.messages.len());
-
-        // Regression guard: warm-cache draws must stay O(viewport), not
-        // O(history). Before the history cache + viewport slicing this
-        // measured ~58ms in a debug build; sliced it's ~3ms. The bound is
-        // loose to tolerate slow CI, but tight enough to catch a return
-        // to per-frame full-history rendering.
-        assert!(
-            per_draw < std::time::Duration::from_millis(25),
-            "draw with large history too slow: {per_draw:?}"
-        );
     }
 }
