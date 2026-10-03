@@ -299,7 +299,7 @@ pub(super) async fn http_error(response: Response, provider: &str, model: &str) 
     let message = message.map(|message| crate::utils::truncate_str(message, 2_048));
 
     let failure = ApiFailure::new(
-        classify(Some(status), error_type),
+        classify_details(provider, Some(status), error_type, message),
         format_error(
             provider,
             model,
@@ -318,10 +318,30 @@ pub(super) fn stream_error(event: &Value, provider: &str, model: &str) -> ApiFai
     let (error_type, message) = extract_details(event);
     let status = extract_status(event).or_else(|| error_type.and_then(status_for_type));
     ApiFailure::new(
-        classify(status, error_type),
+        classify_details(provider, status, error_type, message),
         format_error(provider, model, status, None, error_type, message),
     )
     .with_status(status)
+}
+
+fn classify_details(
+    provider: &str,
+    status: Option<StatusCode>,
+    error_type: Option<&str>,
+    message: Option<&str>,
+) -> ApiFailureKind {
+    // Anthropic has no distinct context-overflow code. Restrict its message
+    // fallback to that protocol's invalid-request envelope and exact prefix.
+    if provider == "anthropic"
+        && matches!(status, None | Some(StatusCode::BAD_REQUEST))
+        && error_type == Some("invalid_request_error")
+        && message.is_some_and(|text| {
+            text == "prompt is too long" || text.starts_with("prompt is too long:")
+        })
+    {
+        return ApiFailureKind::ContextExceeded;
+    }
+    classify(status, error_type)
 }
 
 fn extract_details(value: &Value) -> (Option<&str>, Option<&str>) {
@@ -338,6 +358,11 @@ fn extract_details(value: &Value) -> (Option<&str>, Option<&str>) {
         .or_else(|| error["error_type"].as_str())
         .or_else(|| value["error_type"].as_str())
         .or_else(|| response["error_type"].as_str())
+        .or_else(|| {
+            error["code"]
+                .as_str()
+                .filter(|code| classify(None, Some(code)) != ApiFailureKind::Other)
+        })
         .or_else(|| error["type"].as_str())
         .or_else(|| error["code"].as_str());
     let message = error["message"]
@@ -661,8 +686,8 @@ mod tests {
         // The turn loop downcasts the boxed error, so the classification must
         // survive `anyhow::Error::new`.
         let response = crate::test_support::json_response(
-            413,
-            "{\"error\":{\"message\":\"prompt is too long\"}}",
+            400,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}"#,
         )
         .await;
 
@@ -671,5 +696,65 @@ mod tests {
 
         assert_eq!(failure.kind, ApiFailureKind::ContextExceeded);
         assert!(failure.message.contains("prompt is too long"));
+    }
+
+    #[tokio::test]
+    async fn context_overflow_envelopes_preserve_specific_codes() {
+        for (provider, body) in [
+            (
+                "openai",
+                serde_json::json!({"error": {"type": "invalid_request_error", "code": "context_length_exceeded", "message": "too many tokens"}}),
+            ),
+            (
+                "openrouter",
+                serde_json::json!({"error": {"code": 400, "metadata": {"error_type": "context_length_exceeded"}, "message": "too many tokens"}}),
+            ),
+        ] {
+            let response = crate::test_support::json_response(400, &body.to_string()).await;
+            let error = http_error(response, provider, "test").await;
+            assert_eq!(
+                error.downcast_ref::<ApiFailure>().unwrap().kind,
+                ApiFailureKind::ContextExceeded
+            );
+            assert_eq!(
+                stream_error(&body, provider, "test").kind,
+                ApiFailureKind::ContextExceeded
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_context_fallback_does_not_match_unrelated_errors() {
+        for (provider, status, kind, message) in [
+            ("openai", 400, "invalid_request_error", "prompt is too long"),
+            (
+                "anthropic",
+                400,
+                "invalid_request_error",
+                "invalid field: prompt is too long",
+            ),
+            ("anthropic", 400, "other_error", "prompt is too long"),
+            (
+                "anthropic",
+                401,
+                "invalid_request_error",
+                "prompt is too long",
+            ),
+        ] {
+            assert_ne!(
+                classify_details(
+                    provider,
+                    StatusCode::from_u16(status).ok(),
+                    Some(kind),
+                    Some(message)
+                ),
+                ApiFailureKind::ContextExceeded
+            );
+        }
+        let body = serde_json::json!({"error": {"type":"authentication_error", "code":"unknown_new_code"}});
+        assert_eq!(
+            stream_error(&body, "anthropic", "test").kind,
+            ApiFailureKind::Authentication
+        );
     }
 }
