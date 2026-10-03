@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "result": "working on it",
+  "model": "test",
+  "usage": {
+    "rounds": 1,
+    "tool_calls": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cost_usd": null
+  },
+  "outcome": { "status": "completed", "result": "working on it" }
+}

@@ -178,6 +178,73 @@ mod tests {
     use crate::api::Message;
     use crate::query::{ModelRoundUsage, ModelTraceEntry, ToolTraceEntry};
 
+    #[tokio::test]
+    async fn contract_fixtures_from_a_real_engine_turn() {
+        let mut engine = crate::test_support::scripted_engine(
+            vec![],
+            None,
+            crate::permissions::PermissionMode::Default,
+        );
+        let result = engine
+            .submit("hello", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+        let output =
+            serde_json::to_value(OneShotOutput::new(&result, engine.model(), &engine.cost))
+                .unwrap();
+        assert_eq!(
+            output,
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../docs/contracts/fixtures/result.json"
+            ))
+            .unwrap()
+        );
+        let mut timing = engine.execution_timing();
+        timing.total_duration_ms = 0;
+        for round in &mut timing.model_rounds {
+            round.started_after_ms = 0;
+            round.duration_ms = 0;
+        }
+        let transcript = OneShotTranscript::new(
+            engine.model(),
+            &engine.cost,
+            engine.messages(),
+            &[],
+            timing,
+            TranscriptOutcome::Completed { result: &result },
+        );
+        assert_eq!(
+            serde_json::to_value(transcript).unwrap(),
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../docs/contracts/fixtures/transcript.json"
+            ))
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_counts_include_failed_tools_and_reset() {
+        let mut engine = crate::test_support::scripted_engine(
+            vec![crate::test_support::tool_use(
+                "call-1",
+                "MissingTool",
+                serde_json::json!({}),
+            )],
+            None,
+            crate::permissions::PermissionMode::Bypass,
+        );
+        engine
+            .submit("try a tool", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+        let usage = engine.cost.usage_summary();
+        assert_eq!(usage.rounds, 2);
+        assert_eq!(usage.tool_calls, 1);
+        engine.cost.reset_usage();
+        assert_eq!(engine.cost.usage_summary().rounds, 0);
+        assert_eq!(engine.cost.usage_summary().tool_calls, 0);
+    }
+
     #[test]
     fn serializes_stable_one_shot_contract() {
         let mut cost = CostTracker::new("unknown-model");
@@ -198,6 +265,8 @@ mod tests {
                 "result": "done",
                 "model": "test/model",
                 "usage": {
+                    "rounds": 0,
+                    "tool_calls": 0,
                     "input_tokens": 12,
                     "output_tokens": 4,
                     "cache_read_tokens": 8,

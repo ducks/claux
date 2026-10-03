@@ -4,6 +4,8 @@ use serde::Serialize;
 
 #[derive(Debug, PartialEq, Serialize)]
 pub struct UsageSummary {
+    pub rounds: u64,
+    pub tool_calls: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
@@ -14,6 +16,8 @@ pub struct UsageSummary {
 /// Tracks token usage and estimated cost for a session.
 #[derive(Debug, Default)]
 pub struct CostTracker {
+    pub rounds: u64,
+    pub tool_calls: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
@@ -51,6 +55,8 @@ impl CostTracker {
 
     /// Clear session usage while preserving the model's resolved pricing.
     pub fn reset_usage(&mut self) {
+        self.rounds = 0;
+        self.tool_calls = 0;
         self.input_tokens = 0;
         self.output_tokens = 0;
         self.cache_read_tokens = 0;
@@ -83,6 +89,8 @@ impl CostTracker {
 
     pub fn usage_summary(&self) -> UsageSummary {
         UsageSummary {
+            rounds: self.rounds,
+            tool_calls: self.tool_calls,
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             cache_read_tokens: self.cache_read_tokens,
@@ -324,6 +332,8 @@ mod tests {
         assert_eq!(
             tracker.usage_summary(),
             UsageSummary {
+                rounds: 0,
+                tool_calls: 0,
                 input_tokens: 100,
                 output_tokens: 20,
                 cache_read_tokens: 80,
