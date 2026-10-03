@@ -507,7 +507,8 @@ async fn run_session(
     // Clear engine state and load this session's messages. repair_history
     // makes old or crash-interrupted saves API-valid (tool_use/tool_result
     // pairing) before the engine sends them anywhere.
-    let existing_messages = crate::session::repair_history(db.get_messages(session_id)?);
+    let (existing_messages, recovered) = db.get_messages_with_recovery(session_id)?;
+    let existing_messages = crate::session::repair_history(existing_messages);
     engine.set_messages(existing_messages.clone());
     engine.set_archive(db.get_archive(session_id)?);
 
@@ -538,6 +539,9 @@ async fn run_session(
         app.add_message(role, &content);
     }
 
+    if recovered > 0 {
+        app.add_message("system", &format!("Recovered {recovered} unreadable message(s) as placeholders. Original rows remain in the database."));
+    }
     let mut needs_redraw = true;
     let mut pending_submit: Option<String> = None;
 

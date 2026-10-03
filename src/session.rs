@@ -142,7 +142,8 @@ pub fn load_session(path: &std::path::Path) -> Result<(SessionMeta, Vec<Message>
         .get_session(&session_id)?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
 
-    let messages = repair_history(db.get_messages(&session_id)?);
+    let (messages, recovered_messages) = db.get_messages_with_recovery(&session_id)?;
+    let messages = repair_history(messages);
 
     // Convert SessionInfo to SessionMeta for compatibility
     let meta = SessionMeta {
@@ -150,6 +151,7 @@ pub fn load_session(path: &std::path::Path) -> Result<(SessionMeta, Vec<Message>
         cwd: String::new(), // Not tracked in SQLite version
         model: session_info.model,
         model_binding: session_info.model_binding,
+        recovered_messages,
     };
 
     Ok((meta, messages))
@@ -189,6 +191,7 @@ fn extract_session_id(path: &std::path::Path) -> String {
 /// Session metadata (kept for API compatibility).
 #[derive(Debug, Clone)]
 pub struct SessionMeta {
+    pub recovered_messages: usize,
     pub id: String,
     pub cwd: String,
     pub model: String,

@@ -362,6 +362,9 @@ async fn run() -> Result<std::process::ExitCode> {
         match session::find_session(session_id)? {
             Some((sid, path)) => {
                 let (meta, messages) = session::load_session(&path)?;
+                if meta.recovered_messages > 0 {
+                    eprintln!("Warning: recovered session with {} unreadable message(s) replaced by placeholders; original rows retained in the database.", meta.recovered_messages);
+                }
                 resolved_model = match meta.model_binding.as_ref() {
                     Some(binding) => config.resolve_binding(binding)?,
                     None => config.resolve_model(&meta.model).map_err(|error| {
