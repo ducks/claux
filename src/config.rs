@@ -610,25 +610,36 @@ impl Config {
     }
 
     pub fn resolve_binding(&self, binding: &ModelBinding) -> Result<ResolvedModel> {
-        let provider = self
-            .providers
-            .get(&binding.provider)
-            .filter(|provider| provider.kind == binding.provider_kind);
-        let profile = self.model_profiles.get(&binding.profile).filter(|profile| {
-            profile.provider == binding.provider && profile.model == binding.model
-        });
-        let (api_key, api_key_cmd) = provider
-            .map(|provider| (provider.api_key.clone(), provider.api_key_cmd.clone()))
-            .unwrap_or((None, None));
-        Ok(ResolvedModel {
-            binding: binding.clone(),
-            metadata: self.resolve_metadata(profile, &binding.model),
-            context_window_override: profile
-                .and_then(|profile| profile.context_window)
-                .filter(|window| *window > 0),
-            api_key,
-            api_key_cmd,
-        })
+        let resolved = if binding.provider == "legacy"
+            && binding.profile == format!("legacy:{}", binding.model)
+        {
+            self.resolve_legacy_model(&binding.model)?
+        } else {
+            let provider = self.providers.get(&binding.provider).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "session provider '{}' no longer exists; restore it or select another model",
+                    binding.provider
+                )
+            })?;
+            anyhow::ensure!(
+                provider.kind == binding.provider_kind,
+                "session provider '{}' changed type; select a model explicitly",
+                binding.provider
+            );
+            let profile = self.model_profiles.get(&binding.profile).ok_or_else(|| {
+                anyhow::anyhow!("session model profile '{}' no longer exists; restore it or select another model", binding.profile)
+            })?;
+            anyhow::ensure!(
+                profile.provider == binding.provider && profile.model == binding.model,
+                "session model profile '{}' changed provider or model; select a model explicitly",
+                binding.profile
+            );
+            self.resolve_profile(&binding.profile)?
+        };
+        if resolved.binding != *binding {
+            tracing::warn!(profile = %binding.profile, "Session binding updated from current configuration");
+        }
+        Ok(resolved)
     }
 
     fn resolve_profile(&self, name: &str) -> Result<ResolvedModel> {
@@ -1146,7 +1157,7 @@ name = "ollama"
     }
 
     #[test]
-    fn saved_binding_keeps_transport_but_refreshes_credentials() {
+    fn saved_binding_refreshes_transport_and_credentials() {
         let mut config: Config = toml::from_str(
             r#"
             [providers.local]
@@ -1174,13 +1185,68 @@ name = "ollama"
         let restored = config.resolve_binding(&binding).unwrap();
         assert_eq!(
             restored.binding.base_url.as_deref(),
-            Some("http://saved.invalid/v1")
+            Some("http://changed.invalid/v1")
         );
         assert_eq!(restored.api_key.as_deref(), Some("new-secret"));
         assert_eq!(restored.metadata.context_window, 32_000);
         assert!(!serde_json::to_string(&binding)
             .unwrap()
             .contains("new-secret"));
+    }
+
+    #[test]
+    fn saved_binding_rejects_missing_or_repurposed_configuration() {
+        let config: Config = toml::from_str(
+            r#"
+            [providers.local]
+            type = "openai"
+            base_url = "http://localhost:1234/v1"
+            [model_profiles.local]
+            provider = "local"
+            model = "coder"
+        "#,
+        )
+        .unwrap();
+        let binding = config.resolve_model("local").unwrap().binding;
+        let mut changed = config.clone();
+        changed.providers.clear();
+        assert!(changed
+            .resolve_binding(&binding)
+            .unwrap_err()
+            .to_string()
+            .contains("provider 'local' no longer exists"));
+        let mut changed = config.clone();
+        changed.model_profiles.clear();
+        assert!(changed
+            .resolve_binding(&binding)
+            .unwrap_err()
+            .to_string()
+            .contains("profile 'local' no longer exists"));
+        let mut changed = config.clone();
+        changed.model_profiles.get_mut("local").unwrap().model = "different".into();
+        assert!(changed
+            .resolve_binding(&binding)
+            .unwrap_err()
+            .to_string()
+            .contains("changed provider or model"));
+        let mut changed = config;
+        changed.providers.get_mut("local").unwrap().kind = ProviderKind::Anthropic;
+        assert!(changed
+            .resolve_binding(&binding)
+            .unwrap_err()
+            .to_string()
+            .contains("changed type"));
+    }
+
+    #[test]
+    fn legacy_binding_refreshes_current_credentials() {
+        let mut config = Config::default();
+        let binding = config.resolve_model(&config.model).unwrap().binding;
+        config.api_key = Some("replacement".into());
+        assert_eq!(
+            config.resolve_binding(&binding).unwrap().api_key.as_deref(),
+            Some("replacement")
+        );
     }
 
     #[test]
