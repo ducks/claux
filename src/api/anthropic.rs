@@ -129,7 +129,13 @@ impl Provider for AnthropicProvider {
         };
 
         if !response.status().is_success() {
-            return Err(super::error::http_error(response, "anthropic", &self.model).await);
+            return Err(super::error::http_error(
+                response,
+                "anthropic",
+                &self.model,
+                self.api_key.expose(),
+            )
+            .await);
         }
 
         let stream_cancel = cancel.child_token();
@@ -141,12 +147,12 @@ impl Provider for AnthropicProvider {
                 // Classify before wrapping: the prefix is for display, and
                 // must not erase what the failure was.
                 let failure = super::error::classify_reader_error(&e).prefixed("SSE stream error");
-                tracing::error!("{failure}");
+                tracing::error!(kind = ?failure.kind, "Provider stream reader failed");
                 let _ = error_tx.send(ApiEvent::Error(failure)).await;
             }
         });
 
-        Ok(ProviderStream::new(rx, stream_cancel))
+        Ok(ProviderStream::new(rx, stream_cancel).with_secret(self.api_key.expose()))
     }
 }
 

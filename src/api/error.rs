@@ -100,7 +100,7 @@ impl ApiFailure {
     pub fn new(kind: ApiFailureKind, message: impl Into<String>) -> Self {
         Self {
             kind,
-            message: message.into(),
+            message: redact_credentials(&message.into(), ""),
             http_status: None,
             retry_after: None,
         }
@@ -283,7 +283,37 @@ fn parse_retry_after(value: &str) -> Option<std::time::Duration> {
     delta.to_std().ok()
 }
 
-pub(super) async fn http_error(response: Response, provider: &str, model: &str) -> anyhow::Error {
+pub(super) fn redact_credentials(message: &str, secret: &str) -> String {
+    let message = if secret.is_empty() {
+        message.to_string()
+    } else {
+        message.replace(secret, "[redacted]")
+    };
+    message
+        .lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            for header in ["authorization", "x-api-key"] {
+                if let Some(start) = lower.find(header) {
+                    let rest = lower[start + header.len()..]
+                        .trim_start_matches([' ', '\t', '"', '\'', '\\']);
+                    if rest.starts_with([':', '=']) {
+                        return format!("{}[redacted header]", &line[..start]);
+                    }
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) async fn http_error(
+    response: Response,
+    provider: &str,
+    model: &str,
+    secret: &str,
+) -> anyhow::Error {
     let status = response.status();
     let retry_after = response
         .headers()
@@ -291,6 +321,11 @@ pub(super) async fn http_error(response: Response, provider: &str, model: &str) 
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let body = response.text().await.unwrap_or_default();
+    let body = if secret.is_empty() {
+        body
+    } else {
+        body.replace(secret, "[redacted]")
+    };
     let value = serde_json::from_str::<Value>(&body).ok();
     let (error_type, message) = value
         .as_ref()
@@ -445,6 +480,21 @@ fn nonempty(value: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn provider_errors_redact_credentials_before_export() {
+        let body = serde_json::json!({"error": {"type": "authentication_error", "message": "Rejected private-test-secret"}});
+        let response = crate::test_support::json_response(401, &body.to_string()).await;
+        let error = http_error(response, "anthropic", "test", "private-test-secret").await;
+        assert!(!error.to_string().contains("private-test-secret"));
+        assert!(error.to_string().contains("[redacted]"));
+        for message in [
+            "Authorization: Bearer other-secret",
+            "x-api-key=other-secret",
+            "{\"Authorization\":\"Bearer other-secret\"}",
+        ] {
+            assert!(!ApiFailure::other(message).message.contains("other-secret"));
+        }
+    }
     use super::*;
 
     #[test]
@@ -691,7 +741,7 @@ mod tests {
         )
         .await;
 
-        let error = http_error(response, "anthropic", "claude-test").await;
+        let error = http_error(response, "anthropic", "claude-test", "").await;
         let failure = error.downcast_ref::<ApiFailure>().expect("typed failure");
 
         assert_eq!(failure.kind, ApiFailureKind::ContextExceeded);
@@ -711,7 +761,7 @@ mod tests {
             ),
         ] {
             let response = crate::test_support::json_response(400, &body.to_string()).await;
-            let error = http_error(response, provider, "test").await;
+            let error = http_error(response, provider, "test", "").await;
             assert_eq!(
                 error.downcast_ref::<ApiFailure>().unwrap().kind,
                 ApiFailureKind::ContextExceeded

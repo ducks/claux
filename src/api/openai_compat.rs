@@ -295,7 +295,13 @@ impl Provider for OpenAICompatProvider {
         };
 
         if !response.status().is_success() {
-            return Err(super::error::http_error(response, &self.provider_name, &self.model).await);
+            return Err(super::error::http_error(
+                response,
+                &self.provider_name,
+                &self.model,
+                &self.api_key,
+            )
+            .await);
         }
 
         let stream_cancel = cancel.child_token();
@@ -319,12 +325,12 @@ impl Provider for OpenAICompatProvider {
                 // must not erase what the failure was.
                 let failure =
                     super::error::classify_reader_error(&e).prefixed("OpenAI SSE stream error");
-                tracing::error!("{failure}");
+                tracing::error!(kind = ?failure.kind, "Provider stream reader failed");
                 let _ = error_tx.send(ApiEvent::Error(failure)).await;
             }
         });
 
-        Ok(ProviderStream::new(rx, stream_cancel))
+        Ok(ProviderStream::new(rx, stream_cancel).with_secret(&self.api_key))
     }
 }
 
