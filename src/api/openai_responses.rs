@@ -135,6 +135,7 @@ impl Provider for OpenAIResponsesProvider {
             "max_output_tokens": max_tokens,
             "stream": true,
             "store": true,
+            "include": ["reasoning.encrypted_content"],
         });
         if let Some(previous_response_id) = previous_response_id {
             body["previous_response_id"] = json!(previous_response_id);
@@ -262,28 +263,24 @@ fn convert_messages(messages: &[Message], continuation: bool) -> Vec<Value> {
                 for block in blocks {
                     match block {
                         ContentBlock::ToolUse {
+                            id,
                             name,
                             input: arguments,
-                            ..
                         } if !continuation => {
                             input.push(json!({
-                                "role": "assistant",
-                                "content": format!(
-                                    "[Tool call: {name}({})]",
-                                    serde_json::to_string(arguments).unwrap_or_default()
-                                ),
+                                "type": "function_call",
+                                "call_id": id,
+                                "name": name,
+                                "arguments": arguments.to_string(),
                             }));
                         }
-                        ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            ..
-                        } if continuation => {
-                            input.push(json!({
-                                "type": "function_call_output",
-                                "call_id": tool_use_id,
-                                "output": content,
-                            }));
+                        ContentBlock::Reasoning { details, .. } if !continuation => {
+                            input.extend(
+                                details
+                                    .iter()
+                                    .filter(|item| item["type"] == "reasoning")
+                                    .cloned(),
+                            );
                         }
                         ContentBlock::ToolResult {
                             tool_use_id,
@@ -291,8 +288,9 @@ fn convert_messages(messages: &[Message], continuation: bool) -> Vec<Value> {
                             ..
                         } => {
                             input.push(json!({
-                                "role": "user",
-                                "content": format!("[Tool result for {tool_use_id}: {content}]"),
+                                "type": "function_call_output",
+                                "call_id": tool_use_id,
+                                "output": content,
                             }));
                         }
                         _ => {}
@@ -402,6 +400,12 @@ async fn read_responses_sse(
 
 fn translate_event(event: &Value, provider: &str, model: &str) -> Vec<ApiEvent> {
     match event["type"].as_str().unwrap_or_default() {
+        "response.output_item.done" if event["item"]["type"] == "reasoning" => {
+            vec![ApiEvent::Reasoning {
+                text: None,
+                details: vec![event["item"].clone()],
+            }]
+        }
         "response.output_text.delta" => event["delta"]
             .as_str()
             .map(|text| vec![ApiEvent::Text(text.to_string())])
@@ -525,6 +529,34 @@ mod tests {
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "function_call_output");
         assert_eq!(input[0]["call_id"], "call_1");
+        let replay = convert_messages(&messages, false);
+        assert_eq!(replay.len(), 2);
+        assert_eq!(
+            replay[0],
+            json!({"type": "function_call", "call_id": "call_1", "name": "Read", "arguments": "{\"file_path\":\"/tmp/a\"}"})
+        );
+        assert_eq!(replay[1], input[0]);
+    }
+
+    #[test]
+    fn reasoning_items_survive_serialization_and_full_replay() {
+        let item = json!({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "opaque"});
+        let events = translate_event(
+            &json!({"type": "response.output_item.done", "item": item}),
+            "openai",
+            "test",
+        );
+        let ApiEvent::Reasoning { text, details } = &events[0] else {
+            panic!("missing reasoning");
+        };
+        let message = Message::assistant_blocks(vec![ContentBlock::Reasoning {
+            text: text.clone(),
+            details: details.clone(),
+        }]);
+        let saved = serde_json::to_string(&message).unwrap();
+        let restored: Message = serde_json::from_str(&saved).unwrap();
+        assert_eq!(convert_messages(&[restored.clone()], false), vec![item]);
+        assert!(convert_messages(&[restored], true).is_empty());
     }
 
     #[test]
