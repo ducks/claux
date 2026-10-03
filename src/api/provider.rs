@@ -13,15 +13,29 @@ use super::types::{Message, ToolDefinition};
 pub struct ProviderStream {
     rx: mpsc::Receiver<ApiEvent>,
     cancel: CancellationToken,
+    secret: String,
 }
 
 impl ProviderStream {
     pub(crate) fn new(rx: mpsc::Receiver<ApiEvent>, cancel: CancellationToken) -> Self {
-        Self { rx, cancel }
+        Self {
+            rx,
+            cancel,
+            secret: String::new(),
+        }
+    }
+
+    pub(crate) fn with_secret(mut self, secret: &str) -> Self {
+        self.secret = secret.to_string();
+        self
     }
 
     pub async fn recv(&mut self) -> Option<ApiEvent> {
-        self.rx.recv().await
+        let mut event = self.rx.recv().await?;
+        if let ApiEvent::Error(failure) = &mut event {
+            failure.message = super::error::redact_credentials(&failure.message, &self.secret);
+        }
+        Some(event)
     }
 }
 
@@ -58,6 +72,22 @@ pub trait Provider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn streamed_error_redacts_the_request_key() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(ApiEvent::Error(super::super::error::ApiFailure::other(
+            "bad private-secret",
+        )))
+        .await
+        .unwrap();
+        let mut stream =
+            ProviderStream::new(rx, CancellationToken::new()).with_secret("private-secret");
+        let Some(ApiEvent::Error(error)) = stream.recv().await else {
+            panic!("expected error");
+        };
+        assert_eq!(error.message, "bad [redacted]");
+    }
 
     #[test]
     fn dropping_provider_stream_cancels_its_reader() {

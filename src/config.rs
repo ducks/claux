@@ -13,8 +13,26 @@ mod trust;
 pub use trust::ProjectTrust;
 
 /// An API key used to authenticate with Anthropic.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AnthropicApiKey(String);
+
+macro_rules! redacted_debug {
+    ($($name:ty),+ $(,)?) => {
+        $(impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($name), "([redacted])"))
+            }
+        })+
+    };
+}
+
+redacted_debug!(Config, ProviderConfig, ResolvedModel);
+
+impl std::fmt::Debug for AnthropicApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AnthropicApiKey([redacted])")
+    }
+}
 
 impl AnthropicApiKey {
     pub fn new(key: String) -> Self {
@@ -41,7 +59,7 @@ pub enum ProviderKind {
     Openai,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     #[serde(rename = "type")]
     pub kind: ProviderKind,
@@ -102,7 +120,7 @@ pub struct ModelBinding {
     pub allow_eof_without_finish_reason: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedModel {
     pub binding: ModelBinding,
     pub metadata: crate::model::ModelMetadata,
@@ -244,7 +262,7 @@ pub struct PermissionRulesConfig {
     pub ask: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(skip)]
     pub transport_overrides: TransportOverrides,
@@ -1015,6 +1033,20 @@ fn apply_project_overrides(config: &mut Config, project: &toml::Value, trusted: 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn credential_debug_output_is_redacted() {
+        let config = Config {
+            api_key: Some("private-secret".into()),
+            api_key_cmd: Some("echo command-secret".into()),
+            ..Default::default()
+        };
+        let resolved = config.resolve_model(&config.model).unwrap();
+        let key = AnthropicApiKey::new("private-secret".into());
+        let debug = format!("{config:?} {resolved:?} {key:?}");
+        assert!(!debug.contains("private-secret"));
+        assert!(!debug.contains("command-secret"));
+        assert!(debug.contains("[redacted]"));
+    }
     use super::*;
 
     #[test]
