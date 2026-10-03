@@ -129,7 +129,18 @@ impl Db {
 
         let migration = conn.unchecked_transaction()?;
         migration.execute_batch(
-            "CREATE TABLE IF NOT EXISTS conversation_archive (
+            "CREATE TABLE IF NOT EXISTS unreadable_messages (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                message_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                PRIMARY KEY(session_id, message_id)
+            );
+            INSERT OR IGNORE INTO unreadable_messages (session_id, message_id, role, content)
+            SELECT messages.session_id, messages.id, messages.role, messages.content
+            FROM messages JOIN sessions ON sessions.id = messages.session_id
+            WHERE NOT json_valid(messages.content);
+            CREATE TABLE IF NOT EXISTS conversation_archive (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                 event_id TEXT NOT NULL,
@@ -141,7 +152,9 @@ impl Db {
             );
             INSERT OR IGNORE INTO conversation_archive (session_id, event_id, message)
             SELECT messages.session_id, 'legacy-' || messages.id,
-                json_object('role', messages.role, 'content', json(messages.content))
+                json_object('role', messages.role, 'content',
+                    CASE WHEN json_valid(messages.content) THEN json(messages.content)
+                    ELSE '[Unreadable saved message; original retained in unreadable_messages.]' END)
             FROM messages JOIN sessions ON sessions.id = messages.session_id
             WHERE NOT EXISTS (SELECT 1 FROM archive_migrations WHERE archive_migrations.session_id = messages.session_id)
             ORDER BY messages.id;
@@ -412,20 +425,54 @@ impl Db {
     /// Ordered by insertion (id), not created_at: CURRENT_TIMESTAMP has
     /// one-second granularity, so a tool round inserting several messages
     /// in the same second would load back in unspecified order.
+    #[cfg(test)]
     pub fn get_messages(&self, session_id: &str) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY id ASC")?;
+        Ok(self.get_messages_with_recovery(session_id)?.0)
+    }
 
-        let messages = stmt.query_map([session_id], |row| {
+    pub fn get_messages_with_recovery(&self, session_id: &str) -> Result<(Vec<Message>, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT role, content, id FROM messages WHERE session_id = ?1 ORDER BY id ASC",
+        )?;
+
+        let rows = stmt.query_map([session_id], |row| {
             let role: String = row.get(0)?;
             let content_json: String = row.get(1)?;
-            let content: crate::api::types::MessageContent =
-                serde_json::from_str(&content_json).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            Ok(Message { role, content })
+            let id: i64 = row.get(2)?;
+            Ok((role, content_json, id))
         })?;
-
-        Ok(messages.collect::<Result<Vec<_>, _>>()?)
+        let mut messages = Vec::new();
+        let mut recovered = 0;
+        for row in rows {
+            let (role, raw, id) = row?;
+            let content = match serde_json::from_str(&raw) {
+                Ok(content) => content,
+                Err(_) => {
+                    // Preserve exact bytes before a later snapshot replaces
+                    // active context. Never include raw content in logs.
+                    conn.execute(
+                        "INSERT OR IGNORE INTO unreadable_messages (session_id, message_id, role, content)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        (session_id, id, &role, &raw),
+                    )?;
+                    recovered += 1;
+                    crate::api::types::MessageContent::Text(
+                        "[Unreadable saved message; original retained in unreadable_messages.]"
+                            .into(),
+                    )
+                }
+            };
+            messages.push(Message { role, content });
+        }
+        if recovered > 0 {
+            tracing::warn!(
+                session_id,
+                recovered,
+                "Replaced unreadable saved messages with placeholders; originals preserved"
+            );
+        }
+        Ok((messages, recovered))
     }
 
     pub fn get_archive(&self, session_id: &str) -> Result<Vec<crate::session::ArchivedMessage>> {
@@ -436,18 +483,28 @@ impl Db {
         )?;
         let rows = stmt.query_map([session_id], |row| {
             let message: String = row.get(1)?;
-            Ok(crate::session::ArchivedMessage {
-                id: row.get(0)?,
-                message: serde_json::from_str(&message).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        1,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?,
-            })
+            Ok((row.get::<_, String>(0)?, message))
         })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let mut archive = Vec::new();
+        let mut unreadable = 0;
+        for row in rows {
+            let (id, raw) = row?;
+            match serde_json::from_str(&raw) {
+                Ok(message) => archive.push(crate::session::ArchivedMessage { id, message }),
+                // Archive writes are append-only. Leaving these events out of
+                // memory retains their original bytes and avoids rewriting
+                // them with lossy placeholders on the next save.
+                Err(_) => unreadable += 1,
+            }
+        }
+        if unreadable > 0 {
+            tracing::warn!(
+                session_id,
+                unreadable,
+                "Unreadable archive events omitted from memory; originals retained in database"
+            );
+        }
+        Ok(archive)
     }
 
     /// Delete a session and all its messages.
@@ -510,6 +567,60 @@ fn parse_model_binding(json: Option<String>) -> Option<ModelBinding> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unreadable_rows_survive_recovery_save_and_reopen() {
+        use crate::api::MessageContent;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sessions.db");
+        let db = Db::open(&path).unwrap();
+        db.create_session("s", "test", None, None).unwrap();
+        let unknown = r#"[{"type":"future_block","payload":"original"}]"#;
+        let invalid = "{broken json";
+        {
+            let conn = db.conn.lock().unwrap();
+            for raw in [r#""before""#, unknown, invalid, r#""after""#] {
+                conn.execute(
+                    "INSERT INTO messages(session_id, role, content) VALUES ('s', 'user', ?1)",
+                    [raw],
+                )
+                .unwrap();
+            }
+            conn.execute("INSERT INTO conversation_archive(session_id, event_id, message) VALUES ('s', 'future', ?1)", [format!(r#"{{"role":"user","content":{unknown}}}"#)]).unwrap();
+            // Exercise the legacy migration with malformed JSON as well.
+            conn.execute("DELETE FROM archive_migrations WHERE session_id = 's'", [])
+                .unwrap();
+        }
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        let (messages, recovered) = db.get_messages_with_recovery("s").unwrap();
+        assert_eq!(recovered, 2);
+        assert_eq!(messages.len(), 4);
+        assert!(matches!(&messages[0].content, MessageContent::Text(text) if text == "before"));
+        assert!(matches!(&messages[3].content, MessageContent::Text(text) if text == "after"));
+        let archive = db.get_archive("s").unwrap();
+        db.save_conversation(
+            "s",
+            &crate::session::repair_history(messages),
+            None,
+            &archive,
+        )
+        .unwrap();
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.get_messages_with_recovery("s").unwrap().1, 0);
+        let conn = db.conn.lock().unwrap();
+        let raw: Vec<String> = conn.prepare("SELECT content FROM unreadable_messages WHERE session_id = 's' ORDER BY message_id").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(raw, [unknown, invalid]);
+        let retained: String = conn
+            .query_row(
+                "SELECT message FROM conversation_archive WHERE event_id = 'future'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(retained.contains("future_block"));
+    }
+
     #[test]
     fn archive_survives_compaction_resume_and_repeated_saves() {
         use crate::session::ArchivedMessage;
