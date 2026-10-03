@@ -93,7 +93,7 @@ impl Tool for EditTool {
             Err(error) => return Ok(super::sandbox_denied_output(error)),
         };
 
-        let content = std::fs::read_to_string(&path)?;
+        let content = self.sandbox_policy.read_for_edit(&path)?;
         let count = content.matches(&params.old_string).count();
 
         if count == 0 {
@@ -124,7 +124,7 @@ impl Tool for EditTool {
         if cancel.is_cancelled() {
             return Ok(interrupted_output());
         }
-        std::fs::write(&path, &new_content)?;
+        self.sandbox_policy.write_authorized(&path, &new_content)?;
 
         // Show context around the edit
         let new_lines: Vec<&str> = new_content.lines().collect();

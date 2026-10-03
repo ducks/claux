@@ -46,6 +46,7 @@ impl fmt::Display for NativeToolFilesystemPolicy {
 
 #[derive(Clone, Debug)]
 pub struct SandboxPolicy {
+    write_directory: Option<std::sync::Arc<cap_std::fs::Dir>>,
     workspace_root: PathBuf,
     read_roots: Vec<PathBuf>,
     write_roots: Vec<PathBuf>,
@@ -67,6 +68,10 @@ impl SandboxPolicy {
         let workspace_root = canonical_workspace_root(workspace_root)?;
 
         Ok(Self {
+            write_directory: Some(std::sync::Arc::new(cap_std::fs::Dir::open_ambient_dir(
+                &workspace_root,
+                cap_std::ambient_authority(),
+            )?)),
             read_roots: vec![workspace_root.clone()],
             write_roots: vec![workspace_root.clone()],
             workspace_root,
@@ -76,6 +81,7 @@ impl SandboxPolicy {
 
     pub fn unrestricted(workspace_root: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
+            write_directory: None,
             workspace_root: canonical_workspace_root(workspace_root)?,
             read_roots: Vec::new(),
             write_roots: Vec::new(),
@@ -101,6 +107,31 @@ impl SandboxPolicy {
         let resolved = self.resolve_for_write(requested)?;
         self.ensure_allowed(requested, &resolved, &self.write_roots, "write")?;
         Ok(resolved)
+    }
+
+    /// Operate relative to the pinned workspace, not an authorized pathname
+    /// that another process can replace with a symlink before the actual I/O.
+    pub fn write_authorized(&self, path: &Path, content: &str) -> Result<()> {
+        if let Some(dir) = &self.write_directory {
+            let relative = path.strip_prefix(&self.workspace_root)?;
+            if let Some(parent) = relative.parent().filter(|p| !p.as_os_str().is_empty()) {
+                dir.create_dir_all(parent)?;
+            }
+            dir.write(relative, content)?;
+        } else {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, content)?;
+        }
+        Ok(())
+    }
+
+    pub fn read_for_edit(&self, path: &Path) -> Result<String> {
+        match &self.write_directory {
+            Some(dir) => Ok(dir.read_to_string(path.strip_prefix(&self.workspace_root)?)?),
+            None => Ok(std::fs::read_to_string(path)?),
+        }
     }
 
     pub fn authorize_search_pattern(&self, pattern: &str) -> Result<()> {
@@ -213,6 +244,35 @@ fn expand_tilde(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn authorized_writes_reject_leaf_and_parent_symlink_swaps() {
+        use std::os::unix::fs::symlink;
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, "unchanged").unwrap();
+        let policy = SandboxPolicy::workspace_only(workspace.path()).unwrap();
+        let leaf = policy.authorize_write("leaf").unwrap();
+        symlink(&secret, &leaf).unwrap();
+        assert!(policy.write_authorized(&leaf, "bad").is_err());
+        assert!(policy.read_for_edit(&leaf).is_err());
+        std::fs::create_dir(workspace.path().join("parent")).unwrap();
+        let nested = policy.authorize_write("parent/secret").unwrap();
+        std::fs::rename(
+            workspace.path().join("parent"),
+            workspace.path().join("original"),
+        )
+        .unwrap();
+        symlink(outside.path(), workspace.path().join("parent")).unwrap();
+        assert!(policy.write_authorized(&nested, "bad").is_err());
+        assert!(policy.read_for_edit(&nested).is_err());
+        assert_eq!(std::fs::read_to_string(secret).unwrap(), "unchanged");
+        let fresh = policy.authorize_write("safe/nested/file").unwrap();
+        policy.write_authorized(&fresh, "allowed").unwrap();
+        assert_eq!(policy.read_for_edit(&fresh).unwrap(), "allowed");
+    }
 
     #[test]
     fn workspace_policy_allows_paths_beneath_the_root() {
