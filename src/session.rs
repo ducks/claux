@@ -148,7 +148,7 @@ pub fn load_session(path: &std::path::Path) -> Result<(SessionMeta, Vec<Message>
     // Convert SessionInfo to SessionMeta for compatibility
     let meta = SessionMeta {
         id: session_info.id,
-        cwd: String::new(), // Not tracked in SQLite version
+        cwd: session_info.cwd,
         model: session_info.model,
         model_binding: session_info.model_binding,
         recovered_messages,
@@ -157,17 +157,36 @@ pub fn load_session(path: &std::path::Path) -> Result<(SessionMeta, Vec<Message>
     Ok((meta, messages))
 }
 
-/// Find a session by exact id or unique-enough prefix, most recent first.
+/// Find an exact session ID, otherwise require a unique prefix.
 pub fn find_session(prefix: &str) -> Result<Option<(String, PathBuf)>> {
-    Ok(list_sessions()?
+    select_session(prefix, list_sessions()?)
+}
+
+fn select_session(
+    prefix: &str,
+    sessions: Vec<(String, PathBuf)>,
+) -> Result<Option<(String, PathBuf)>> {
+    if let Some(exact) = sessions.iter().find(|(id, _)| id == prefix) {
+        return Ok(Some(exact.clone()));
+    }
+    let mut matches = sessions
         .into_iter()
-        .find(|(sid, _)| sid == prefix || sid.starts_with(prefix)))
+        .filter(|(id, _)| id.starts_with(prefix));
+    let selected = matches.next();
+    anyhow::ensure!(
+        matches.next().is_none(),
+        "Ambiguous session prefix '{prefix}'; use a longer prefix or the full ID"
+    );
+    Ok(selected)
+}
+
+pub fn list_session_metadata() -> Result<Vec<crate::db::SessionInfo>> {
+    get_db()?.list_sessions()
 }
 
 /// List available sessions, most recent first.
 pub fn list_sessions() -> Result<Vec<(String, PathBuf)>> {
-    let db = get_db()?;
-    let sessions = db.list_sessions()?;
+    let sessions = list_session_metadata()?;
 
     let result: Vec<(String, PathBuf)> = sessions
         .into_iter()
@@ -337,6 +356,22 @@ pub fn repair_history(messages: Vec<Message>) -> Vec<Message> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_prefixes_require_a_unique_match_but_exact_ids_win() {
+        let sessions = || {
+            vec![
+                ("abc".into(), PathBuf::from("abc")),
+                ("abcd".into(), PathBuf::from("abcd")),
+            ]
+        };
+        assert!(select_session("ab", sessions()).is_err());
+        assert_eq!(select_session("abc", sessions()).unwrap().unwrap().0, "abc");
+        assert_eq!(
+            select_session("abcd", sessions()).unwrap().unwrap().0,
+            "abcd"
+        );
+        assert!(select_session("missing", sessions()).unwrap().is_none());
+    }
     use super::*;
     use crate::api::types::{ContentBlock, MessageContent};
 

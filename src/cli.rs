@@ -49,7 +49,7 @@ pub struct Cli {
     pub model: Option<String>,
 
     /// Resume a previous session
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["prompt", "tui"])]
     pub resume: Option<String>,
 
     /// Permission mode (default, accept-edits, auto, bypass, plan)
@@ -274,6 +274,11 @@ pub enum ConfigCommand {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resume_cannot_be_silently_ignored_by_another_mode() {
+        assert!(Cli::try_parse_from(["claux", "--resume", "id", "--print", "hello"]).is_err());
+        assert!(Cli::try_parse_from(["claux", "--resume", "id", "--tui"]).is_err());
+    }
     #[test]
     fn transport_flags_override_without_rewriting_config() {
         let args = Cli::try_parse_from([

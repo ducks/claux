@@ -343,23 +343,17 @@ fn execute_resume(id: Option<String>, engine: &mut Engine) -> Result<String> {
         }
         None => {
             // List recent sessions
-            let sessions = session::list_sessions()?;
+            let sessions = session::list_session_metadata()?;
             if sessions.is_empty() {
                 return Ok("No sessions found.".to_string());
             }
 
             let mut output = String::from("Recent sessions:\n");
-            for (i, (id, path)) in sessions.iter().take(10).enumerate() {
-                let meta_line = match session::load_session(path) {
-                    Ok((meta, msgs)) => format!(
-                        "  \x1b[33m{}\x1b[0m  {}  {} msgs  {}",
-                        meta.id,
-                        meta.model,
-                        msgs.len(),
-                        meta.cwd
-                    ),
-                    Err(_) => format!("  \x1b[33m{id}\x1b[0m  (error reading)"),
-                };
+            for (i, meta) in sessions.iter().take(10).enumerate() {
+                let meta_line = format!(
+                    "  \x1b[33m{}\x1b[0m  {}  {} msgs  {}",
+                    meta.id, meta.model, meta.message_count, meta.cwd
+                );
                 output.push_str(&meta_line);
                 if i < sessions.len().min(10) - 1 {
                     output.push('\n');

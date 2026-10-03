@@ -2,11 +2,11 @@
 //!
 //! Provides persistent storage for chat sessions with support for:
 //! - Fast random access to messages
-//! - Session metadata (token count, last active, etc.)
-//! - Querying and searching sessions
+//! - Session metadata, working directory, and last-active ordering
+//! - Incremental active-context snapshots and an immutable conversation archive
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -85,12 +85,21 @@ impl Db {
                 message_count INTEGER DEFAULT 0,
                 token_count INTEGER DEFAULT 0,
                 model_profile TEXT,
-                model_binding TEXT
+                model_binding TEXT,
+                cwd TEXT NOT NULL DEFAULT ''
             )",
             [],
         )?;
 
         // Migrations for existing databases (duplicate column errors are expected and ignored)
+        match conn.execute(
+            "ALTER TABLE sessions ADD COLUMN cwd TEXT NOT NULL DEFAULT ''",
+            [],
+        ) {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("duplicate column") => {}
+            Err(e) => return Err(e.into()),
+        }
         match conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT DEFAULT ''", []) {
             Ok(_) => tracing::info!("Migration: added 'name' column to sessions"),
             Err(e) if e.to_string().contains("duplicate column") => {}
@@ -217,18 +226,24 @@ impl Db {
         project: Option<&str>,
     ) -> Result<()> {
         let binding_json = serde_json::to_string(binding)?;
+        let cwd = std::env::current_dir()?;
+        let default_project = cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("uncategorized");
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO sessions
-             (id, model, model_profile, model_binding, name, project, created_at, last_active)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+             (id, model, model_profile, model_binding, name, project, cwd, created_at, last_active)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             (
                 id,
                 &binding.model,
                 &binding.profile,
                 binding_json,
                 name.unwrap_or(""),
-                project.unwrap_or("uncategorized"),
+                project.unwrap_or(default_project),
+                cwd.to_string_lossy().as_ref(),
             ),
         )?;
         drop(conn);
@@ -240,7 +255,7 @@ impl Db {
     pub fn get_session(&self, id: &str) -> Result<Option<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, model, name, project, message_count, model_binding
+            "SELECT id, model, name, project, message_count, model_binding, cwd
              FROM sessions WHERE id = ?1",
         )?;
 
@@ -254,6 +269,7 @@ impl Db {
                     .unwrap_or_else(|| "uncategorized".to_string()),
                 message_count: row.get(4)?,
                 model_binding: parse_model_binding(row.get(5)?),
+                cwd: row.get(6)?,
             })
         });
 
@@ -268,7 +284,7 @@ impl Db {
     pub fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, model, name, project, message_count, model_binding
+            "SELECT id, model, name, project, message_count, model_binding, cwd
              FROM sessions ORDER BY last_active DESC",
         )?;
 
@@ -282,6 +298,7 @@ impl Db {
                     .unwrap_or_else(|| "uncategorized".to_string()),
                 message_count: row.get(4)?,
                 model_binding: parse_model_binding(row.get(5)?),
+                cwd: row.get(6)?,
             })
         })?;
 
@@ -337,7 +354,7 @@ impl Db {
         self.save_conversation(session_id, messages, binding, &[])
     }
 
-    /// Append original conversation events and replace active context atomically.
+    /// Append original events and replace only the changed active-context suffix atomically.
     pub fn save_conversation(
         &self,
         session_id: &str,
@@ -358,24 +375,51 @@ impl Db {
             )?;
             for event in archive {
                 let serialized = serde_json::to_string(&event.message)?;
-                stmt.execute((session_id, &event.id, &serialized))?;
-                let saved: String =
-                    existing.query_row((session_id, &event.id), |row| row.get(0))?;
-                anyhow::ensure!(
-                    saved == serialized,
-                    "Archive event {} changed; session save rolled back",
-                    event.id
-                );
+                let saved: Option<String> = existing
+                    .query_row((session_id, &event.id), |row| row.get(0))
+                    .optional()?;
+                if let Some(saved) = saved {
+                    anyhow::ensure!(
+                        saved == serialized,
+                        "Archive event {} changed; session save rolled back",
+                        event.id
+                    );
+                } else {
+                    stmt.execute((session_id, &event.id, &serialized))?;
+                }
             }
         }
 
-        tx.execute("DELETE FROM messages WHERE session_id = ?1", [session_id])?;
+        let mut retained = 0;
+        let mut last_retained_id = 0_i64;
+        {
+            let mut stmt = tx.prepare(
+                "SELECT id, role, content FROM messages WHERE session_id = ?1 ORDER BY id",
+            )?;
+            let mut rows = stmt.query([session_id])?;
+            while let Some(row) = rows.next()? {
+                let Some(message) = messages.get(retained) else {
+                    break;
+                };
+                if row.get::<_, String>(1)? != message.role
+                    || row.get::<_, String>(2)? != serde_json::to_string(&message.content)?
+                {
+                    break;
+                }
+                last_retained_id = row.get(0)?;
+                retained += 1;
+            }
+        }
+        tx.execute(
+            "DELETE FROM messages WHERE session_id = ?1 AND id > ?2",
+            (session_id, last_retained_id),
+        )?;
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO messages (session_id, role, content, created_at)
                  VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)",
             )?;
-            for message in messages {
+            for message in &messages[retained..] {
                 let content_json = serde_json::to_string(&message.content)?;
                 stmt.execute([session_id, &message.role, &content_json])?;
             }
@@ -547,6 +591,7 @@ fn secure_database_files(_path: &std::path::Path) -> Result<()> {
 /// Session metadata.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
+    pub cwd: String,
     pub id: String,
     pub model: String,
     pub name: Option<String>,
@@ -567,6 +612,39 @@ fn parse_model_binding(json: Option<String>) -> Option<ModelBinding> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snapshots_retain_unchanged_rows_and_append_only_new_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("test.db")).unwrap();
+        db.create_session_with_binding("incremental", &binding("test"), None, None)
+            .unwrap();
+        let ids = || {
+            let conn = db.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT id FROM messages WHERE session_id = 'incremental' ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let mut messages = vec![Message::user(&"large payload".repeat(10_000))];
+        db.save_snapshot("incremental", &messages, None).unwrap();
+        let original = ids();
+        db.save_snapshot("incremental", &messages, None).unwrap();
+        assert_eq!(ids(), original);
+        messages.push(Message::assistant_text("reply"));
+        db.save_snapshot("incremental", &messages, None).unwrap();
+        assert_eq!(ids()[0], original[0]);
+        assert_eq!(ids().len(), 2);
+        db.save_snapshot("incremental", &[Message::user("compacted")], None)
+            .unwrap();
+        assert_eq!(ids().len(), 1);
+        assert_ne!(ids()[0], original[0]);
+        let meta = db.get_session("incremental").unwrap().unwrap();
+        assert_eq!(meta.cwd, std::env::current_dir().unwrap().to_string_lossy());
+        assert!(!meta.project.is_empty());
+    }
     #[test]
     fn unreadable_rows_survive_recovery_save_and_reopen() {
         use crate::api::MessageContent;
