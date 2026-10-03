@@ -193,23 +193,49 @@ impl OpenAICompatProvider {
         tools: &[ToolDefinition],
         max_tokens: u32,
     ) -> serde_json::Value {
+        let endpoint = reqwest::Url::parse(&self.base_url).ok();
+        let host = endpoint.as_ref().and_then(|url| url.host_str());
+        let openrouter = host == Some("openrouter.ai");
+        let openai = host == Some("api.openai.com");
+        let mut messages = Self::convert_messages(messages, system);
+        for message in &mut messages {
+            if openrouter {
+                if let Some(details) = message
+                    .get_mut("reasoning_details")
+                    .and_then(|v| v.as_array_mut())
+                {
+                    details.retain(|item| item["type"] != "reasoning");
+                }
+            } else if let Some(object) = message.as_object_mut() {
+                object.remove("reasoning_details");
+                object.remove("reasoning");
+            }
+        }
         let mut body = json!({
             "model": self.model,
-            "max_tokens": max_tokens,
-            "messages": Self::convert_messages(messages, system),
+            "messages": messages,
             "stream": true,
             "stream_options": {
                 "include_usage": true
             }
         });
+        body[if openai {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        }] = json!(max_tokens);
 
         if !tools.is_empty() {
             body["tools"] = json!(Self::convert_tools(tools));
         }
         if let Some(effort) = &self.reasoning_effort {
-            body["reasoning"] = json!({ "effort": effort });
+            if openrouter {
+                body["reasoning"] = json!({ "effort": effort });
+            } else {
+                body["reasoning_effort"] = json!(effort);
+            }
         }
-        if self.prompt_caching {
+        if self.prompt_caching && openrouter {
             body["cache_control"] = json!({ "type": "ephemeral" });
         }
 
@@ -826,6 +852,25 @@ mod tests {
         let body = provider.request_body(&[Message::user("hello")], "system", &[], 1_000);
 
         assert_eq!(body["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn request_extensions_follow_endpoint_not_display_name() {
+        for (url, token_field) in [
+            ("https://api.openai.com/v1", "max_completion_tokens"),
+            ("http://localhost:8080/v1", "max_tokens"),
+            ("https://openrouter.ai.evil.test/v1", "max_tokens"),
+            ("https://evil.test/openrouter.ai", "max_tokens"),
+        ] {
+            let provider =
+                OpenAICompatProvider::new(url, "key", "model", "openrouter", Some("low"))
+                    .with_prompt_caching(true);
+            let body = provider.request_body(&[Message::user("hello")], "system", &[], 1000);
+            assert_eq!(body[token_field], 1000);
+            assert_eq!(body["reasoning_effort"], "low");
+            assert!(body.get("reasoning").is_none());
+            assert!(body.get("cache_control").is_none());
+        }
     }
 
     #[test]

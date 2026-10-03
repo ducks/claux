@@ -503,6 +503,10 @@ fn build_provider(resolved: &config::ResolvedModel) -> Result<Box<dyn api::Provi
             }
         }
         config::ProviderKind::Anthropic => {
+            if binding.reasoning_effort.is_some() {
+                tracing::warn!(profile = %binding.profile,
+                    "reasoning_effort is not supported by the Anthropic adapter and will be ignored");
+            }
             if api_key.is_empty() {
                 anyhow::bail!(
                     "No authentication found for profile '{}'. Set {}.",
