@@ -1450,7 +1450,7 @@ name = "ollama"
         .unwrap();
 
         let resolved = config.resolve_model("claude-sonnet").unwrap();
-        assert_eq!(resolved.metadata.context_window, 200_000);
+        assert_eq!(resolved.metadata.context_window, 128_000);
         assert_eq!(resolved.metadata.pricing.unwrap().input, 0.8);
     }
 

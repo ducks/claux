@@ -11,6 +11,7 @@ pub struct UsageSummary {
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cost_usd: Option<f64>,
+    pub cost_source: &'static str,
 }
 
 /// Tracks token usage and estimated cost for a session.
@@ -23,6 +24,8 @@ pub struct CostTracker {
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
     provider_cost_usd: Option<f64>,
+    estimated_cost_usd: Option<f64>,
+    unpriced_usage: bool,
     pricing: Option<ModelPricing>,
 }
 
@@ -35,9 +38,7 @@ impl CostTracker {
     }
 
     pub fn set_pricing_override(&mut self, pricing: Option<ModelPricing>) {
-        if let Some(pricing) = pricing {
-            self.pricing = Some(pricing);
-        }
+        self.pricing = pricing;
     }
 
     pub fn add_usage(&mut self, usage: &Usage) {
@@ -50,6 +51,19 @@ impl CostTracker {
             .filter(|cost| cost.is_finite() && *cost >= 0.0)
         {
             *self.provider_cost_usd.get_or_insert(0.0) += cost;
+        } else if let Some(pricing) = self.pricing {
+            let cost = (usage.input_tokens as f64 * pricing.input
+                + usage.output_tokens as f64 * pricing.output
+                + usage.cache_read_tokens as f64 * pricing.cache_read
+                + usage.cache_creation_tokens as f64 * pricing.cache_write)
+                / 1_000_000.0;
+            *self.estimated_cost_usd.get_or_insert(0.0) += cost;
+        } else if usage.input_tokens > 0
+            || usage.output_tokens > 0
+            || usage.cache_read_tokens > 0
+            || usage.cache_creation_tokens > 0
+        {
+            self.unpriced_usage = true;
         }
     }
 
@@ -62,29 +76,41 @@ impl CostTracker {
         self.cache_read_tokens = 0;
         self.cache_creation_tokens = 0;
         self.provider_cost_usd = None;
+        self.estimated_cost_usd = None;
+        self.unpriced_usage = false;
     }
 
     /// Actual provider-reported cost when available, otherwise an estimate.
     pub fn total_cost_usd(&self) -> f64 {
-        if let Some(cost) = self.provider_cost_usd {
-            return cost;
-        }
-        let Some(pricing) = self.pricing else {
-            return 0.0;
-        };
-
-        let per_m = |tokens: u64, price: f64| tokens as f64 / 1_000_000.0 * price;
-
-        per_m(self.input_tokens, pricing.input)
-            + per_m(self.output_tokens, pricing.output)
-            + per_m(self.cache_read_tokens, pricing.cache_read)
-            + per_m(self.cache_creation_tokens, pricing.cache_write)
+        self.provider_cost_usd.unwrap_or(0.0) + self.estimated_cost_usd.unwrap_or(0.0)
     }
 
     /// Actual provider-reported cost, or an estimate when pricing is known.
     pub fn cost_usd(&self) -> Option<f64> {
-        self.provider_cost_usd
-            .or_else(|| self.pricing.map(|_| self.total_cost_usd()))
+        if self.unpriced_usage {
+            None
+        } else if self.provider_cost_usd.is_some()
+            || self.estimated_cost_usd.is_some()
+            || self.pricing.is_some()
+        {
+            Some(self.total_cost_usd())
+        } else {
+            None
+        }
+    }
+
+    pub fn cost_source(&self) -> &'static str {
+        if self.unpriced_usage {
+            "incomplete"
+        } else if self.provider_cost_usd.is_some() && self.estimated_cost_usd.is_some() {
+            "mixed"
+        } else if self.provider_cost_usd.is_some() {
+            "provider"
+        } else if self.estimated_cost_usd.is_some() || self.pricing.is_some() {
+            "estimated"
+        } else {
+            "unavailable"
+        }
     }
 
     pub fn usage_summary(&self) -> UsageSummary {
@@ -96,6 +122,7 @@ impl CostTracker {
             cache_read_tokens: self.cache_read_tokens,
             cache_creation_tokens: self.cache_creation_tokens,
             cost_usd: self.cost_usd(),
+            cost_source: self.cost_source(),
         }
     }
 
@@ -129,6 +156,39 @@ fn format_cost(cost: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_costs_keep_estimates_at_the_price_used_for_each_request() {
+        let mut tracker = CostTracker::new("claude-sonnet-4-20250514");
+        tracker.add_usage(&Usage {
+            input_tokens: 1_000_000,
+            ..Default::default()
+        });
+        tracker.add_usage(&Usage {
+            input_tokens: 1_000_000,
+            provider_cost_usd: Some(1.25),
+            ..Default::default()
+        });
+        tracker.set_pricing_override(Some(ModelPricing {
+            input: 2.0,
+            output: 0.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+        }));
+        tracker.add_usage(&Usage {
+            input_tokens: 1_000_000,
+            ..Default::default()
+        });
+        assert_eq!(tracker.cost_usd(), Some(6.25));
+        assert_eq!(tracker.cost_source(), "mixed");
+        tracker.set_pricing_override(None);
+        tracker.add_usage(&Usage {
+            input_tokens: 1,
+            ..Default::default()
+        });
+        assert_eq!(tracker.cost_usd(), None);
+        assert_eq!(tracker.cost_source(), "incomplete");
+    }
 
     #[test]
     fn new_tracker_is_zero() {
@@ -233,8 +293,7 @@ mod tests {
             cache_creation_tokens: 0,
             provider_cost_usd: None,
         });
-        // haiku: $0.25/M input + $1.25/M output = $1.50
-        assert!((tracker.total_cost_usd() - 1.50).abs() < 0.01);
+        assert!((tracker.total_cost_usd() - 6.0).abs() < 0.01);
     }
 
     #[test]
@@ -339,6 +398,7 @@ mod tests {
                 cache_read_tokens: 80,
                 cache_creation_tokens: 10,
                 cost_usd: Some(0.00125),
+                cost_source: "provider",
             }
         );
     }
@@ -360,7 +420,7 @@ mod tests {
             cache_creation_tokens: 0,
             provider_cost_usd: None,
         });
-        assert!((tracker.total_cost_usd() - 35.0).abs() < 0.01);
+        assert!((tracker.total_cost_usd() - 24.0).abs() < 0.01);
     }
 
     #[test]

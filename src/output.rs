@@ -271,7 +271,8 @@ mod tests {
                     "output_tokens": 4,
                     "cache_read_tokens": 8,
                     "cache_creation_tokens": 2,
-                    "cost_usd": 0.00042
+                    "cost_usd": 0.00042,
+                    "cost_source": "provider"
                 },
                 // Additive: consumers pinned to schema 1 still find every
                 // field they read.

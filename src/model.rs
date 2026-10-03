@@ -43,34 +43,31 @@ fn pricing(input: f64, output: f64, cache_read: f64, cache_write: f64) -> ModelP
     }
 }
 
-/// Built-in model knowledge. Keep family matching here so adding a model
-/// cannot update context management while accidentally omitting cost tracking.
+/// Exact-ID baseline estimates, checked 2026-10-03 against provider model/pricing docs.
+/// Standard short-context prices; provider charges and configured metadata take precedence.
+/// Unknown IDs deliberately receive no price and a conservative context window.
 pub fn built_in_metadata(model: &str) -> ModelMetadata {
-    let (context_window, pricing) = if model == "gpt-5.6" || model.contains("gpt-5.6-sol") {
-        (1_050_000, Some(pricing(5.0, 30.0, 0.5, 6.25)))
-    } else if model.contains("gpt-5.6-terra") {
-        (1_050_000, Some(pricing(2.5, 15.0, 0.25, 3.125)))
-    } else if model.contains("gpt-5.6-luna") {
-        (1_050_000, Some(pricing(1.0, 6.0, 0.1, 1.25)))
-    } else if model.contains("gpt-5.6") {
-        (1_050_000, None)
-    } else if model.contains("gpt-5.3-codex") || model.contains("gpt-5.2-codex") {
-        (400_000, Some(pricing(1.75, 14.0, 0.175, 2.1875)))
-    } else if model.contains("gpt-5.1-codex") || model.contains("gpt-5-codex") {
-        (400_000, None)
-    } else if model.contains("opus") {
-        (200_000, Some(pricing(15.0, 75.0, 1.5, 18.75)))
-    } else if model.contains("sonnet") {
-        (200_000, Some(pricing(3.0, 15.0, 0.3, 3.75)))
-    } else if model.contains("haiku") {
-        (200_000, Some(pricing(0.25, 1.25, 0.025, 0.3)))
-    } else if model.contains("gpt-4o") || model.contains("gpt-4") {
-        (128_000, None)
-    } else if model.contains("gpt-3.5") {
-        (16_000, None)
-    } else {
-        // Conservative default for unknown models.
-        (128_000, None)
+    let model = model.strip_prefix("openrouter/").unwrap_or(model);
+    let model = model
+        .strip_prefix("openai/")
+        .or_else(|| model.strip_prefix("anthropic/"))
+        .unwrap_or(model);
+    let (context_window, pricing) = match model {
+        "gpt-5.6" | "gpt-5.6-sol" => (1_050_000, Some(pricing(4.0, 20.0, 0.4, 5.0))),
+        "gpt-5.6-terra" => (1_050_000, Some(pricing(2.0, 12.0, 0.2, 2.5))),
+        "gpt-5.6-luna" => (1_050_000, Some(pricing(0.2, 1.2, 0.02, 0.25))),
+        "gpt-5.3-codex" | "gpt-5.2-codex" | "gpt-5.1-codex" | "gpt-5-codex" => (400_000, None),
+        "claude-opus-4-20250514" | "claude-opus-4-1-20250805" => {
+            (200_000, Some(pricing(15.0, 75.0, 1.5, 18.75)))
+        }
+        "claude-sonnet-4-20250514" | "claude-sonnet-4-5-20250929" => {
+            (200_000, Some(pricing(3.0, 15.0, 0.3, 3.75)))
+        }
+        "claude-haiku-4-5-20251001" | "claude-haiku-4-5" => {
+            (200_000, Some(pricing(1.0, 5.0, 0.1, 1.25)))
+        }
+        "gpt-4.1" | "gpt-4.1-2025-04-14" => (1_047_576, Some(pricing(2.0, 8.0, 0.5, 0.0))),
+        _ => (128_000, None),
     };
 
     ModelMetadata {
@@ -87,7 +84,21 @@ mod tests {
     fn known_family_resolves_context_and_pricing_together() {
         let metadata = built_in_metadata("openrouter/openai/gpt-5.6-terra");
         assert_eq!(metadata.context_window, 1_050_000);
-        assert_eq!(metadata.pricing.unwrap().input, 2.5);
+        assert_eq!(metadata.pricing.unwrap().input, 2.0);
+    }
+
+    #[test]
+    fn unknown_names_do_not_inherit_family_prices() {
+        for model in [
+            "my-opus",
+            "future-sonnet",
+            "not-gpt-5.6-sol",
+            "gpt-4.1-custom",
+        ] {
+            assert_eq!(built_in_metadata(model).pricing, None);
+            assert_eq!(built_in_metadata(model).context_window, 128_000);
+        }
+        assert_eq!(built_in_metadata("gpt-4.1").context_window, 1_047_576);
     }
 
     #[test]

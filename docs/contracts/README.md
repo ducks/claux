@@ -68,6 +68,15 @@ Both formats use the same usage object:
   tokens. Missing provider usage cannot be reconstructed from zero.
 - `cost_usd`: number when known, otherwise null. It may be provider-reported or
   estimated; it is not a billing guarantee.
+- `cost_source`: `provider`, `estimated`, `mixed`, `unavailable`, or `incomplete`.
+  Estimates are accumulated only for usage without a reported charge, at the
+  pricing active for that request. Unpriced usage makes the total null.
+  Built-in exact-ID prices are standard short-context estimates, not tiered
+  billing calculations. Metadata was checked on 2026-10-03 against
+  [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-5.6-sol)
+  and [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+  Configured metadata and available catalog data override these fallbacks;
+  unknown models use a conservative 128,000-token window and no price.
 - `rounds`: foreground turn-loop provider requests started, including retries
   and failed requests. Compaction requests and sub-agent requests are excluded.
 - `tool_calls`: finalized foreground tool results, including denied, failed, and
