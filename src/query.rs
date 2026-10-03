@@ -553,24 +553,20 @@ impl Engine {
         progress: tokio::sync::watch::Sender<String>,
     ) -> crate::tools::ToolOutput {
         let token = cancel.child_token();
-        let steering = self.steering.clone();
-        let watch_token = token.clone();
-        let watcher = tokio::spawn(async move {
-            loop {
-                if !steering.lock().expect("steering queue poisoned").is_empty() {
-                    watch_token.cancel();
-                    return;
+        let _cancel_on_drop = token.clone().drop_guard();
+        let execution =
+            self.tools
+                .execute_with_progress(name, input, token.clone(), Some(progress));
+        tokio::pin!(execution);
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+        loop {
+            tokio::select! {
+                output = &mut execution => return output,
+                _ = tick.tick() => {
+                    if self.steering_pending() { token.cancel(); }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-        });
-
-        let output = self
-            .tools
-            .execute_with_progress(name, input, token, Some(progress))
-            .await;
-        watcher.abort();
-        output
+        }
     }
 
     /// Set the auto-compact threshold (0.0-1.0).
@@ -4071,6 +4067,59 @@ mod tests {
         );
         let json = serde_json::to_value(transcript).unwrap();
         assert_eq!(json["sub_agents"][0]["parent_tool_use_id"], "parent-agent");
+    }
+
+    struct CancellationProbe(Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>);
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for CancellationProbe {
+        fn name(&self) -> &str {
+            "CancellationProbe"
+        }
+        fn description(&self) -> &str {
+            "Wait for cancellation"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn is_read_only(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<crate::tools::ToolOutput> {
+            *self.0.lock().unwrap() = Some(cancel);
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropped_tool_execution_cancels_child_without_detached_watcher() {
+        let mut engine = steering_engine(vec![], None);
+        let observed = Arc::new(Mutex::new(None));
+        engine
+            .tools
+            .add_tools(vec![Box::new(CancellationProbe(observed.clone()))])
+            .unwrap();
+        let parent = tokio_util::sync::CancellationToken::new();
+        let references = Arc::strong_count(&engine.steering);
+        let (progress, _) = tokio::sync::watch::channel(String::new());
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            engine.execute_tool_steerable(
+                "CancellationProbe",
+                serde_json::json!({}),
+                &parent,
+                progress
+            )
+        )
+        .await
+        .is_err());
+        assert!(observed.lock().unwrap().as_ref().unwrap().is_cancelled());
+        assert!(!parent.is_cancelled());
+        assert_eq!(Arc::strong_count(&engine.steering), references);
     }
 
     struct CountingPlugin {
