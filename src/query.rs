@@ -1392,6 +1392,7 @@ impl Engine {
             let model_started_after_ms = self.trace_offset_ms();
             let model_started = Instant::now();
             let _ = tx.send(StreamEvent::ModelRequest).await;
+            self.cost.rounds += 1;
             let stream_result = self
                 .provider
                 .stream(
@@ -1825,6 +1826,7 @@ impl Engine {
                                 content: Self::INTERRUPTED_BY_USER.to_string(),
                             })
                             .await;
+                        self.cost.tool_calls += 1;
                         self.tool_trace.push(ToolTraceEntry {
                             id: id.clone(),
                             name: name.clone(),
@@ -2064,6 +2066,7 @@ impl Engine {
                 })
                 .await;
 
+            self.cost.tool_calls += 1;
             self.tool_trace.push(ToolTraceEntry {
                 id: id.clone(),
                 name: name.clone(),
