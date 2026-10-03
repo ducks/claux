@@ -84,6 +84,8 @@ struct RequestUsageBaseline {
 /// cannot erase earlier tool activity from an exported transcript.
 #[derive(Clone, Debug, Serialize)]
 pub struct ToolTraceEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_agent: Option<Box<crate::tools::agent::SubAgentReport>>,
     pub id: String,
     pub name: String,
     pub input: serde_json::Value,
@@ -577,11 +579,16 @@ impl Engine {
     }
 
     pub fn set_max_tokens(&mut self, max_tokens: u32) {
+        self.tools.set_max_tokens(max_tokens);
         self.max_tokens = max_tokens.max(1);
     }
 
     pub fn set_max_rounds(&mut self, max_rounds: u32) {
         self.max_rounds = max_rounds.max(1);
+    }
+
+    pub fn disable_checkpoints(&mut self) {
+        self.checkpoint_enabled = false;
     }
 
     /// The classified failure that ended the most recent turn, if any.
@@ -1845,6 +1852,7 @@ impl Engine {
                             .await;
                         self.cost.tool_calls += 1;
                         self.tool_trace.push(ToolTraceEntry {
+                            sub_agent: None,
                             id: id.clone(),
                             name: name.clone(),
                             input: input.clone(),
@@ -1943,6 +1951,7 @@ impl Engine {
                 interrupted = true;
                 outputs[idx] = Some(TimedToolOutput {
                     output: crate::tools::ToolOutput {
+                        sub_agent: None,
                         content: Self::INTERRUPTED_BY_USER.to_string(),
                         is_error: true,
                     },
@@ -1958,6 +1967,7 @@ impl Engine {
             if self.steering_pending() {
                 outputs[idx] = Some(TimedToolOutput {
                     output: crate::tools::ToolOutput {
+                        sub_agent: None,
                         content: Self::SKIPPED_FOR_STEERING.to_string(),
                         is_error: true,
                     },
@@ -1998,6 +2008,7 @@ impl Engine {
                         let started = Instant::now();
                         let output = if cancel.is_cancelled() || this.steering_pending() {
                             crate::tools::ToolOutput {
+                                sub_agent: None,
                                 content: if cancel.is_cancelled() {
                                     Self::INTERRUPTED_BY_USER
                                 } else {
@@ -2034,6 +2045,7 @@ impl Engine {
                         .await
                 }
                 PermissionResult::Deny(reason) => crate::tools::ToolOutput {
+                    sub_agent: None,
                     content: format!("Permission denied: {reason}"),
                     is_error: true,
                 },
@@ -2043,6 +2055,7 @@ impl Engine {
                         // tool requiring confirmation must be denied rather
                         // than silently auto-allowed.
                         crate::tools::ToolOutput {
+                            sub_agent: None,
                             content: format!(
                                 "Permission denied: {message} (one-shot mode has no prompt; set permission_mode in config.toml to allow)"
                             ),
@@ -2069,7 +2082,11 @@ impl Engine {
         let mut result_blocks = Vec::with_capacity(tool_uses.len());
         for (idx, (id, name, input)) in tool_uses.iter().enumerate() {
             let timed = outputs[idx].take().expect("every tool got an output");
-            let output = timed.output;
+            let mut output = timed.output;
+            if let Some(report) = output.sub_agent.as_mut() {
+                report.parent_tool_use_id = id.clone();
+                self.cost.merge(&report.cost);
+            }
             let (content, was_truncated) = compact::truncate_tool_output(&output.content);
             if was_truncated {
                 tracing::debug!("Truncated tool output for {}", name);
@@ -2085,6 +2102,7 @@ impl Engine {
 
             self.cost.tool_calls += 1;
             self.tool_trace.push(ToolTraceEntry {
+                sub_agent: output.sub_agent,
                 id: id.clone(),
                 name: name.clone(),
                 input: input.clone(),
@@ -2226,6 +2244,7 @@ impl Engine {
             response = resp_rx => response,
             _ = cancel.cancelled() => {
                 return crate::tools::ToolOutput {
+                    sub_agent: None,
                     content: "Permission request cancelled by user.".to_string(),
                     is_error: true,
                 };
@@ -2265,6 +2284,7 @@ impl Engine {
             // steering_pending check skips the rest of the batch.
             Ok(PermissionResponse::Deny) | Ok(PermissionResponse::DenyAndCancel) | Err(_) => {
                 crate::tools::ToolOutput {
+                    sub_agent: None,
                     content: "Permission denied by user.".to_string(),
                     is_error: true,
                 }
@@ -3267,6 +3287,7 @@ mod tests {
         engine.permissions.always_allow("Write");
         engine.permissions.always_allow_command("cargo test");
         engine.tool_trace.push(ToolTraceEntry {
+            sub_agent: None,
             id: "old-tool".to_string(),
             name: "Bash".to_string(),
             input: serde_json::json!({"command": "true"}),
@@ -3802,6 +3823,7 @@ mod tests {
             tokio::task::yield_now().await;
             self.active.fetch_sub(1, Ordering::SeqCst);
             Ok(crate::tools::ToolOutput {
+                sub_agent: None,
                 content: input.to_string(),
                 is_error: false,
             })
@@ -3900,6 +3922,54 @@ mod tests {
             .any(|block| matches!(block,
                 ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "bounded-read"
             )));
+    }
+
+    #[tokio::test]
+    async fn agent_report_reaches_parent_accounting_and_transcript() {
+        let mut engine = steering_engine(
+            vec![crate::test_support::tool_use(
+                "parent-agent",
+                "Agent",
+                serde_json::json!({"prompt": "answer"}),
+            )],
+            None,
+        );
+        let agent = crate::tools::agent::AgentTool::new(
+            Box::new(|| {
+                Box::new(crate::test_support::ScriptedProvider {
+                    calls: AtomicUsize::new(0),
+                    first_round_text: Some("child answer".into()),
+                    first_round: vec![],
+                    push_on_first_call: None,
+                })
+            }),
+            "test".into(),
+            crate::model::built_in_metadata("test"),
+            crate::permissions::PermissionPolicy::new(PermissionMode::Bypass, Default::default()),
+            false,
+            Arc::new(crate::sandbox::SandboxPolicy::unrestricted_for_tests()),
+            Arc::new(crate::command_sandbox::CommandSandbox::unrestricted_for_tests()),
+        );
+        engine.tools.add_tools(vec![Box::new(agent)]).unwrap();
+        engine
+            .submit("delegate", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(engine.cost.rounds, 3);
+        let report = engine.tool_trace[0].sub_agent.as_ref().unwrap();
+        assert_eq!(report.parent_tool_use_id, "parent-agent");
+        assert_eq!(report.usage.rounds, 1);
+        assert_eq!(report.model_rounds.len(), 1);
+        let transcript = crate::output::OneShotTranscript::new(
+            "test",
+            &engine.cost,
+            engine.messages(),
+            engine.tool_trace(),
+            engine.execution_timing(),
+            crate::output::TranscriptOutcome::Completed { result: "done" },
+        );
+        let json = serde_json::to_value(transcript).unwrap();
+        assert_eq!(json["sub_agents"][0]["parent_tool_use_id"], "parent-agent");
     }
 
     struct CountingPlugin {

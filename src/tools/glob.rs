@@ -126,12 +126,14 @@ impl Tool for GlobTool {
 
         if paths.is_empty() {
             return Ok(ToolOutput {
+                sub_agent: None,
                 content: "No matches found".to_string(),
                 is_error: false,
             });
         }
 
         Ok(ToolOutput {
+            sub_agent: None,
             content: paths.join("\n"),
             is_error: false,
         })

@@ -84,6 +84,7 @@ impl Tool for EditTool {
 
         if !requested.exists() {
             return Ok(ToolOutput {
+                sub_agent: None,
                 content: format!("File does not exist: {}", params.file_path),
                 is_error: true,
             });
@@ -98,6 +99,7 @@ impl Tool for EditTool {
 
         if count == 0 {
             return Ok(ToolOutput {
+                sub_agent: None,
                 content: format!("old_string not found in {}", params.file_path),
                 is_error: true,
             });
@@ -105,6 +107,7 @@ impl Tool for EditTool {
 
         if count > 1 && !params.replace_all {
             return Ok(ToolOutput {
+                sub_agent: None,
                 content: format!(
                     "old_string appears {count} times. Use replace_all or provide more context."
                 ),
@@ -138,6 +141,7 @@ impl Tool for EditTool {
                     let _ = writeln!(result, "{}\t{}", start + j + 1, l);
                 }
                 return Ok(ToolOutput {
+                    sub_agent: None,
                     content: result,
                     is_error: false,
                 });
@@ -145,6 +149,7 @@ impl Tool for EditTool {
         }
 
         Ok(ToolOutput {
+            sub_agent: None,
             content: format!("Updated {}", params.file_path),
             is_error: false,
         })

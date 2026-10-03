@@ -96,6 +96,7 @@ fn read_file(
     let requested = expand_tilde(&params.file_path);
     if !requested.exists() {
         return Ok(ToolOutput {
+            sub_agent: None,
             content: format!("File does not exist: {}", params.file_path),
             is_error: true,
         });
@@ -106,6 +107,7 @@ fn read_file(
     };
     if !path.is_file() {
         return Ok(ToolOutput {
+            sub_agent: None,
             content: format!("Not a file: {}", params.file_path),
             is_error: true,
         });
@@ -137,6 +139,7 @@ fn read_file(
 
     if total_lines < start {
         return Ok(ToolOutput {
+            sub_agent: None,
             content: format!(
                 "Offset {} is beyond end of file ({} lines)",
                 params.offset.unwrap_or(1),
@@ -147,6 +150,7 @@ fn read_file(
     }
 
     Ok(ToolOutput {
+        sub_agent: None,
         content: result,
         is_error: false,
     })

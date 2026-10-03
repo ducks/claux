@@ -132,6 +132,7 @@ impl Tool for GrepTool {
         for entry in walker.flatten() {
             if cancel.is_cancelled() {
                 return Ok(ToolOutput {
+                    sub_agent: None,
                     content: "Search cancelled by user.".to_string(),
                     is_error: true,
                 });
@@ -229,6 +230,7 @@ impl Tool for GrepTool {
 
         if results.is_empty() {
             return Ok(ToolOutput {
+                sub_agent: None,
                 content: "No matches found".to_string(),
                 is_error: false,
             });
@@ -242,6 +244,7 @@ impl Tool for GrepTool {
             content.push_str(TRUNCATED_NOTICE);
         }
         Ok(ToolOutput {
+            sub_agent: None,
             content,
             is_error: false,
         })

@@ -154,6 +154,7 @@ impl JobManager {
                 .execute_with_progress(input, running.cancel.clone(), Some(progress))
                 .await
                 .unwrap_or_else(|error| ToolOutput {
+                    sub_agent: None,
                     content: format!("Bash failed: {error}"),
                     is_error: true,
                 });
@@ -163,7 +164,7 @@ impl JobManager {
         });
         *job.task.lock().expect("job task poisoned") = Some(task);
         jobs.push(job);
-        Ok(ToolOutput { content: format!("Started background Bash {id}. This is a launch acknowledgement, not command success. Use Jobs to inspect output or cancel. Jobs stop when this session closes; the Bash timeout still applies."), is_error: false })
+        Ok(ToolOutput { sub_agent: None, content: format!("Started background Bash {id}. This is a launch acknowledgement, not command success. Use Jobs to inspect output or cancel. Jobs stop when this session closes; the Bash timeout still applies."), is_error: false })
     }
 
     pub fn snapshots(&self) -> Vec<JobSnapshot> {
@@ -554,6 +555,7 @@ impl Tool for JobsTool {
             _ => bail!("action must be list, output, or cancel"),
         };
         Ok(ToolOutput {
+            sub_agent: None,
             content: self.0.command(&args)?,
             is_error: false,
         })

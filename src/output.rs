@@ -56,6 +56,8 @@ pub struct OneShotTranscript<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive: Option<&'a [crate::session::ArchivedMessage]>,
     pub tool_trace: &'a [ToolTraceEntry],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sub_agents: Vec<&'a crate::tools::agent::SubAgentReport>,
     pub timing: ExecutionTiming,
 }
 
@@ -92,6 +94,10 @@ impl<'a> OneShotTranscript<'a> {
             messages,
             archive: None,
             tool_trace,
+            sub_agents: tool_trace
+                .iter()
+                .filter_map(|entry| entry.sub_agent.as_deref())
+                .collect(),
             timing,
         }
     }
@@ -111,6 +117,10 @@ impl<'a> OneShotTranscript<'a> {
             messages,
             archive: None,
             tool_trace,
+            sub_agents: tool_trace
+                .iter()
+                .filter_map(|entry| entry.sub_agent.as_deref())
+                .collect(),
             timing,
         }
     }
@@ -293,6 +303,7 @@ mod tests {
         });
         let messages = vec![Message::user("diagnose the service")];
         let tool_trace = vec![ToolTraceEntry {
+            sub_agent: None,
             id: "tool-1".to_string(),
             name: "Bash".to_string(),
             input: serde_json::json!({"command": "docker ps"}),
