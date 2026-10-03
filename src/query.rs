@@ -477,7 +477,7 @@ impl Engine {
     pub fn undo_last_turn(&mut self) -> Result<String> {
         anyhow::ensure!(!self.jobs().snapshots().iter().any(|job| job.status.active()),
             "Wait for or cancel background jobs before undoing a turn; they may still be changing files.");
-        let checkpoint = self.last_checkpoint.as_ref().ok_or_else(|| {
+        let checkpoint = self.last_checkpoint.as_mut().ok_or_else(|| {
             anyhow::anyhow!("No turn checkpoint is available (checkpoints require a Git worktree).")
         })?;
         let result = checkpoint.undo()?;

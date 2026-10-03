@@ -466,6 +466,11 @@ Turn checkpoints cover Git-tracked files and non-ignored untracked files.
 Ignored files and paths outside the repository are deliberately excluded.
 `/undo-turn` first verifies that every affected file still matches the end of
 the turn; if anything changed afterward, it refuses the entire undo.
+Replacements are staged beside their targets before restoration. If a rename
+or removal fails partway through, the in-memory checkpoint records completed
+restores. Correct the reported problem and retry `/undo-turn`; already-restored
+files are verified against their restored contents, so later edits remain protected.
+This is recoverable within the running session, not a crash-persistent transaction.
 
 ## Config
 

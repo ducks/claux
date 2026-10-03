@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 cap-std = "4.0.3"
+tempfile = "3.0"
 jsonschema = { version = "0.33", default-features = false }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -87,7 +88,6 @@ nix = { version = "0.31", features = ["signal"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
-tempfile = "3.0"
 tuishot = { git = "https://github.com/ducks/tuishot" }
 
 [target.'cfg(unix)'.dev-dependencies]
