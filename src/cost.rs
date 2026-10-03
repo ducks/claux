@@ -2,7 +2,7 @@ use crate::api::types::Usage;
 pub use crate::model::ModelPricing;
 use serde::Serialize;
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UsageSummary {
     pub rounds: u64,
     pub tool_calls: u64,
@@ -15,7 +15,7 @@ pub struct UsageSummary {
 }
 
 /// Tracks token usage and estimated cost for a session.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CostTracker {
     pub rounds: u64,
     pub tool_calls: u64,
@@ -30,6 +30,21 @@ pub struct CostTracker {
 }
 
 impl CostTracker {
+    pub fn merge(&mut self, other: &Self) {
+        self.rounds += other.rounds;
+        self.tool_calls += other.tool_calls;
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_creation_tokens += other.cache_creation_tokens;
+        if let Some(cost) = other.provider_cost_usd {
+            *self.provider_cost_usd.get_or_insert(0.0) += cost;
+        }
+        if let Some(cost) = other.estimated_cost_usd {
+            *self.estimated_cost_usd.get_or_insert(0.0) += cost;
+        }
+        self.unpriced_usage |= other.unpriced_usage;
+    }
     pub fn new(model: &str) -> Self {
         Self {
             pricing: crate::model::built_in_metadata(model).pricing,

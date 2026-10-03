@@ -195,6 +195,7 @@ impl Tool for TodoWriteTool {
         }
 
         Ok(ToolOutput {
+            sub_agent: None,
             content: summary,
             is_error: false,
         })

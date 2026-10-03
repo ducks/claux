@@ -146,6 +146,7 @@ impl Tool for McpTool {
             Value::Null => None,
             other => {
                 return Ok(ToolOutput {
+                    sub_agent: None,
                     content: format!("MCP tool input must be a JSON object, got: {other}"),
                     is_error: true,
                 });
@@ -166,6 +167,7 @@ impl Tool for McpTool {
             Ok(handle) => handle,
             Err(error) => {
                 return Ok(ToolOutput {
+                    sub_agent: None,
                     content: format!("MCP error: {error}"),
                     is_error: true,
                 });
@@ -189,6 +191,7 @@ impl Tool for McpTool {
                     }
                 };
                 return Ok(ToolOutput {
+                    sub_agent: None,
                     content: format!(
                         "MCP request cancelled by user. {suffix} The server remains connected."
                     ),
@@ -210,6 +213,7 @@ impl Tool for McpTool {
                     }
                 };
                 return Ok(ToolOutput {
+                    sub_agent: None,
                     content: format!(
                         "MCP request timed out after {:?}. {suffix} The server remains connected.", self.timeout
                     ),
@@ -223,19 +227,23 @@ impl Tool for McpTool {
                 let text = render_content(call_result.content.iter().map(|content| &content.raw));
 
                 Ok(ToolOutput {
+                    sub_agent: None,
                     content: text,
                     is_error: call_result.is_error.unwrap_or(false),
                 })
             }
             Ok(Ok(_)) => Ok(ToolOutput {
+                sub_agent: None,
                 content: "MCP error: server returned an unexpected response".to_string(),
                 is_error: true,
             }),
             Ok(Err(error)) => Ok(ToolOutput {
+                sub_agent: None,
                 content: format!("MCP error: {error}"),
                 is_error: true,
             }),
             Err(_) => Ok(ToolOutput {
+                sub_agent: None,
                 content: "MCP error: connection closed before the tool returned".to_string(),
                 is_error: true,
             }),

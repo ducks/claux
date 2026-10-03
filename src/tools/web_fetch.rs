@@ -133,6 +133,7 @@ impl Tool for WebFetchTool {
             Ok(url) => url,
             Err(e) => {
                 return Ok(ToolOutput {
+                    sub_agent: None,
                     content: format!("Invalid URL: {e}"),
                     is_error: true,
                 })
@@ -142,6 +143,7 @@ impl Tool for WebFetchTool {
             Ok(response) => response,
             Err(error) => {
                 return Ok(ToolOutput {
+                    sub_agent: None,
                     content: error,
                     is_error: true,
                 })
@@ -151,6 +153,7 @@ impl Tool for WebFetchTool {
         let status = response.status();
         if !status.is_success() {
             return Ok(ToolOutput {
+                sub_agent: None,
                 content: format!(
                     "HTTP {}: {}",
                     status.as_u16(),
@@ -172,6 +175,7 @@ impl Tool for WebFetchTool {
             Ok(body) => body,
             Err(error) => {
                 return Ok(ToolOutput {
+                    sub_agent: None,
                     content: error,
                     is_error: true,
                 })
@@ -190,6 +194,7 @@ impl Tool for WebFetchTool {
         }
 
         Ok(ToolOutput {
+            sub_agent: None,
             content: text,
             is_error: false,
         })

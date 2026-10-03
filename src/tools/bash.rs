@@ -207,6 +207,7 @@ impl Tool for BashTool {
             Ok(c) => c,
             Err(e) => {
                 return Ok(ToolOutput {
+                    sub_agent: None,
                     content: format!("Failed to execute command: {e}"),
                     is_error: true,
                 });
@@ -314,7 +315,11 @@ impl Tool for BashTool {
             is_error = true;
         }
 
-        Ok(ToolOutput { content, is_error })
+        Ok(ToolOutput {
+            sub_agent: None,
+            content,
+            is_error,
+        })
     }
 }
 

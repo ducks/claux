@@ -26,10 +26,12 @@ use crate::sandbox::SandboxPolicy;
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    pub sub_agent: Option<Box<agent::SubAgentReport>>,
 }
 
 fn interrupted_output() -> ToolOutput {
     ToolOutput {
+        sub_agent: None,
         content: "Interrupted by user.".to_string(),
         is_error: true,
     }
@@ -37,6 +39,7 @@ fn interrupted_output() -> ToolOutput {
 
 fn sandbox_denied_output(error: anyhow::Error) -> ToolOutput {
     ToolOutput {
+        sub_agent: None,
         content: error.to_string(),
         is_error: true,
     }
@@ -45,6 +48,7 @@ fn sandbox_denied_output(error: anyhow::Error) -> ToolOutput {
 /// Every tool implements this trait.
 #[async_trait]
 pub trait Tool: Send + Sync {
+    fn set_max_tokens(&mut self, _max_tokens: u32) {}
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
@@ -81,6 +85,11 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    pub fn set_max_tokens(&mut self, max_tokens: u32) {
+        for tool in &mut self.tools {
+            tool.set_max_tokens(max_tokens);
+        }
+    }
     /// Create a registry with Agent tool using a provider factory. The
     /// permission policy (mode and rules) is inherited by sub-agents the
     /// Agent tool spawns, so a sub-agent can't run with more authority than
@@ -218,6 +227,7 @@ impl ToolRegistry {
         let Some(tool) = self.tools.iter().find(|t| t.name() == name) else {
             let available: Vec<&str> = self.tools.iter().map(|t| t.name()).collect();
             return ToolOutput {
+                sub_agent: None,
                 content: format!(
                     "Unknown tool: {name}. Available tools: {}",
                     available.join(", ")
@@ -229,6 +239,7 @@ impl ToolRegistry {
         match tool.execute_with_progress(input, cancel, progress).await {
             Ok(output) => output,
             Err(e) => ToolOutput {
+                sub_agent: None,
                 content: format!("Tool {name} failed: {e}"),
                 is_error: true,
             },

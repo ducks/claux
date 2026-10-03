@@ -80,6 +80,7 @@ impl Tool for WriteTool {
             .write_authorized(&path, &params.content)?;
 
         Ok(ToolOutput {
+            sub_agent: None,
             content: format!("Successfully wrote to {}", params.file_path),
             is_error: false,
         })

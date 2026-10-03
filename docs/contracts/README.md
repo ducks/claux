@@ -77,10 +77,17 @@ Both formats use the same usage object:
   and [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing).
   Configured metadata and available catalog data override these fallbacks;
   unknown models use a conservative 128,000-token window and no price.
-- `rounds`: foreground turn-loop provider requests started, including retries
-  and failed requests. Compaction requests and sub-agent requests are excluded.
-- `tool_calls`: finalized foreground tool results, including denied, failed, and
+- `rounds`: turn-loop provider requests started, including retries, failed
+  requests, and sub-agent rounds. Compaction requests are excluded.
+- `tool_calls`: finalized tool results, including sub-agent, denied, failed, and
   interrupted calls. Running calls are not counted until finalized.
+
+Transcripts include `sub_agents` when the Agent tool runs. Each report has its
+`parent_tool_use_id`, usage, model rounds, and tool trace. Child timings are
+relative to the child execution; the parent tool trace places that execution
+on the parent timeline. Usage totals already include these reports, so consumers
+must not add them again. Sub-agents inherit the parent's output-token limit and
+rely on the parent's worktree checkpoint rather than capturing another one.
 
 Counts share the usage reset boundary. In a new one-shot engine they cover that
 invocation; interactive usage accumulates until reset. Sub-agent accounting is

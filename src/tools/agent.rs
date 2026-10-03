@@ -17,7 +17,18 @@ use crate::sandbox::SandboxPolicy;
 /// Factory function to create a provider for sub-agents.
 pub type ProviderFactory = Box<dyn Fn() -> Box<dyn Provider> + Send + Sync>;
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SubAgentReport {
+    pub parent_tool_use_id: String,
+    pub usage: crate::cost::UsageSummary,
+    pub model_rounds: Vec<crate::query::ModelTraceEntry>,
+    pub tools: Vec<crate::query::ToolTraceEntry>,
+    #[serde(skip)]
+    pub cost: crate::cost::CostTracker,
+}
+
 pub struct AgentTool {
+    max_tokens: u32,
     make_provider: ProviderFactory,
     model: String,
     metadata: crate::model::ModelMetadata,
@@ -47,6 +58,7 @@ impl AgentTool {
         command_sandbox: Arc<CommandSandbox>,
     ) -> Self {
         Self {
+            max_tokens: 16_384,
             make_provider,
             model,
             metadata,
@@ -67,6 +79,9 @@ struct Params {
 
 #[async_trait]
 impl Tool for AgentTool {
+    fn set_max_tokens(&mut self, max_tokens: u32) {
+        self.max_tokens = max_tokens;
+    }
     fn name(&self) -> &str {
         "Agent"
     }
@@ -137,6 +152,8 @@ impl Tool for AgentTool {
         let permissions = self.permission_policy.checker();
 
         let mut engine = Engine::new(provider, tools, permissions, &self.model);
+        engine.disable_checkpoints();
+        engine.set_max_tokens(self.max_tokens);
         engine.set_model_metadata(self.metadata);
         engine.set_auto_compact_threshold(0.8); // Default for sub-agents
         engine.set_max_rounds(50);
@@ -166,16 +183,23 @@ impl Tool for AgentTool {
             Ok(result) => result,
             Err(_) => {
                 sub_cancel.cancel();
-                return Ok(ToolOutput {
-                    content: "Sub-agent exceeded its 600-second deadline.".into(),
-                    is_error: true,
-                });
+                Err(anyhow::anyhow!(
+                    "Sub-agent exceeded its 600-second deadline"
+                ))
             }
         };
+        let report = Some(Box::new(SubAgentReport {
+            parent_tool_use_id: String::new(),
+            usage: engine.cost.usage_summary(),
+            model_rounds: engine.execution_timing().model_rounds,
+            tools: engine.tool_trace().to_vec(),
+            cost: engine.cost.clone(),
+        }));
         match result {
             Ok(response) => {
                 if cancel.is_cancelled() {
                     return Ok(ToolOutput {
+                        sub_agent: report,
                         content: "Sub-agent interrupted by user.".to_string(),
                         is_error: true,
                     });
@@ -186,11 +210,13 @@ impl Tool for AgentTool {
                     content.push_str(&format!("\n\n[Agent {cost_summary}]"));
                 }
                 Ok(ToolOutput {
+                    sub_agent: report,
                     content,
                     is_error: false,
                 })
             }
             Err(e) => Ok(ToolOutput {
+                sub_agent: report,
                 content: format!("Agent error: {e}"),
                 is_error: true,
             }),
@@ -222,10 +248,18 @@ mod tests {
             messages: &[Message],
             _system: &str,
             _tools: &[ToolDefinition],
-            _max_tokens: u32,
+            max_tokens: u32,
             cancel: tokio_util::sync::CancellationToken,
         ) -> Result<crate::api::ProviderStream> {
             let (tx, rx) = mpsc::channel(10);
+            assert_eq!(max_tokens, 400);
+            tx.send(ApiEvent::Usage(crate::api::Usage {
+                input_tokens: 10,
+                provider_cost_usd: Some(0.01),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
             if messages.len() <= 1 {
                 let _ = tx
                     .send(ApiEvent::ToolUse {
@@ -237,6 +271,8 @@ mod tests {
                         }),
                     })
                     .await;
+            } else {
+                tx.send(ApiEvent::Text("done".into())).await.unwrap();
             }
             let _ = tx.send(ApiEvent::Done).await;
             Ok(crate::api::ProviderStream::new(rx, cancel.child_token()))
@@ -254,7 +290,7 @@ mod tests {
                 path: path_str.clone(),
             })
         });
-        let tool = AgentTool::new(
+        let mut tool = AgentTool::new(
             factory,
             "test".into(),
             crate::model::built_in_metadata("test"),
@@ -263,12 +299,20 @@ mod tests {
             sandbox_policy,
             Arc::new(CommandSandbox::unrestricted_for_tests()),
         );
-        tool.execute(
-            json!({ "prompt": "write the file" }),
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .expect("execute never returns Err");
+        tool.set_max_tokens(400);
+        let output = tool
+            .execute(
+                json!({ "prompt": "write the file" }),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("execute never returns Err");
+        let report = output.sub_agent.unwrap();
+        assert_eq!(report.usage.input_tokens, 20);
+        assert_eq!(report.usage.cost_usd, Some(0.02));
+        assert_eq!(report.usage.rounds, 2);
+        assert_eq!(report.tools.len(), 1);
+        assert_eq!(report.model_rounds.len(), 2);
     }
 
     #[tokio::test]
