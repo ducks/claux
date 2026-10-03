@@ -73,15 +73,11 @@ impl Tool for WriteTool {
             Err(error) => return Ok(super::sandbox_denied_output(error)),
         };
 
-        // Create parent directories
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
         if cancel.is_cancelled() {
             return Ok(interrupted_output());
         }
-        std::fs::write(&path, &params.content)?;
+        self.sandbox_policy
+            .write_authorized(&path, &params.content)?;
 
         Ok(ToolOutput {
             content: format!("Successfully wrote to {}", params.file_path),
