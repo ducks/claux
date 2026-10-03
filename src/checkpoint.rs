@@ -39,6 +39,7 @@ pub struct PendingCheckpoint {
 pub struct TurnCheckpoint {
     root: PathBuf,
     changes: BTreeMap<PathBuf, (FileState, FileState)>,
+    restored: BTreeSet<PathBuf>,
 }
 
 impl PendingCheckpoint {
@@ -74,6 +75,7 @@ impl PendingCheckpoint {
         Ok(TurnCheckpoint {
             root: self.root,
             changes,
+            restored: BTreeSet::new(),
         })
     }
 }
@@ -115,18 +117,26 @@ impl TurnCheckpoint {
         output
     }
 
-    pub fn undo(&self) -> Result<String> {
+    pub fn undo(&mut self) -> Result<String> {
         self.undo_with_before_restore(|_| {})
     }
 
-    fn undo_with_before_restore(&self, mut before_restore: impl FnMut(&Path)) -> Result<String> {
+    fn undo_with_before_restore(
+        &mut self,
+        mut before_restore: impl FnMut(&Path),
+    ) -> Result<String> {
         if self.changes.is_empty() {
             return Ok("The last turn made no checkpointed file changes.".to_string());
         }
 
         let mut conflicts = Vec::new();
-        for (path, (_, expected_after)) in &self.changes {
-            if !path_matches(&self.root, path, expected_after)? {
+        for (path, (before, after)) in &self.changes {
+            let expected = if self.restored.contains(path) {
+                before
+            } else {
+                after
+            };
+            if !path_matches(&self.root, path, expected)? {
                 conflicts.push(crate::utils::sanitize_terminal_text(
                     path.to_string_lossy().as_ref(),
                 ));
@@ -139,19 +149,46 @@ impl TurnCheckpoint {
             );
         }
 
-        for (path, (before, expected_after)) in &self.changes {
+        // Stage every replacement before changing a target. A failed write or
+        // permission update cannot truncate an existing worktree file.
+        let mut staged = BTreeMap::new();
+        for (path, (before, _)) in &self.changes {
+            if self.restored.contains(path) || matches!(before, FileState::Missing) {
+                continue;
+            }
+            let target = self.root.join(path);
+            let parent = target.parent().context("checkpoint path has no parent")?;
+            std::fs::create_dir_all(parent)?;
+            let temporary = tempfile::Builder::new()
+                .prefix(".claux-undo-")
+                .tempdir_in(parent)?;
+            let replacement = temporary.path().join("restore");
+            restore_path(&replacement, before)?;
+            staged.insert(path.clone(), (temporary, replacement));
+        }
+
+        for (path, (_, expected_after)) in &self.changes {
+            if self.restored.contains(path) {
+                continue;
+            }
             // Verification and restoration cannot be one filesystem-atomic
             // operation. Re-read immediately before every write to close the
             // much larger window created by the complete verification pass.
             before_restore(path);
             if !path_matches(&self.root, path, expected_after)? {
                 anyhow::bail!(
-                    "Undo stopped because {} changed while undo was in progress",
-                    crate::utils::sanitize_terminal_text(path.to_string_lossy().as_ref())
+                    "Undo stopped because {} changed while undo was in progress ({} files already restored; checkpoint retained for retry)",
+                    crate::utils::sanitize_terminal_text(path.to_string_lossy().as_ref()), self.restored.len()
                 );
             }
-            restore_path(&self.root.join(path), before)
-                .with_context(|| format!("failed to restore {}", path.display()))?;
+            let target = self.root.join(path);
+            let result = if let Some((_, replacement)) = staged.get(path) {
+                std::fs::rename(replacement, &target).map_err(anyhow::Error::from)
+            } else {
+                remove_existing(&target)
+            };
+            result.with_context(|| format!("failed to restore {}; {} files already restored, checkpoint retained for retry", path.display(), self.restored.len()))?;
+            self.restored.insert(path.clone());
         }
 
         Ok(format!(
@@ -290,7 +327,12 @@ fn restore_path(path: &Path, state: &FileState) -> Result<()> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(path, contents)?;
+            {
+                use std::io::Write;
+                let mut file = std::fs::File::create(path)?;
+                file.write_all(contents)?;
+                file.sync_all()?;
+            }
             let mut permissions = std::fs::metadata(path)?.permissions();
             permissions.set_readonly(*readonly);
             #[cfg(unix)]
@@ -414,7 +456,7 @@ mod tests {
 
         std::fs::write(repo.path().join("existing.txt"), "after\n").unwrap();
         std::fs::write(repo.path().join("created.txt"), "new\n").unwrap();
-        let checkpoint = pending.finish().unwrap();
+        let mut checkpoint = pending.finish().unwrap();
 
         let diff = checkpoint.diff();
         assert!(diff.contains("-before"));
@@ -429,13 +471,53 @@ mod tests {
     }
 
     #[test]
+    fn partial_restore_can_retry_without_overwriting_later_edits() {
+        let repo = init_repo();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(repo.path().join(name), "before").unwrap();
+        }
+        let pending = PendingCheckpoint::capture_from(repo.path()).unwrap();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(repo.path().join(name), "after").unwrap();
+        }
+        let mut checkpoint = pending.finish().unwrap();
+        let error = checkpoint
+            .undo_with_before_restore(|path| {
+                if path == Path::new("b.txt") {
+                    std::fs::write(repo.path().join(path), "concurrent edit").unwrap();
+                }
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("1 files already restored"));
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("a.txt")).unwrap(),
+            "before"
+        );
+        assert!(checkpoint.undo().is_err());
+        std::fs::write(repo.path().join("b.txt"), "after").unwrap();
+        std::fs::write(repo.path().join("a.txt"), "later human edit").unwrap();
+        assert!(checkpoint.undo().is_err());
+        std::fs::write(repo.path().join("a.txt"), "before").unwrap();
+        checkpoint.undo().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("b.txt")).unwrap(),
+            "before"
+        );
+        assert!(!std::fs::read_dir(repo.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".claux-undo-")));
+    }
+
+    #[test]
     fn undo_refuses_to_overwrite_later_edits() {
         let repo = init_repo();
         let path = repo.path().join("file.txt");
         std::fs::write(&path, "before").unwrap();
         let pending = PendingCheckpoint::capture_from(repo.path()).unwrap();
         std::fs::write(&path, "agent").unwrap();
-        let checkpoint = pending.finish().unwrap();
+        let mut checkpoint = pending.finish().unwrap();
         std::fs::write(&path, "human").unwrap();
 
         let error = checkpoint.undo().unwrap_err().to_string();
@@ -450,7 +532,7 @@ mod tests {
         std::fs::write(&path, "before").unwrap();
         let pending = PendingCheckpoint::capture_from(repo.path()).unwrap();
         std::fs::write(&path, "agent").unwrap();
-        let checkpoint = pending.finish().unwrap();
+        let mut checkpoint = pending.finish().unwrap();
 
         let mut changed = false;
         let error = checkpoint
