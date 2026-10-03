@@ -1563,6 +1563,7 @@ impl Engine {
                         None => {
                             let failure =
                                 ApiFailure::protocol_error("API stream ended without completion");
+                            self.finalize_unrun_tools(&tool_uses, &text_buf, &tx).await;
                             let _ = tx.send(StreamEvent::Error(failure.message.clone())).await;
                             self.model_trace.push(ModelTraceEntry {
                                 index: self.model_trace.len() + 1,
@@ -1727,6 +1728,7 @@ impl Engine {
                                 _ => {}
                             }
                         }
+                        self.finalize_unrun_tools(&tool_uses, &text_buf, &tx).await;
                         let _ = tx.send(StreamEvent::Error(failure.message.clone())).await;
                         self.model_trace.push(ModelTraceEntry {
                             index: self.model_trace.len() + 1,
@@ -1926,6 +1928,63 @@ impl Engine {
     /// yet started get synthetic skipped results, and running tools are
     /// cancelled by their steering watchers. Result blocks come back in
     /// the original tool_use order.
+    async fn finalize_unrun_tools(
+        &mut self,
+        tools: &[(String, String, serde_json::Value)],
+        text: &str,
+        tx: &mpsc::Sender<StreamEvent>,
+    ) {
+        if tools.is_empty() {
+            return;
+        }
+        let content = "Not executed: provider stream failed before the tool batch completed.";
+        let mut blocks = Vec::new();
+        if !text.is_empty() {
+            blocks.push(ContentBlock::Text { text: text.into() });
+        }
+        blocks.extend(tools.iter().map(|(id, name, input)| ContentBlock::ToolUse {
+            id: id.clone(),
+            name: name.clone(),
+            input: input.clone(),
+        }));
+        self.append_message(Message::assistant_blocks(blocks));
+        let mut results = Vec::new();
+        for (index, (id, name, input)) in tools.iter().enumerate() {
+            self.fire_hook(&HookTrigger::OnToolComplete).await;
+            let _ = tx
+                .send(StreamEvent::ToolFinished {
+                    index,
+                    is_error: true,
+                    content: content.into(),
+                })
+                .await;
+            let _ = tx
+                .send(StreamEvent::ToolResult {
+                    is_error: true,
+                    content: content.into(),
+                })
+                .await;
+            self.cost.tool_calls += 1;
+            self.tool_trace.push(ToolTraceEntry {
+                sub_agent: None,
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                output: content.into(),
+                is_error: true,
+                read_only: self.tools.is_read_only(name),
+                started_after_ms: self.trace_offset_ms(),
+                duration_ms: 0,
+            });
+            results.push(ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: content.into(),
+                is_error: Some(true),
+            });
+        }
+        self.append_message(Message::tool_results(results));
+    }
+
     async fn execute_tool_batch(
         &mut self,
         tool_uses: &[(String, String, serde_json::Value)],
@@ -2800,7 +2859,7 @@ mod tests {
     /// whose later tool call is malformed: by the time the error lands, the
     /// earlier call has already been surfaced to the UI and its hook fired.
     struct ToolThenFailProvider {
-        failure: ApiFailure,
+        failure: Option<ApiFailure>,
         calls: Arc<AtomicUsize>,
     }
 
@@ -2829,19 +2888,61 @@ mod tests {
             })
             .await
             .unwrap();
-            tx.send(ApiEvent::Error(self.failure.clone()))
-                .await
-                .unwrap();
+            if let Some(failure) = &self.failure {
+                tx.send(ApiEvent::Error(failure.clone())).await.unwrap();
+            }
             drop(tx);
             Ok(ProviderStream::new(rx, cancel.child_token()))
         }
     }
 
     /// Attempts made when the provider announces a tool before failing.
+    #[tokio::test]
+    async fn terminal_stream_failures_finalize_announced_tools() {
+        for failure in [None, Some(ApiFailure::other("failed"))] {
+            let provider = Box::new(ToolThenFailProvider {
+                failure,
+                calls: Arc::new(AtomicUsize::new(0)),
+            });
+            let mut engine =
+                Engine::for_tests(provider, SteeringQueue::default(), PermissionMode::Bypass);
+            let completes = Arc::new(AtomicUsize::new(0));
+            let mut plugins = PluginRegistry::new();
+            plugins.add(Box::new(CountingPlugin {
+                trigger: HookTrigger::OnToolComplete,
+                count: completes.clone(),
+            }));
+            engine.set_plugins(Arc::new(plugins));
+            let (tx, mut rx) = mpsc::channel(64);
+            assert!(engine
+                .submit_streaming("go", tx, tokio_util::sync::CancellationToken::new())
+                .await
+                .is_err());
+            let mut finished = 0;
+            while let Some(event) = rx.recv().await {
+                if matches!(event, StreamEvent::ToolFinished { is_error: true, .. }) {
+                    finished += 1;
+                }
+            }
+            assert_eq!(finished, 1);
+            assert_eq!(completes.load(Ordering::SeqCst), 1);
+            assert_eq!(engine.cost.tool_calls, 1);
+            assert!(engine.tool_trace[0].output.contains("Not executed"));
+            let crate::api::MessageContent::Blocks(results) =
+                &engine.messages.last().unwrap().content
+            else {
+                panic!("missing results");
+            };
+            assert!(
+                matches!(&results[0], ContentBlock::ToolResult { tool_use_id, is_error: Some(true), .. } if tool_use_id == "tu_1")
+            );
+        }
+    }
+
     async fn committed_attempts_for(failure: ApiFailure) -> usize {
         let calls = Arc::new(AtomicUsize::new(0));
         let provider = Box::new(ToolThenFailProvider {
-            failure,
+            failure: Some(failure),
             calls: calls.clone(),
         });
         let mut engine =
