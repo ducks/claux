@@ -298,6 +298,8 @@ pub struct Config {
 
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_max_rounds")]
+    pub max_rounds: u32,
 
     /// Auto-compact threshold (0.0-1.0). If conversation exceeds this
     /// fraction of the context window, auto-compact before next request.
@@ -487,6 +489,10 @@ fn default_max_tokens() -> u32 {
     16384
 }
 
+fn default_max_rounds() -> u32 {
+    200
+}
+
 fn default_auto_compact_threshold() -> f64 {
     0.8 // 80% of context window
 }
@@ -512,6 +518,7 @@ impl Default for Config {
             permissions: PermissionRulesConfig::default(),
             strip_agent_sockets: default_strip_agent_sockets(),
             max_tokens: default_max_tokens(),
+            max_rounds: default_max_rounds(),
             auto_compact_threshold: default_auto_compact_threshold(),
             openai_base_url: None,
             openai_api_key: None,

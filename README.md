@@ -469,6 +469,13 @@ the turn; if anything changed afterward, it refuses the entire undo.
 
 ## Config
 
+Turns are limited to 200 model rounds by default (`max_rounds` in config,
+minimum 1). Sub-agents have a 50-round limit and a ten-minute deadline.
+Provider streams have a 120-second idle timeout. Context commands have a
+three-second deadline and a 16 KiB output cap. Instruction and memory files
+are read up to 40,000 bytes each; combined instructions are capped at 160,000
+bytes, reserving space for user-global instructions.
+
 Global: `~/.config/claux/config.toml`
 
 ```toml

@@ -451,6 +451,7 @@ async fn build_engine(
     engine.set_plugins(plugins);
     engine.set_auto_compact_threshold(config.auto_compact_threshold);
     engine.set_max_tokens(config.max_tokens);
+    engine.set_max_rounds(config.max_rounds);
     engine.set_model_metadata(metadata);
     Ok(engine)
 }

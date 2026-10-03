@@ -38,6 +38,7 @@ pub struct Engine {
     model: String,
     model_binding: Option<ModelBinding>,
     max_tokens: u32,
+    max_rounds: u32,
     context_window: usize,
     auto_compact_threshold: f64,
     steering: SteeringQueue,
@@ -358,6 +359,7 @@ impl Engine {
             model: model.to_string(),
             model_binding: None,
             max_tokens: 16384,
+            max_rounds: 200,
             context_window: crate::model::built_in_metadata(model).context_window,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
@@ -400,6 +402,7 @@ impl Engine {
             model: "test".to_string(),
             model_binding: None,
             max_tokens: 1000,
+            max_rounds: 200,
             context_window: crate::model::built_in_metadata("test").context_window,
             auto_compact_threshold: 0.8,
             steering,
@@ -575,6 +578,10 @@ impl Engine {
 
     pub fn set_max_tokens(&mut self, max_tokens: u32) {
         self.max_tokens = max_tokens.max(1);
+    }
+
+    pub fn set_max_rounds(&mut self, max_rounds: u32) {
+        self.max_rounds = max_rounds.max(1);
     }
 
     /// The classified failure that ended the most recent turn, if any.
@@ -1334,6 +1341,7 @@ impl Engine {
         const MAX_MALFORMED_TOOL_RETRIES: u32 = 1;
         let mut retry_prompt: Option<String> = None;
         let mut turn_had_meaningful_response = false;
+        let mut rounds = 0;
 
         loop {
             // Deliver any steering messages queued since the last API call,
@@ -1348,6 +1356,15 @@ impl Engine {
             }
 
             let tool_defs = self.tools.definitions();
+            if rounds >= self.max_rounds {
+                let failure = ApiFailure::other(format!(
+                    "Turn stopped at the configured limit of {} model rounds",
+                    self.max_rounds
+                ));
+                self.record_failure(&failure, rounds);
+                return Err(failure.into());
+            }
+            rounds += 1;
             let mut effective_system_prompt = retry_prompt
                 .as_ref()
                 .map(|prompt| format!("{}\n\n{prompt}", self.system_prompt));
@@ -3537,6 +3554,7 @@ mod tests {
             model_binding: None,
             max_tokens: 1000,
             context_window: 128_000,
+            max_rounds: 200,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             pending_images: Vec::new(),
@@ -3626,6 +3644,7 @@ mod tests {
             model_binding: None,
             max_tokens: 1000,
             context_window: 128_000,
+            max_rounds: 200,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             pending_images: Vec::new(),
@@ -3852,6 +3871,35 @@ mod tests {
             push_on_first_call,
             PermissionMode::Bypass,
         )
+    }
+
+    #[tokio::test]
+    async fn round_limit_stops_continuation_after_paired_tool_result() {
+        let mut engine = steering_engine(
+            vec![crate::test_support::tool_use(
+                "bounded-read",
+                "Read",
+                serde_json::json!({"file_path": "missing-round-limit-fixture"}),
+            )],
+            None,
+        );
+        engine.set_max_rounds(1);
+        let error = engine
+            .submit("read", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("limit of 1 model rounds"));
+        assert_eq!(engine.cost.rounds, 1);
+        assert!(engine
+            .messages
+            .iter()
+            .flat_map(|m| match &m.content {
+                crate::api::MessageContent::Blocks(blocks) => blocks.as_slice(),
+                _ => &[],
+            })
+            .any(|block| matches!(block,
+                ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "bounded-read"
+            )));
     }
 
     struct CountingPlugin {
@@ -4924,6 +4972,7 @@ mod tests {
             model_binding: None,
             max_tokens: 1000,
             context_window: 128_000,
+            max_rounds: 200,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             pending_images: Vec::new(),
@@ -5005,6 +5054,7 @@ mod tests {
             model_binding: None,
             max_tokens: 1000,
             context_window: 128_000,
+            max_rounds: 200,
             auto_compact_threshold: 0.8,
             steering: SteeringQueue::default(),
             pending_images: Vec::new(),

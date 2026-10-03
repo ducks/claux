@@ -120,6 +120,8 @@ impl Tool for AgentTool {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ToolOutput> {
         let params: Params = serde_json::from_value(input)?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+        let sub_cancel = cancel.child_token();
 
         let mut provider = (self.make_provider)();
         provider.set_model(&self.model);
@@ -137,8 +139,12 @@ impl Tool for AgentTool {
         let mut engine = Engine::new(provider, tools, permissions, &self.model);
         engine.set_model_metadata(self.metadata);
         engine.set_auto_compact_threshold(0.8); // Default for sub-agents
+        engine.set_max_rounds(50);
 
-        let base_prompt = context::build_system_prompt(self.trusted).await?;
+        let base_prompt =
+            tokio::time::timeout_at(deadline, context::build_system_prompt(self.trusted))
+                .await
+                .map_err(|_| anyhow::anyhow!("Sub-agent context preparation timed out"))??;
         let agent_prompt = format!(
             "{base_prompt}\n\n# Agent Mode\n\
              You are a sub-agent spawned to handle a specific task. \
@@ -151,7 +157,22 @@ impl Tool for AgentTool {
         // The cancellation token flows into the sub-agent's own turn loop,
         // so interrupting the parent cleanly interrupts the sub-agent's
         // in-flight tools too.
-        match engine.submit(&params.prompt, cancel.clone()).await {
+        let result = match tokio::time::timeout_at(
+            deadline,
+            engine.submit(&params.prompt, sub_cancel.clone()),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                sub_cancel.cancel();
+                return Ok(ToolOutput {
+                    content: "Sub-agent exceeded its 600-second deadline.".into(),
+                    is_error: true,
+                });
+            }
+        };
+        match result {
             Ok(response) => {
                 if cancel.is_cancelled() {
                     return Ok(ToolOutput {
