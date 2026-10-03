@@ -474,6 +474,12 @@ This is recoverable within the running session, not a crash-persistent transacti
 
 ## Config
 
+`--resume ID` accepts an exact session ID or a unique prefix. Missing and
+ambiguous IDs are errors. This flag resumes the REPL; it cannot be combined
+with `--print` or `--tui` (use the TUI session browser instead). `/resume`
+lists stored metadata without loading full conversations. Session saves retain
+unchanged rows, including inline images, and replace only the changed suffix.
+
 Headless invocations can use `--config PATH` (or `CLAUX_CONFIG`, with the flag
 taking precedence), `--base-url URL`, `--protocol chat_completions|responses|anthropic`,
 and `--reasoning-effort LEVEL`. These transport overrides apply to the selected

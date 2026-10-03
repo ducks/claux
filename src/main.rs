@@ -381,16 +381,17 @@ async fn run() -> Result<std::process::ExitCode> {
                     })?,
                 };
                 eprintln!(
-                    "Resumed session {} ({}, {} messages)",
+                    "Resumed session {} ({}, {} messages, {})",
                     meta.id,
                     meta.model,
-                    messages.len()
+                    messages.len(),
+                    meta.cwd
                 );
                 resumed_messages = Some(messages);
                 resumed_id = Some(sid);
             }
             None => {
-                eprintln!("Session not found: {session_id}. Starting new session.");
+                anyhow::bail!("Session not found: {session_id}");
             }
         }
     }
