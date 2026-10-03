@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 cap-std = "4.0.3"
+jsonschema = { version = "0.33", default-features = false }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }

@@ -3798,10 +3798,13 @@ mod tests {
             SteeringQueue::default(),
             PermissionMode::Bypass,
         );
-        engine.tools.add_tools(vec![Box::new(ConcurrencyProbe {
-            active: active.clone(),
-            peak: peak.clone(),
-        })]);
+        engine
+            .tools
+            .add_tools(vec![Box::new(ConcurrencyProbe {
+                active: active.clone(),
+                peak: peak.clone(),
+            })])
+            .unwrap();
         let calls: Vec<_> = (0..MAX_PARALLEL_TOOLS * 2 + 1)
             .map(|i| {
                 (

@@ -162,8 +162,18 @@ impl ToolRegistry {
     }
 
     /// Add external tools (e.g. from MCP servers).
-    pub fn add_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
+    pub fn add_tools(&mut self, tools: Vec<Box<dyn Tool>>) -> Result<()> {
+        let mut names: std::collections::HashSet<String> =
+            self.tools.iter().map(|t| t.name().to_string()).collect();
+        for tool in &tools {
+            anyhow::ensure!(
+                names.insert(tool.name().to_string()),
+                "Duplicate tool name: {}",
+                tool.name()
+            );
+        }
         self.tools.extend(tools);
+        Ok(())
     }
 
     /// Clear conversation-scoped state held by registered tools.

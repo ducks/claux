@@ -361,6 +361,8 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
     pub name: String,
     pub command: String,
     #[serde(default)]
@@ -379,6 +381,8 @@ pub struct McpJsonConfig {
 /// A single server entry in .mcp.json (name comes from the key).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpJsonServerEntry {
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -389,6 +393,7 @@ pub struct McpJsonServerEntry {
 impl McpJsonServerEntry {
     pub fn into_server_config(self, name: String) -> McpServerConfig {
         McpServerConfig {
+            timeout_seconds: self.timeout_seconds,
             name,
             command: self.command,
             args: self.args,

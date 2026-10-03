@@ -443,7 +443,7 @@ async fn build_engine(
         sandbox_policy,
         command_sandbox,
     );
-    tool_registry.add_tools(bootstrap::connect_mcp_tools(config).await);
+    tool_registry.add_tools(bootstrap::connect_mcp_tools(config).await)?;
 
     let permission_checker = permission_policy.checker();
     let mut engine = query::Engine::new(provider, tool_registry, permission_checker, model);
