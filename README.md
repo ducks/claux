@@ -469,6 +469,11 @@ the turn; if anything changed afterward, it refuses the entire undo.
 
 ## Config
 
+Chat Completions uses `reasoning_effort` for generic endpoints. OpenRouter's
+reasoning and cache extensions are sent only to `openrouter.ai`; OpenAI's
+endpoint uses `max_completion_tokens`. Anthropic thinking is not yet supported:
+setting `reasoning_effort` there produces a warning rather than enabling thinking.
+
 Turns are limited to 200 model rounds by default (`max_rounds` in config,
 minimum 1). Sub-agents have a 50-round limit and a ten-minute deadline.
 Provider streams have a 120-second idle timeout. Context commands have a
