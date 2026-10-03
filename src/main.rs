@@ -224,12 +224,7 @@ async fn run() -> Result<std::process::ExitCode> {
         None => config.default_resolved_model()?,
     };
 
-    tracing::debug!(
-        "Config loaded: openai_base_url={:?} openai_api_key_cmd={:?} model={}",
-        config.openai_base_url,
-        config.openai_api_key_cmd,
-        config.model
-    );
+    tracing::debug!(model = %config.model, "Config loaded");
 
     // One-shot mode: --print / -p
     if let Some(ref prompt) = args.prompt {
