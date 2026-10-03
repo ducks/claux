@@ -108,7 +108,7 @@ async fn build_runtime_section(
     let _ = std::fs::create_dir_all(&memory_dir);
     let memory_index = std::path::Path::new(&memory_dir).join("MEMORY.md");
     if memory_index.exists() {
-        if let Ok(content) = std::fs::read_to_string(&memory_index) {
+        if let Some(content) = read_capped(&memory_index) {
             if !content.trim().is_empty() {
                 // Truncate to 200 lines matching CC behavior
                 let truncated: String = content.lines().take(200).collect::<Vec<_>>().join("\n");
@@ -302,6 +302,7 @@ async fn detect_default_branch() -> String {
 /// and every Anthropic cache write. Mirror of git status's 2k truncation,
 /// applied to each CLAUDE.md file read.
 const MAX_CLAUDE_MD_BYTES: usize = 40_000;
+const MAX_INSTRUCTION_BYTES: usize = 160_000;
 
 async fn read_claude_md(trusted: bool) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
@@ -321,11 +322,22 @@ async fn read_claude_md(trusted: bool) -> Option<String> {
 /// without mutating the process-global current directory.
 async fn read_claude_md_from(cwd: &Path, home: Option<&str>, trusted: bool) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
+    let global = home.and_then(|home| {
+        read_capped(&Path::new(home).join(".claude/CLAUDE.md"))
+            .map(|content| format!("# ~/.claude/CLAUDE.md\n{content}"))
+    });
+    let project_budget = MAX_INSTRUCTION_BYTES - global.as_ref().map_or(0, |s| s.len() + 2);
 
     if trusted {
         // 1. cwd and .claude/ subdir, then walk up parent directories.
         //    These are checked into the repo being opened.
         for dir in std::iter::once(cwd).chain(cwd.ancestors().skip(1)) {
+            if parts.iter().map(String::len).sum::<usize>()
+                >= MAX_INSTRUCTION_BYTES - MAX_CLAUDE_MD_BYTES
+            {
+                parts.push("[Ancestor instructions omitted: aggregate limit reached]".into());
+                break;
+            }
             for name in &["CLAUDE.md", ".claude/CLAUDE.md"] {
                 let path = dir.join(name);
                 if let Some(content) = read_capped(&path) {
@@ -335,55 +347,142 @@ async fn read_claude_md_from(cwd: &Path, home: Option<&str>, trusted: bool) -> O
         }
     }
 
-    // 2. ~/.claude/CLAUDE.md (user-global) — the user's own instructions,
-    //    loaded regardless of project trust.
-    if let Some(home_path) = home {
-        let path = std::path::PathBuf::from(home_path)
-            .join(".claude")
-            .join("CLAUDE.md");
-        if let Some(content) = read_capped(&path) {
-            parts.push(format!("# ~/.claude/CLAUDE.md\n{content}"));
-        }
-    }
-
-    if parts.is_empty() {
+    if parts.is_empty() && global.is_none() {
         None
     } else {
-        Some(parts.join("\n\n"))
+        let mut combined = parts.join("\n\n");
+        if combined.len() > project_budget {
+            let marker = "\n[Instructions truncated at aggregate limit]";
+            let mut end = project_budget - marker.len();
+            while !combined.is_char_boundary(end) {
+                end -= 1;
+            }
+            combined.truncate(end);
+            combined.push_str(marker);
+        }
+        if let Some(global) = global {
+            if !combined.is_empty() {
+                combined.push_str("\n\n");
+            }
+            combined.push_str(&global);
+        }
+        Some(combined)
     }
 }
 
 /// Read a file's text, capped at `MAX_CLAUDE_MD_BYTES` with a truncation
 /// marker. Returns `None` when the file is missing or unreadable.
 fn read_capped(path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
+    use std::io::Read;
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_CLAUDE_MD_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let content = String::from_utf8_lossy(&bytes);
     if content.len() > MAX_CLAUDE_MD_BYTES {
         let truncated = crate::utils::truncate_str(&content, MAX_CLAUDE_MD_BYTES);
         Some(format!(
             "{truncated}\n... (truncated because it exceeds {MAX_CLAUDE_MD_BYTES} bytes)",
         ))
     } else {
-        Some(content)
+        Some(content.into_owned())
     }
 }
 
 async fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
-    let output = tokio::process::Command::new(program)
-        .args(args)
-        .output()
-        .await
-        .ok()?;
+    run_cmd_bounded(program, args, std::time::Duration::from_secs(3)).await
+}
 
-    if !output.status.success() {
+async fn run_cmd_bounded(
+    program: &str,
+    args: &[&str],
+    deadline: std::time::Duration,
+) -> Option<String> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+    const LIMIT: u64 = 16 * 1024;
+    let mut child = tokio::process::Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?.take(LIMIT + 1);
+    let mut bytes = Vec::new();
+    let result = tokio::time::timeout(deadline, async {
+        stdout.read_to_end(&mut bytes).await.ok()?;
+        if bytes.len() > LIMIT as usize {
+            return None;
+        }
+        child.wait().await.ok()?.success().then_some(())
+    })
+    .await;
+    if !matches!(result, Ok(Some(()))) {
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), child.wait()).await;
+        tracing::warn!(
+            program,
+            "Context command failed, timed out, or exceeded its output limit"
+        );
         return None;
     }
-
-    Some(String::from_utf8_lossy(&output.stdout).to_string())
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn context_commands_bound_time_and_output() {
+        let limit = std::time::Duration::from_millis(100);
+        assert_eq!(
+            run_cmd_bounded("sh", &["-c", "printf ok"], limit)
+                .await
+                .as_deref(),
+            Some("ok")
+        );
+        assert!(run_cmd_bounded("sh", &["-c", "exec sleep 30"], limit)
+            .await
+            .is_none());
+        assert!(
+            run_cmd_bounded("sh", &["-c", "head -c 20000 /dev/zero"], limit)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_instructions_preserve_global_within_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("a/b/c");
+        std::fs::create_dir_all(&project).unwrap();
+        for path in project.ancestors().take(3) {
+            std::fs::create_dir_all(path.join(".claude")).unwrap();
+            for name in ["CLAUDE.md", ".claude/CLAUDE.md"] {
+                std::fs::write(path.join(name), "x".repeat(MAX_CLAUDE_MD_BYTES)).unwrap();
+            }
+        }
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(
+            home.join(".claude/CLAUDE.md"),
+            "global instructions survive",
+        )
+        .unwrap();
+        let result = read_claude_md_from(&project, home.to_str(), true)
+            .await
+            .unwrap();
+        assert!(result.len() <= MAX_INSTRUCTION_BYTES);
+        assert!(result.contains("global instructions survive"));
+    }
 
     #[test]
     fn prompt_is_native_claux() {
