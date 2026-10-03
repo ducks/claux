@@ -223,6 +223,50 @@ pub async fn read_sse_stream(
                             .unwrap_or(output_tokens as u64)
                             as u32;
                     }
+
+                    match event
+                        .pointer("/delta/stop_reason")
+                        .and_then(|reason| reason.as_str())
+                    {
+                        Some("max_tokens") => {
+                            let _ = tx
+                                .send(ApiEvent::Usage(Usage {
+                                    input_tokens,
+                                    output_tokens,
+                                    cache_read_tokens,
+                                    cache_creation_tokens,
+                                    provider_cost_usd: None,
+                                }))
+                                .await;
+                            let _ = tx
+                                .send(ApiEvent::Error(
+                                    super::error::ApiFailure::output_limit_exceeded(
+                                        "Anthropic response reached its output token limit",
+                                    ),
+                                ))
+                                .await;
+                            return Ok(());
+                        }
+                        Some("refusal") => {
+                            let _ = tx
+                                .send(ApiEvent::Usage(Usage {
+                                    input_tokens,
+                                    output_tokens,
+                                    cache_read_tokens,
+                                    cache_creation_tokens,
+                                    provider_cost_usd: None,
+                                }))
+                                .await;
+                            let _ = tx
+                                .send(ApiEvent::Error(super::error::ApiFailure::new(
+                                    super::error::ApiFailureKind::PolicyRejection,
+                                    "Anthropic refused to complete the response",
+                                )))
+                                .await;
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
                 }
 
                 "content_block_start" => {
@@ -412,5 +456,57 @@ mod tests {
         ));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Usage(_))));
         assert!(matches!(rx.recv().await, Some(ApiEvent::Done)));
+    }
+
+    #[tokio::test]
+    async fn max_tokens_stop_reason_is_reported_as_output_limit() {
+        let response = crate::test_support::sse_response(
+            concat!(
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":128}}\n\n",
+                "data: {\"type\":\"message_stop\"}\n\n"
+            ),
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_sse_stream(response, tx, CancellationToken::new(), "claude-test")
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(rx.recv().await, Some(ApiEvent::Usage(usage)) if usage.output_tokens == 128)
+        );
+        assert!(matches!(
+            rx.recv().await,
+            Some(ApiEvent::Error(failure))
+                if failure.kind == super::super::error::ApiFailureKind::OutputLimitExceeded
+        ));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn refusal_stop_reason_is_reported_as_policy_rejection() {
+        let response = crate::test_support::sse_response(
+            concat!(
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\"usage\":{\"output_tokens\":7}}\n\n",
+                "data: {\"type\":\"message_stop\"}\n\n"
+            ),
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(10);
+
+        read_sse_stream(response, tx, CancellationToken::new(), "claude-test")
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(rx.recv().await, Some(ApiEvent::Usage(usage)) if usage.output_tokens == 7)
+        );
+        assert!(matches!(
+            rx.recv().await,
+            Some(ApiEvent::Error(failure))
+                if failure.kind == super::super::error::ApiFailureKind::PolicyRejection
+        ));
+        assert!(rx.recv().await.is_none());
     }
 }
