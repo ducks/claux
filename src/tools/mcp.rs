@@ -24,22 +24,65 @@ type McpClient = RunningService<RoleClient, ClientInfo>;
 const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const MCP_CANCEL_NOTIFY_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_RESULT_BYTES: usize = 64 * 1024;
+const MAX_SCHEMA_BYTES: usize = 32 * 1024;
+const MAX_DESCRIPTION_BYTES: usize = 4096;
+
+fn bounded(text: &str, limit: usize) -> &str {
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn validate_schema(schema: &Value) -> Result<()> {
+    anyhow::ensure!(
+        serde_json::to_vec(schema)?.len() <= MAX_SCHEMA_BYTES,
+        "MCP tool schema exceeds size limit"
+    );
+    anyhow::ensure!(
+        schema["type"] == "object",
+        "MCP tool input schema must have object type"
+    );
+    // Network and file reference resolution are disabled in Cargo features.
+    jsonschema::validator_for(schema)
+        .map_err(|_| anyhow::anyhow!("Invalid or unresolved MCP input schema"))?;
+    Ok(())
+}
 
 fn render_content<'a>(content: impl IntoIterator<Item = &'a RawContent>) -> String {
-    content
-        .into_iter()
-        .map(|raw| match raw {
-            RawContent::Text(text) => text.text.clone(),
-            other => serde_json::to_string(other)
-                .unwrap_or_else(|error| format!("[unserializable MCP content: {error}]")),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut output = String::new();
+    for raw in content {
+        let text = match raw {
+            RawContent::Text(text) => text.text.as_str(),
+            _ => "[Non-text MCP content omitted]",
+        };
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        let available = MAX_RESULT_BYTES.saturating_sub(output.len());
+        output.push_str(bounded(text, available));
+        if text.len() > available || output.len() >= MAX_RESULT_BYTES {
+            output.push_str("\n[MCP output truncated]");
+            break;
+        }
+    }
+    output
 }
 
 /// A tool backed by an MCP server.
 /// Wraps one tool from an MCP server's tools/list response.
 pub struct McpTool {
+    timeout: Duration,
     server_name: String,
     tool_name: String,
     upstream_name: String,
@@ -58,6 +101,7 @@ impl McpTool {
         client: Arc<McpClient>,
     ) -> Self {
         Self {
+            timeout: MCP_CALL_TIMEOUT,
             server_name,
             tool_name,
             upstream_name,
@@ -144,18 +188,14 @@ impl Tool for McpTool {
                         "The cancellation notification could not be delivered."
                     }
                 };
-                // A server that ignores notifications must not outlive the
-                // cancelled request indefinitely. Closing the service tears
-                // down its stdio transport (and therefore the child process).
-                self.client.cancellation_token().cancel();
                 return Ok(ToolOutput {
                     content: format!(
-                        "MCP request cancelled by user. {suffix} The MCP server was stopped."
+                        "MCP request cancelled by user. {suffix} The server remains connected."
                     ),
                     is_error: true,
                 });
             }
-            _ = tokio::time::sleep(MCP_CALL_TIMEOUT) => {
+            _ = tokio::time::sleep(self.timeout) => {
                 let suffix = match tokio::time::timeout(
                     MCP_CANCEL_NOTIFY_TIMEOUT,
                     handle.cancel(Some("request timed out".to_string())),
@@ -169,10 +209,9 @@ impl Tool for McpTool {
                         "The cancellation notification could not be delivered."
                     }
                 };
-                self.client.cancellation_token().cancel();
                 return Ok(ToolOutput {
                     content: format!(
-                        "MCP request timed out after {MCP_CALL_TIMEOUT:?}. {suffix} The MCP server was stopped."
+                        "MCP request timed out after {:?}. {suffix} The server remains connected.", self.timeout
                     ),
                     is_error: true,
                 });
@@ -265,6 +304,12 @@ where
 }
 
 async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> {
+    anyhow::ensure!(valid_name(&config.name), "Invalid MCP server name");
+    let timeout = Duration::from_secs(config.timeout_seconds.unwrap_or(120));
+    anyhow::ensure!(
+        !timeout.is_zero() && timeout <= Duration::from_secs(3600),
+        "MCP timeout_seconds must be between 1 and 3600"
+    );
     let command = config.command.clone();
     let args = config.args.clone();
     let env = config.env.clone();
@@ -302,22 +347,32 @@ async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> 
             let upstream_name = t.name.to_string();
             // The claux-side tool name (namespaced so multiple servers don't collide).
             let exposed_name = format!("mcp__{}__{}", config.name, upstream_name);
-            let description = t.description.as_deref().unwrap_or("").to_string();
+            anyhow::ensure!(
+                valid_name(&exposed_name),
+                "Invalid or oversized exposed MCP tool name: {exposed_name}"
+            );
+            let description = bounded(
+                t.description.as_deref().unwrap_or(""),
+                MAX_DESCRIPTION_BYTES,
+            )
+            .to_string();
             // input_schema is Arc<JsonObject>; convert to Value::Object for
             // claux's Tool::input_schema(&self) -> Value contract.
             let schema = Value::Object((*t.input_schema).clone());
+            validate_schema(&schema)?;
 
-            let tool: Box<dyn Tool> = Box::new(McpTool::new(
+            let mut tool = McpTool::new(
                 config.name.clone(),
                 exposed_name,
                 upstream_name,
                 description,
                 schema,
                 client.clone(),
-            ));
-            tool
+            );
+            tool.timeout = timeout;
+            Ok(Box::new(tool) as Box<dyn Tool>)
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
     Ok(tools)
 }
@@ -328,7 +383,109 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn non_text_content_is_preserved_as_structured_json() {
+    fn results_names_and_schemas_are_bounded_and_validated() {
+        let content = vec![RawContent::text("é".repeat(MAX_RESULT_BYTES))];
+        let rendered = render_content(&content);
+        assert!(rendered.len() <= MAX_RESULT_BYTES + 32);
+        assert!(rendered.ends_with("[MCP output truncated]"));
+        assert!(!valid_name("server/name"));
+        assert!(!valid_name(&"x".repeat(65)));
+        assert!(valid_name("mcp__server-1__lookup"));
+        for schema in [
+            serde_json::json!({"type":"array"}),
+            serde_json::json!({"type":"object","required":42}),
+            serde_json::json!({"type":"object","properties":{"x":{"type":"bogus"}}}),
+            serde_json::json!({"type":"object","description":"x".repeat(MAX_SCHEMA_BYTES)}),
+            serde_json::json!({"type":"object","$ref":"file:///etc/passwd"}),
+        ] {
+            assert!(validate_schema(&schema).is_err());
+        }
+        assert!(validate_schema(
+            &serde_json::json!({"type":"object","properties":{"x":{"type":"string"}}})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn registry_rejects_collisions_without_partially_adding_tools() {
+        let mut registry = super::super::ToolRegistry::new();
+        let before = registry.definitions().len();
+        let duplicate = Box::new(super::super::read::ReadTool::new(Arc::new(
+            crate::sandbox::SandboxPolicy::unrestricted_for_tests(),
+        )));
+        assert!(registry.add_tools(vec![duplicate]).is_err());
+        assert_eq!(registry.definitions().len(), before);
+    }
+
+    #[tokio::test]
+    async fn cancelled_and_timed_out_calls_leave_server_usable() {
+        struct Server;
+        impl rmcp::ServerHandler for Server {
+            async fn call_tool(
+                &self,
+                request: CallToolRequestParams,
+                context: rmcp::service::RequestContext<rmcp::RoleServer>,
+            ) -> std::result::Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+                if request
+                    .arguments
+                    .as_ref()
+                    .is_some_and(|args| args.get("slow") == Some(&Value::Bool(true)))
+                {
+                    context.ct.cancelled().await;
+                }
+                Ok(rmcp::model::CallToolResult::success(vec![
+                    rmcp::model::Content::text("ok"),
+                ]))
+            }
+        }
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let (server, client) = tokio::join!(
+            Server.serve(server_io),
+            ClientInfo::default().serve(client_io)
+        );
+        let server = server.unwrap();
+        let client = Arc::new(client.unwrap());
+        let mut tool = McpTool::new(
+            "test".into(),
+            "mcp__test__tool".into(),
+            "tool".into(),
+            String::new(),
+            serde_json::json!({"type":"object"}),
+            client.clone(),
+        );
+        tool.timeout = Duration::from_millis(25);
+        let timed_out = tool
+            .execute(
+                serde_json::json!({"slow":true}),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(timed_out.is_error && timed_out.content.contains("timed out"));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        assert!(
+            tool.execute(serde_json::json!({"slow":true}), cancel)
+                .await
+                .unwrap()
+                .is_error
+        );
+        tool.timeout = Duration::from_secs(2);
+        let result = tool
+            .execute(
+                serde_json::json!({}),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(result.content, "ok");
+        client.cancellation_token().cancel();
+        server.cancellation_token().cancel();
+    }
+
+    #[test]
+    fn non_text_content_is_omitted_without_forwarding_base64() {
         let content = vec![
             RawContent::text("hello"),
             RawContent::image("aGVsbG8=", "image/png"),
@@ -337,15 +494,15 @@ mod tests {
         let rendered = render_content(&content);
 
         assert!(rendered.starts_with("hello\n"));
-        assert!(rendered.contains("\"type\":\"image\""));
-        assert!(rendered.contains("aGVsbG8="));
-        assert!(rendered.contains("image/png"));
+        assert!(rendered.contains("Non-text MCP content omitted"));
+        assert!(!rendered.contains("aGVsbG8="));
     }
 
     #[tokio::test]
     async fn server_connections_are_concurrent_and_bounded() {
         let configs: Vec<McpServerConfig> = (0..10)
             .map(|index| McpServerConfig {
+                timeout_seconds: None,
                 name: format!("server-{index}"),
                 command: "sleep".to_string(),
                 args: vec!["5".to_string()],
