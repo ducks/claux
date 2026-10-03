@@ -6,6 +6,23 @@ use std::path::PathBuf;
 #[command(name = "claux")]
 #[command(about = "claux — an open, hackable terminal AI coding assistant in Rust")]
 pub struct Cli {
+    /// Alternate configuration file (also CLAUX_CONFIG)
+    #[arg(long, global = true, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+    /// Override the selected provider endpoint for this invocation
+    #[arg(long, global = true)]
+    pub base_url: Option<String>,
+    /// Override the selected provider protocol
+    #[arg(long, global = true, value_parser = ["chat_completions", "responses", "anthropic"])]
+    pub protocol: Option<String>,
+    #[arg(long, global = true)]
+    pub reasoning_effort: Option<String>,
+    /// Native filesystem containment (loosening requires project trust)
+    #[arg(long, global = true, value_parser = ["workspace_only", "unrestricted"])]
+    pub native_fs_policy: Option<String>,
+    /// Bash filesystem containment (loosening requires project trust)
+    #[arg(long, global = true, value_parser = ["auto", "workspace_write", "unrestricted"])]
+    pub bash_fs_policy: Option<String>,
     #[command(subcommand)]
     pub command: Option<CliCommand>,
 
@@ -54,6 +71,62 @@ pub struct Cli {
     /// Use full-screen TUI instead of inline REPL
     #[arg(long)]
     pub tui: bool,
+}
+
+impl Cli {
+    pub fn config_path(&self) -> Option<PathBuf> {
+        self.config
+            .clone()
+            .or_else(|| std::env::var_os("CLAUX_CONFIG").map(PathBuf::from))
+    }
+
+    pub fn load_config(&self) -> anyhow::Result<crate::config::Config> {
+        let path = self.config_path();
+        let mut config = crate::config::Config::load(self.trust_project, path.as_deref())?;
+        self.apply_overrides(&mut config)?;
+        Ok(config)
+    }
+
+    fn apply_overrides(&self, config: &mut crate::config::Config) -> anyhow::Result<()> {
+        if let Some(url) = &self.base_url {
+            let parsed = reqwest::Url::parse(url)?;
+            anyhow::ensure!(
+                matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some(),
+                "--base-url must be an HTTP(S) URL"
+            );
+            anyhow::ensure!(
+                parsed.username().is_empty() && parsed.password().is_none(),
+                "--base-url must not contain credentials"
+            );
+        }
+        let trusted = config.is_project_trusted();
+        if let Some(policy) = &self.native_fs_policy {
+            let requested = serde_json::from_value(serde_json::json!(policy))?;
+            anyhow::ensure!(
+                config
+                    .native_tool_filesystem_policy
+                    .permits_project_override(requested, trusted),
+                "--native-fs-policy would loosen containment; use --trust-project explicitly"
+            );
+            config.native_tool_filesystem_policy = requested;
+        }
+        if let Some(policy) = &self.bash_fs_policy {
+            let requested = serde_json::from_value(serde_json::json!(policy))?;
+            anyhow::ensure!(
+                config
+                    .bash_filesystem_policy
+                    .permits_project_override(requested, trusted),
+                "--bash-fs-policy would loosen containment; use --trust-project explicitly"
+            );
+            config.bash_filesystem_policy = requested;
+        }
+        config.transport_overrides = crate::config::TransportOverrides {
+            base_url: self.base_url.clone(),
+            protocol: self.protocol.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+        };
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -201,6 +274,67 @@ pub enum ConfigCommand {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn transport_flags_override_without_rewriting_config() {
+        let args = Cli::try_parse_from([
+            "claux",
+            "--base-url",
+            "http://localhost:9000/v1",
+            "--protocol",
+            "responses",
+            "--reasoning-effort",
+            "low",
+        ])
+        .unwrap();
+        let mut config = crate::config::Config::default();
+        args.apply_overrides(&mut config).unwrap();
+        let resolved = config.resolve_model(&config.model).unwrap();
+        assert_eq!(
+            resolved.binding.base_url.as_deref(),
+            Some("http://localhost:9000/v1")
+        );
+        assert_eq!(
+            resolved.binding.protocol,
+            crate::config::OpenAIProtocol::Responses
+        );
+        assert_eq!(
+            resolved.binding.provider_kind,
+            crate::config::ProviderKind::Openai
+        );
+        assert_eq!(resolved.binding.reasoning_effort.as_deref(), Some("low"));
+        assert!(!toml::to_string(&config).unwrap().contains("localhost:9000"));
+    }
+
+    #[test]
+    fn filesystem_flags_cannot_loosen_untrusted_policy() {
+        for flag in ["--native-fs-policy", "--bash-fs-policy"] {
+            let args = Cli::try_parse_from(["claux", flag, "unrestricted"]).unwrap();
+            assert!(args
+                .apply_overrides(&mut crate::config::Config::default())
+                .is_err());
+        }
+        let args = Cli::try_parse_from([
+            "claux",
+            "--native-fs-policy",
+            "workspace_only",
+            "--bash-fs-policy",
+            "workspace_write",
+        ])
+        .unwrap();
+        args.apply_overrides(&mut crate::config::Config::default())
+            .unwrap();
+    }
+
+    #[test]
+    fn explicit_config_file_is_required_and_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alternate.toml");
+        let args = Cli::try_parse_from(["claux", "--config", path.to_str().unwrap()]).unwrap();
+        assert!(args.load_config().is_err());
+        std::fs::write(&path, "max_rounds = 17").unwrap();
+        assert_eq!(args.load_config().unwrap().max_rounds, 17);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "max_rounds = 17");
+    }
     #[test]
     fn archive_accepts_a_session_prefix() {
         let cli = Cli::try_parse_from(["claux", "archive", "20261002"]).unwrap();
