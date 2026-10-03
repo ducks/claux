@@ -469,6 +469,16 @@ the turn; if anything changed afterward, it refuses the entire undo.
 
 ## Config
 
+Headless invocations can use `--config PATH` (or `CLAUX_CONFIG`, with the flag
+taking precedence), `--base-url URL`, `--protocol chat_completions|responses|anthropic`,
+and `--reasoning-effort LEVEL`. These transport overrides apply to the selected
+model for this invocation and do not rewrite configuration. Credentials still
+come from the selected provider. A missing explicitly selected config is an error.
+`--native-fs-policy workspace_only|unrestricted` and
+`--bash-fs-policy auto|workspace_write|unrestricted` apply the same trust checks
+as project configuration; loosening containment requires `--trust-project` or
+an already trusted project.
+
 Chat Completions uses `reasoning_effort` for generic endpoints. OpenRouter's
 reasoning and cache extensions are sent only to `openrouter.ai`; OpenAI's
 endpoint uses `max_completion_tokens`. Anthropic thinking is not yet supported:

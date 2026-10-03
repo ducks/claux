@@ -246,6 +246,8 @@ pub struct PermissionRulesConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(skip)]
+    pub transport_overrides: TransportOverrides,
     #[serde(default = "default_model")]
     pub model: String,
 
@@ -501,9 +503,17 @@ fn default_strip_agent_sockets() -> bool {
     true
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TransportOverrides {
+    pub base_url: Option<String>,
+    pub protocol: Option<String>,
+    pub reasoning_effort: Option<String>,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
+            transport_overrides: TransportOverrides::default(),
             model: default_model(),
             models: Vec::new(),
             providers: HashMap::new(),
@@ -682,7 +692,7 @@ impl Config {
                 anyhow::anyhow!("provider '{}' is missing base_url", profile.provider)
             })?),
         };
-        Ok(ResolvedModel {
+        Ok(self.apply_transport_overrides(ResolvedModel {
             binding: ModelBinding {
                 profile: name.to_string(),
                 display_name: profile
@@ -710,7 +720,7 @@ impl Config {
             context_window_override: profile.context_window.filter(|window| *window > 0),
             api_key: provider.api_key.clone(),
             api_key_cmd: provider.api_key_cmd.clone(),
-        })
+        }))
     }
 
     fn resolve_legacy_model(&self, model: &str) -> Result<ResolvedModel> {
@@ -740,7 +750,7 @@ impl Config {
                     self.api_key_cmd.clone(),
                 )
             };
-        Ok(ResolvedModel {
+        Ok(self.apply_transport_overrides(ResolvedModel {
             binding: ModelBinding {
                 profile: format!("legacy:{model}"),
                 display_name: model.to_string(),
@@ -759,7 +769,32 @@ impl Config {
             context_window_override: None,
             api_key: key,
             api_key_cmd: key_cmd,
-        })
+        }))
+    }
+
+    fn apply_transport_overrides(&self, mut resolved: ResolvedModel) -> ResolvedModel {
+        let overrides = &self.transport_overrides;
+        if let Some(url) = &overrides.base_url {
+            resolved.binding.base_url = Some(url.clone());
+        }
+        if let Some(protocol) = &overrides.protocol {
+            match protocol.as_str() {
+                "anthropic" => resolved.binding.provider_kind = ProviderKind::Anthropic,
+                "responses" => {
+                    resolved.binding.provider_kind = ProviderKind::Openai;
+                    resolved.binding.protocol = OpenAIProtocol::Responses;
+                }
+                "chat_completions" => {
+                    resolved.binding.provider_kind = ProviderKind::Openai;
+                    resolved.binding.protocol = OpenAIProtocol::ChatCompletions;
+                }
+                _ => unreachable!("CLI validates protocols"),
+            }
+        }
+        if let Some(effort) = &overrides.reasoning_effort {
+            resolved.binding.reasoning_effort = Some(effort.clone());
+        }
+        resolved
     }
 
     fn resolve_metadata(
@@ -812,10 +847,15 @@ impl Config {
         names
     }
 
-    pub fn load(force_project_trust: bool) -> Result<Self> {
-        let global_path = Self::global_path();
+    pub fn load(
+        force_project_trust: bool,
+        explicit_path: Option<&std::path::Path>,
+    ) -> Result<Self> {
+        let global_path = explicit_path
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(Self::global_path);
 
-        let mut config = if global_path.exists() {
+        let mut config = if explicit_path.is_some() || global_path.exists() {
             let text = std::fs::read_to_string(&global_path)?;
             toml::from_str(&text)?
         } else {

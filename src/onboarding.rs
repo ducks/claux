@@ -19,7 +19,7 @@ pub fn init_config(provider: ConfigProvider, model: Option<&str>, force: bool) -
     init_config_at(&Config::global_path(), provider, model, force)
 }
 
-fn init_config_at(
+pub fn init_config_at(
     path: &Path,
     provider: ConfigProvider,
     model: Option<&str>,

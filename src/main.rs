@@ -126,13 +126,17 @@ async fn run() -> Result<std::process::ExitCode> {
                         force,
                     },
             } => {
-                let path = onboarding::init_config(*provider, model.as_deref(), *force)?;
+                let path = if let Some(path) = args.config_path() {
+                    onboarding::init_config_at(&path, *provider, model.as_deref(), *force)?
+                } else {
+                    onboarding::init_config(*provider, model.as_deref(), *force)?
+                };
                 println!("Created {}", path.display());
                 println!("Run `claux doctor` to verify the setup.");
                 return Ok(ExitCode::SUCCESS);
             }
             cli::CliCommand::Doctor { offline } => {
-                let config = config::Config::load(args.trust_project)?;
+                let config = args.load_config()?;
                 let report = onboarding::doctor(&config, *offline).await;
                 print!("{}", report.text);
                 if !report.healthy {
@@ -176,7 +180,7 @@ async fn run() -> Result<std::process::ExitCode> {
     }
 
     // Load config (global + project)
-    let mut config = config::Config::load(args.trust_project)?;
+    let mut config = args.load_config()?;
     command_sandbox::configure_child_environment(
         config.sensitive_environment_names(),
         config.strip_agent_sockets,
