@@ -953,6 +953,7 @@ impl Engine {
         continuation: Continuation,
     ) -> Result<String> {
         self.last_compaction_notice = None;
+        anyhow::ensure!(!cancel.is_cancelled(), "Compaction cancelled by user");
         if self.messages.is_empty() {
             return Ok("Nothing to compact.".to_string());
         }
@@ -971,11 +972,27 @@ impl Engine {
         continuation: Continuation,
     ) -> Result<String> {
         let old_count = messages.len();
-        let old_message_tokens = compact::estimate_tokens(&messages);
-        let tail_budget = (self.context_window / 8)
-            .min(16_000)
-            .min(old_message_tokens / 3);
-        let tail_start = compact::recent_tail_start(&messages, tail_budget);
+        let context_window = self.context_window;
+        let worker_cancel = cancel.clone();
+        let preparation = tokio::task::spawn_blocking(move || {
+            anyhow::ensure!(
+                !worker_cancel.is_cancelled(),
+                "Compaction cancelled by user"
+            );
+            let old_message_tokens = compact::estimate_tokens(&messages);
+            anyhow::ensure!(
+                !worker_cancel.is_cancelled(),
+                "Compaction cancelled by user"
+            );
+            let tail_budget = (context_window / 8).min(16_000).min(old_message_tokens / 3);
+            let tail_start = compact::recent_tail_start(&messages, tail_budget);
+            Ok::<_, anyhow::Error>((messages, old_message_tokens, tail_start))
+        });
+        let (messages, old_message_tokens, tail_start) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => anyhow::bail!("Compaction cancelled by user"),
+            result = preparation => result??,
+        };
         let summary = self
             .summarize_bounded(&messages[..tail_start], cancel)
             .await?;
@@ -1023,7 +1040,7 @@ impl Engine {
     ) -> Result<String> {
         const MAX_CHUNKS: usize = 32;
         const MAX_ATTEMPTS: usize = 3;
-        let text = compact::summary_text(messages);
+        let text = std::sync::Arc::new(compact::summary_text(messages));
         let output_budget = self
             .max_tokens
             .min(4096)
@@ -1037,11 +1054,21 @@ impl Engine {
                 chunk_budget >= 128,
                 "Compact error: context window too small for a handoff; history preserved"
             );
-            let chunks = compact::text_chunks(&text, chunk_budget);
-            anyhow::ensure!(
-                chunks.len() <= MAX_CHUNKS,
-                "Compact error: history exceeds {MAX_CHUNKS} summary chunks; history preserved"
-            );
+            let worker_text = text.clone();
+            let worker_cancel = cancel.clone();
+            let preparation = tokio::task::spawn_blocking(move || {
+                anyhow::ensure!(
+                    !worker_cancel.is_cancelled(),
+                    "Compaction cancelled by user"
+                );
+                compact::text_chunks(&worker_text, chunk_budget, MAX_CHUNKS)
+                    .map(|chunks| chunks.into_iter().map(str::to_owned).collect::<Vec<_>>())
+            });
+            let chunks = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => anyhow::bail!("Compaction cancelled by user"),
+                result = preparation => result??,
+            };
             let mut summary = String::new();
             let mut overflow = false;
             for chunk in chunks {
@@ -4807,6 +4834,40 @@ mod tests {
             .to_string()
             .contains("earlier chunk"));
         assert_eq!(requests.lock().unwrap().len(), 2);
+        assert_eq!(serde_json::to_value(engine.messages()).unwrap(), original);
+        assert_eq!(serde_json::to_value(engine.archive()).unwrap(), archive);
+    }
+
+    #[tokio::test]
+    async fn compaction_preparation_yields_and_cancellation_preserves_history() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::for_tests(
+            Box::new(RecordingSummaryProvider {
+                resets: Arc::new(AtomicUsize::new(0)),
+                requests: requests.clone(),
+                summary: "task handoff".into(),
+            }),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        engine.append_message(Message::user(&"a".repeat(65_536)));
+        let original = serde_json::to_value(engine.messages()).unwrap();
+        let archive = serde_json::to_value(engine.archive()).unwrap();
+        let messages = engine.messages().to_vec();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        {
+            let preparation =
+                engine.summarize_conversation(messages, 8192, &cancel, Continuation::AwaitUserTurn);
+            tokio::pin!(preparation);
+            tokio::select! {
+                biased;
+                result = &mut preparation => panic!("preparation did not yield: {result:?}"),
+                _ = std::future::ready(()) => cancel.cancel(),
+            }
+            let error = preparation.await.unwrap_err();
+            assert!(error.to_string().contains("cancelled"));
+        }
+        assert!(requests.lock().unwrap().is_empty());
         assert_eq!(serde_json::to_value(engine.messages()).unwrap(), original);
         assert_eq!(serde_json::to_value(engine.archive()).unwrap(), archive);
     }
