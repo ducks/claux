@@ -20,9 +20,21 @@ static TOKENIZER: LazyLock<CoreBPE> =
 /// Empty set for encode's allowed_special parameter.
 static NO_SPECIAL: LazyLock<HashSet<&'static str>> = LazyLock::new(HashSet::new);
 
-/// Count tokens in a string using tiktoken.
+// BPE merging is quadratic for long unbroken runs (including encoded tool
+// arguments). Bound each invocation, since estimates also run on the UI task.
+const TOKEN_ESTIMATE_CHUNK_BYTES: usize = 1024;
+
+/// Estimate tokens using bounded UTF-8 slices. Chunk boundaries can change the
+/// estimate slightly; provider-reported usage remains authoritative.
 pub fn count_tokens(text: &str) -> usize {
-    TOKENIZER.encode(text, &NO_SPECIAL).0.len()
+    let mut rest = text;
+    let mut total = 0;
+    while !rest.is_empty() {
+        let chunk = crate::utils::truncate_str(rest, TOKEN_ESTIMATE_CHUNK_BYTES);
+        total += TOKENIZER.encode(chunk, &NO_SPECIAL).0.len();
+        rest = &rest[chunk.len()..];
+    }
+    total
 }
 
 /// Estimate the token count of the conversation using tiktoken.
@@ -127,6 +139,11 @@ pub fn is_user_request(message: &Message) -> bool {
 /// Retain up to four recent user turns, or a suffix of a long tool loop.
 /// Never split an outstanding tool batch across the summary and retained tail.
 pub fn recent_tail_start(messages: &[Message], budget: usize) -> usize {
+    let mut suffix_tokens = vec![0; messages.len() + 1];
+    for index in (0..messages.len()).rev() {
+        suffix_tokens[index] =
+            suffix_tokens[index + 1] + estimate_tokens(&messages[index..index + 1]);
+    }
     let mut pending = HashSet::new();
     let mut boundaries = Vec::new();
     for (index, message) in messages.iter().enumerate() {
@@ -153,13 +170,13 @@ pub fn recent_tail_start(messages: &[Message], budget: usize) -> usize {
         .filter(|index| is_user_request(&messages[*index]))
         .collect();
     for index in user_boundaries.iter().rev().take(4).rev() {
-        if estimate_tokens(&messages[*index..]) <= budget {
+        if suffix_tokens[*index] <= budget {
             return *index;
         }
     }
     boundaries
         .into_iter()
-        .find(|index| estimate_tokens(&messages[*index..]) <= budget)
+        .find(|index| suffix_tokens[*index] <= budget)
         .unwrap_or(messages.len())
 }
 
@@ -189,16 +206,34 @@ pub fn summary_text(messages: &[Message]) -> String {
 }
 
 /// Split large excerpts at UTF-8 boundaries, with an explicit token bound.
-pub fn text_chunks(text: &str, budget: usize) -> Vec<&str> {
+pub fn text_chunks(text: &str, budget: usize, limit: usize) -> anyhow::Result<Vec<&str>> {
+    anyhow::ensure!(budget > 0, "Summary token budget must be positive");
     let mut chunks = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
-        if count_tokens(rest) <= budget {
-            chunks.push(rest);
-            break;
-        }
+        anyhow::ensure!(
+            chunks.len() < limit,
+            "Compact error: history exceeds {limit} summary chunks; history preserved"
+        );
         let mut low = 0;
-        let mut high = rest.len();
+        let mut tokens = 0;
+        while low < rest.len() {
+            let piece = crate::utils::truncate_str(&rest[low..], TOKEN_ESTIMATE_CHUNK_BYTES);
+            let piece_tokens = count_tokens(piece);
+            if tokens + piece_tokens > budget {
+                break;
+            }
+            tokens += piece_tokens;
+            low += piece.len();
+        }
+        // A budget smaller than one estimator slice needs a partial slice.
+        // Otherwise accept the slight underfill instead of repeatedly encoding
+        // overlapping prefixes of the entire conversation.
+        let mut high = if low == 0 {
+            rest.len().min(TOKEN_ESTIMATE_CHUNK_BYTES)
+        } else {
+            low
+        };
         while low < high {
             let mut end = low + (high - low).div_ceil(2);
             while !rest.is_char_boundary(end) {
@@ -216,10 +251,16 @@ pub fn text_chunks(text: &str, budget: usize) -> Vec<&str> {
         if low == 0 {
             low = rest.chars().next().unwrap().len_utf8();
         }
+        if tokens == 0 {
+            anyhow::ensure!(
+                count_tokens(&rest[..low]) <= budget,
+                "Summary token budget cannot fit a character"
+            );
+        }
         chunks.push(&rest[..low]);
         rest = &rest[low..];
     }
-    chunks
+    Ok(chunks)
 }
 
 /// Context window sizes for known models.
@@ -235,6 +276,59 @@ mod tests {
     #[test]
     fn estimate_tokens_empty() {
         assert_eq!(estimate_tokens(&[]), 0);
+    }
+
+    #[test]
+    fn long_unbroken_input_finishes_within_deadline() {
+        const CHILD: &str = "CLAUX_TOKEN_ESTIMATE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(count_tokens(&"a".repeat(65_536)), 8192);
+            assert!(count_tokens(&"界".repeat(21_846)) > 0);
+            return;
+        }
+        // Isolate the regression so a quadratic tokenizer cannot hang the
+        // test runner. The old implementation exceeds this bound by far.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "compact::tests::long_unbroken_input_finishes_within_deadline",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("token estimation exceeded 15 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn short_token_estimates_match_tokenizer() {
+        for text in ["hello world", "λ界 text and paths /tmp/source.rs\n", ""] {
+            assert_eq!(
+                count_tokens(text),
+                TOKENIZER.encode(text, &NO_SPECIAL).0.len()
+            );
+        }
+    }
+
+    #[test]
+    fn excerpt_limits_fail_instead_of_preparing_unbounded_chunks() {
+        assert!(text_chunks("hello", 0, 32).is_err());
+        assert!(text_chunks("hello", 10, 0).is_err());
+        let text = "hello world ".repeat(1000);
+        let error = text_chunks(&text, 64, 2).unwrap_err();
+        assert!(error.to_string().contains("exceeds 2 summary chunks"));
+        assert!(text_chunks("\u{10ffff}", 1, 32).is_err());
     }
 
     #[test]
@@ -319,7 +413,7 @@ mod tests {
     #[test]
     fn oversized_excerpts_split_without_losing_unicode_or_content() {
         let text = "λ界 text and paths /tmp/source.rs\n".repeat(100);
-        let chunks = text_chunks(&text, 64);
+        let chunks = text_chunks(&text, 64, 100).unwrap();
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|chunk| count_tokens(chunk) <= 64));
         assert_eq!(chunks.concat(), text);
