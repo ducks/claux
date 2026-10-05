@@ -8,8 +8,33 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{self, stdout, Stdout, Write};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
-pub type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
+pub type AppTerminal = Terminal<CrosstermBackend<TerminalOutput>>;
+
+pub struct TerminalOutput {
+    stdout: Stdout,
+    closing: Arc<AtomicBool>,
+}
+
+impl Write for TerminalOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self.stdout.write(bytes) {
+            Err(_) if self.closing.load(Ordering::Relaxed) => Ok(bytes.len()),
+            result => result,
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.stdout.flush() {
+            Err(_) if self.closing.load(Ordering::Relaxed) => Ok(()),
+            result => result,
+        }
+    }
+}
 
 /// Owns the process-wide terminal modes used by the TUI.
 ///
@@ -18,6 +43,7 @@ pub type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
 pub struct TerminalGuard {
     terminal: AppTerminal,
     modes: TerminalModes,
+    closing: Arc<AtomicBool>,
 }
 
 struct TerminalModes {
@@ -30,7 +56,7 @@ impl TerminalGuard {
     }
 
     fn enter_with(
-        create: impl FnOnce(CrosstermBackend<Stdout>) -> io::Result<AppTerminal>,
+        create: impl FnOnce(CrosstermBackend<TerminalOutput>) -> io::Result<AppTerminal>,
     ) -> Result<Self> {
         // Arm cleanup before the first change: an escape-sequence write can
         // fail after the terminal has already accepted part of it.
@@ -38,10 +64,18 @@ impl TerminalGuard {
         enable_raw_mode()?;
         execute!(stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
 
-        let backend = CrosstermBackend::new(stdout());
+        let closing = Arc::new(AtomicBool::new(false));
+        let backend = CrosstermBackend::new(TerminalOutput {
+            stdout: stdout(),
+            closing: closing.clone(),
+        });
         let terminal = create(backend)?;
 
-        Ok(Self { terminal, modes })
+        Ok(Self {
+            terminal,
+            modes,
+            closing,
+        })
     }
 
     pub fn terminal_mut(&mut self) -> &mut AppTerminal {
@@ -51,6 +85,15 @@ impl TerminalGuard {
     pub fn restore(&mut self) -> Result<()> {
         self.modes.restore(&mut stdout(), disable_raw_mode)?;
         Ok(())
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        // Ratatui retries cursor cleanup in Drop and reports failures using
+        // eprintln!, which panics if stderr's PTY is gone too. Explicit restore
+        // still reports errors; only the destructor's writes are best-effort.
+        self.closing.store(true, Ordering::Relaxed);
     }
 }
 

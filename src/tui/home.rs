@@ -3,15 +3,13 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
-    Frame, Terminal,
+    Frame,
 };
 use std::collections::HashMap;
-use std::io::Stdout;
 
 use crate::config::ResolvedModel;
 use crate::db::{Db, SessionInfo};
@@ -212,7 +210,7 @@ impl HomeScreen {
     /// Run the home screen event loop. Returns an Action.
     pub fn run(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        terminal: &mut super::terminal::AppTerminal,
         shutdown: &tokio_util::sync::CancellationToken,
     ) -> Result<Action> {
         loop {
@@ -221,7 +219,7 @@ impl HomeScreen {
             }
             terminal.draw(|f| self.draw(f))?;
 
-            if event::poll(std::time::Duration::from_millis(50))? {
+            if crate::terminal_input::poll(std::time::Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     match self.mode.clone() {
                         Mode::Browse => {
