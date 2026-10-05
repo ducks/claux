@@ -402,7 +402,9 @@ Claux creates transcript files with private permissions on Unix.
 Auto-compaction budgets the incoming prompt, system prompt, tool schemas, and
 reserved response tokens before a model request. The default threshold is 80%
 of the configured context window; `auto_compact_threshold = 0` disables proactive
-compaction. `/compact` runs it manually. `/context` reports the input estimate;
+compaction. `/compact` runs it manually. Summary requests retry output-limit
+failures with a larger generation budget, bounded by three attempts and context
+headroom, while keeping the handoff text within its original token budget. `/context` reports the input estimate;
 the response budget is additional headroom used by the compaction decision.
 
 Compaction keeps a recent tail of up to four user turns, bounded by the smaller

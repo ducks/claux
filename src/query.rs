@@ -1041,15 +1041,25 @@ impl Engine {
         const MAX_CHUNKS: usize = 32;
         const MAX_ATTEMPTS: usize = 3;
         let text = std::sync::Arc::new(compact::summary_text(messages));
-        let output_budget = self
+        let summary_budget = self
             .max_tokens
             .min(4096)
             .min((self.context_window / 8) as u32)
             .max(1);
-        let overhead =
-            compact::count_tokens(compact::SUMMARY_PROMPT) + output_budget as usize * 2 + 256;
-        let mut chunk_budget = self.context_window.saturating_sub(overhead);
+        // Reasoning can consume generation tokens without growing the handoff.
+        // Keep its text budget fixed while allowing bounded output recovery.
+        let mut output_budget = summary_budget;
+        let output_ceiling = 64_000
+            .min((self.context_window / 4) as u32)
+            .max(summary_budget);
+        let mut chunk_ceiling = self.context_window;
         for attempt in 0..MAX_ATTEMPTS {
+            anyhow::ensure!(!cancel.is_cancelled(), "Compaction cancelled by user");
+            let overhead = compact::count_tokens(compact::SUMMARY_PROMPT)
+                + summary_budget as usize
+                + output_budget as usize
+                + 256;
+            let chunk_budget = chunk_ceiling.min(self.context_window.saturating_sub(overhead));
             anyhow::ensure!(
                 chunk_budget >= 128,
                 "Compact error: context window too small for a handoff; history preserved"
@@ -1083,7 +1093,9 @@ impl Engine {
                     request.push(excerpt);
                 }
                 self.provider.reset_session();
-                let result = self.summary_request(&request, output_budget, cancel).await;
+                let result = self
+                    .summary_request(&request, output_budget, summary_budget, cancel)
+                    .await;
                 self.provider.reset_session();
                 match result {
                     Ok(next) => summary = next,
@@ -1091,16 +1103,28 @@ impl Engine {
                         if Self::failure_kind(&error) == ApiFailureKind::ContextExceeded
                             && attempt + 1 < MAX_ATTEMPTS =>
                     {
+                        chunk_ceiling = chunk_budget / 2;
                         overflow = true;
                         break;
                     }
-                    Err(error) => return Err(error),
+                    Err(error)
+                        if Self::failure_kind(&error) == ApiFailureKind::OutputLimitExceeded
+                            && attempt + 1 < MAX_ATTEMPTS
+                            && output_budget < output_ceiling =>
+                    {
+                        output_budget = output_budget.saturating_mul(2).min(output_ceiling);
+                        overflow = true;
+                        break;
+                    }
+                    Err(error) => {
+                        let message = format!("Compact error: {error}; history preserved");
+                        return Err(error.context(message));
+                    }
                 }
             }
             if !overflow {
                 return Ok(summary);
             }
-            chunk_budget /= 2;
         }
         anyhow::bail!("Compact error: summary recovery exhausted; history preserved")
     }
@@ -1109,17 +1133,16 @@ impl Engine {
         &mut self,
         messages: &[Message],
         max_tokens: u32,
+        summary_budget: u32,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<String> {
+        let system = format!(
+            "{}\nKeep the final handoff within {summary_budget} tokens.",
+            compact::SUMMARY_PROMPT
+        );
         let mut rx = self
             .provider
-            .stream(
-                messages,
-                compact::SUMMARY_PROMPT,
-                &[],
-                max_tokens,
-                cancel.child_token(),
-            )
+            .stream(messages, &system, &[], max_tokens, cancel.child_token())
             .await?;
         let mut summary = String::new();
         loop {
@@ -1131,7 +1154,7 @@ impl Engine {
                 Some(ApiEvent::Text(text)) => {
                     summary.push_str(&text);
                     anyhow::ensure!(
-                        compact::count_tokens(&summary) <= max_tokens as usize,
+                        compact::count_tokens(&summary) <= summary_budget as usize,
                         "Compact error: task handoff exceeded its output budget; history preserved"
                     );
                 }
@@ -4696,6 +4719,165 @@ mod tests {
         assert!(engine.messages().iter().any(
             |message| matches!(&message.content, MessageContent::Text(text) if text == prompt)
         ));
+    }
+
+    struct OutputLimitedSummaryProvider {
+        required_budget: u32,
+        requests: Arc<Mutex<Vec<u32>>>,
+        cursor: std::sync::atomic::AtomicBool,
+        streaming_failure: bool,
+        summary: String,
+        cancel_on_failure: Option<tokio_util::sync::CancellationToken>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for OutputLimitedSummaryProvider {
+        fn name(&self) -> &str {
+            "output-limited-summary"
+        }
+        fn set_model(&mut self, _model: &str) {}
+        fn reset_session(&mut self) {
+            self.cursor.store(false, Ordering::SeqCst);
+        }
+        async fn stream(
+            &self,
+            messages: &[Message],
+            system: &str,
+            tools: &[ToolDefinition],
+            max_tokens: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            assert!(tools.is_empty());
+            assert!(!self.cursor.swap(true, Ordering::SeqCst));
+            assert!(system.contains("Keep the final handoff within 4096 tokens."));
+            assert!(compact::estimate_tokens(messages) + (max_tokens as usize) < 128_000);
+            self.requests.lock().unwrap().push(max_tokens);
+            let limited = max_tokens < self.required_budget;
+            if limited {
+                if let Some(cancel) = &self.cancel_on_failure {
+                    cancel.cancel();
+                }
+                if !self.streaming_failure {
+                    return Err(ApiFailure::output_limit_exceeded("summary output limit").into());
+                }
+            }
+            let (tx, rx) = mpsc::channel(3);
+            tx.send(ApiEvent::Text(if limited {
+                "Incomplete handoff; must not replace history.".into()
+            } else {
+                self.summary.clone()
+            }))
+            .await
+            .unwrap();
+            tx.send(if limited {
+                ApiEvent::Error(ApiFailure::output_limit_exceeded("summary output limit"))
+            } else {
+                ApiEvent::Done
+            })
+            .await
+            .unwrap();
+            Ok(ProviderStream::new(rx, cancel.child_token()))
+        }
+    }
+
+    fn output_limited_summary_engine(
+        required_budget: u32,
+        streaming_failure: bool,
+        summary: String,
+        cancel_on_failure: Option<tokio_util::sync::CancellationToken>,
+    ) -> (Engine, Arc<Mutex<Vec<u32>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::for_tests(
+            Box::new(OutputLimitedSummaryProvider {
+                required_budget,
+                requests: requests.clone(),
+                cursor: std::sync::atomic::AtomicBool::new(false),
+                streaming_failure,
+                summary,
+                cancel_on_failure,
+            }),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        engine.context_window = 128_000;
+        engine.max_tokens = 16_384;
+        engine.append_message(Message::user(&"important earlier context ".repeat(8_000)));
+        engine.append_message(Message::assistant_text("Next: fix the parser."));
+        engine.append_message(Message::user("Keep the public API and add coverage."));
+        (engine, requests)
+    }
+
+    #[tokio::test]
+    async fn summary_output_limit_retries_with_more_generation_tokens() {
+        for streaming_failure in [false, true] {
+            let (mut engine, requests) = output_limited_summary_engine(
+                16_384,
+                streaming_failure,
+                "Objective: fix parsing. Constraints: keep the public API.".into(),
+                None,
+            );
+            let archive = serde_json::to_value(engine.archive()).unwrap();
+            let max_tokens = engine.max_tokens;
+            engine.compact().await.unwrap();
+            assert_eq!(*requests.lock().unwrap(), [4096, 8192, 16_384]);
+            assert_eq!(engine.max_tokens, max_tokens);
+            assert_eq!(serde_json::to_value(engine.archive()).unwrap(), archive);
+            assert!(
+                matches!(&engine.messages()[1].content, MessageContent::Text(text) if text.contains("fix parsing"))
+            );
+            assert!(engine.messages().iter().any(|message| matches!(&message.content, MessageContent::Text(text) if text.contains("Keep the public API"))));
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_output_limit_exhaustion_preserves_history_and_archive() {
+        for (context_window, expected) in [
+            (128_000, vec![4096, 8192, 16_384]),
+            (32_768, vec![4096, 8192]),
+        ] {
+            let (mut engine, requests) =
+                output_limited_summary_engine(u32::MAX, true, "unused".into(), None);
+            engine.context_window = context_window;
+            let original = serde_json::to_value(engine.messages()).unwrap();
+            let archive = serde_json::to_value(engine.archive()).unwrap();
+            let error = engine.compact().await.unwrap_err();
+            assert_eq!(
+                Engine::failure_kind(&error),
+                ApiFailureKind::OutputLimitExceeded
+            );
+            assert!(error.to_string().contains("history preserved"));
+            assert_eq!(*requests.lock().unwrap(), expected);
+            assert_eq!(serde_json::to_value(engine.messages()).unwrap(), original);
+            assert_eq!(serde_json::to_value(engine.archive()).unwrap(), archive);
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_output_limit_retry_keeps_the_handoff_text_budget() {
+        let (mut engine, requests) =
+            output_limited_summary_engine(8192, true, "expanded handoff ".repeat(3_000), None);
+        let original = serde_json::to_value(engine.messages()).unwrap();
+        let error = engine.compact().await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("handoff exceeded its output budget"));
+        assert_eq!(*requests.lock().unwrap(), [4096, 8192]);
+        assert_eq!(serde_json::to_value(engine.messages()).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn summary_output_limit_cancellation_prevents_retry() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (mut engine, requests) =
+            output_limited_summary_engine(u32::MAX, false, "unused".into(), Some(cancel.clone()));
+        let original = serde_json::to_value(engine.messages()).unwrap();
+        let error = engine
+            .compact_with_cancel(&cancel, Continuation::AwaitUserTurn)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(*requests.lock().unwrap(), [4096]);
+        assert_eq!(serde_json::to_value(engine.messages()).unwrap(), original);
     }
 
     struct BoundedSummaryProvider {
