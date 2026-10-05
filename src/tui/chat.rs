@@ -4,8 +4,7 @@
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{backend::CrosstermBackend, Terminal};
-use std::io::Stdout;
+use ratatui::Terminal;
 use std::sync::{Arc, Mutex};
 
 use crate::commands::{self, CommandResult};
@@ -483,7 +482,7 @@ pub async fn run(
     engine: &mut Engine,
     session_id: &str,
     db: &Db,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut super::terminal::AppTerminal,
     theme: Theme,
     models: &[ResolvedModel],
     shutdown: &tokio_util::sync::CancellationToken,
@@ -499,7 +498,7 @@ async fn run_session(
     engine: &mut Engine,
     session_id: &str,
     db: &Db,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut super::terminal::AppTerminal,
     theme: Theme,
     models: &[ResolvedModel],
     shutdown: &tokio_util::sync::CancellationToken,
@@ -735,7 +734,7 @@ async fn run_session(
         }
 
         // Poll terminal events
-        if event::poll(std::time::Duration::from_millis(50))? {
+        if crate::terminal_input::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
                     if app.job_key(key, &jobs) {
@@ -1117,7 +1116,7 @@ pub struct CrosstermKeys;
 
 impl KeySource for CrosstermKeys {
     fn poll_event(&mut self) -> Result<Option<Event>> {
-        if event::poll(std::time::Duration::from_millis(0))? {
+        if crate::terminal_input::poll(std::time::Duration::from_millis(0))? {
             return Ok(Some(event::read()?));
         }
         Ok(None)

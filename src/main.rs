@@ -26,6 +26,7 @@ mod repl;
 mod sandbox;
 mod session;
 mod shutdown;
+mod terminal_input;
 #[cfg(test)]
 mod test_support;
 mod theme;
@@ -44,7 +45,10 @@ async fn main() -> std::process::ExitCode {
     match run().await {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("Error: {error:?}");
+            use std::io::Write;
+            // A terminal disconnect also makes stderr unwritable. Do not panic
+            // while reporting the error after TUI/session cleanup has finished.
+            let _ = writeln!(std::io::stderr(), "Error: {error:?}");
             std::process::ExitCode::from(1)
         }
     }

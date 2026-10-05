@@ -168,7 +168,7 @@ fn read_api_key(label: &str) -> Result<String> {
         crossterm::terminal::enable_raw_mode()?;
         let result = (|| -> Result<()> {
             loop {
-                match crossterm::event::read()? {
+                match crate::terminal_input::read()? {
                     crossterm::event::Event::Key(event)
                         if event.kind == crossterm::event::KeyEventKind::Press =>
                     {
