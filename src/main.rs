@@ -35,6 +35,7 @@ mod tools;
 mod tui;
 mod usage;
 mod utils;
+mod voice;
 
 use anyhow::Result;
 use clap::Parser;

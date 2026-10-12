@@ -460,6 +460,7 @@ accordingly.
 | `/undo-turn` | Safely undo the last turn's file changes |
 | `/image <path>` | Attach an image to the next prompt (repeatable) |
 | `/model [profile]` | Show configured models or safely switch provider/model profile |
+| `/voice` | Toggle voice mode: Ctrl+T records and transcribes, replies are spoken (TUI only) |
 | `/resume [id]` | List or resume past sessions |
 | `/clear` | Clear screen |
 | `/exit` | Exit |
@@ -627,6 +628,42 @@ This also means `git push` over an agent-held key and rootless or remote
 Docker do not work inside the Bash tool. Set `strip_agent_sockets = false` in
 the global config to keep those handles; a project `.claux.toml` may only
 turn stripping on unless the project is trusted.
+
+### Voice mode
+
+The TUI can take input from a microphone and read replies aloud. Nothing is
+linked in; each stage is a command you configure, so any local engine works
+and claux never ships audio or model code. Voice settings are global only. A
+project `.claux.toml` cannot set them even when trusted, because a command
+claux runs on every reply is arbitrary code execution.
+
+```toml
+[voice]
+enabled = false        # /voice toggles it per session
+record_cmd = "pw-record --rate 16000 --channels 1 --format s16 {file}"
+transcribe_cmd = "whisper-cli -m ~/models/ggml-medium.bin -l auto -nt -np -f {file}"
+auto_submit = false    # true sends the transcript without a review step
+speak_default = "en"
+transcribe_timeout_secs = 60
+
+[voice.speak]
+en = "piper -m ~/voices/en_US-lessac-medium.onnx --output-raw | aplay -q -r 22050 -f S16_LE -t raw -"
+cs = "piper -m ~/voices/cs_CZ-jirka-medium.onnx --output-raw | aplay -q -r 22050 -f S16_LE -t raw -"
+```
+
+- `record_cmd` runs until it receives SIGINT and must leave audio at
+  `{file}` (quoted for you). Ctrl+T starts it; Ctrl+T again stops it.
+- `transcribe_cmd` is given the same `{file}` and prints the text. The
+  transcript lands in the input line for you to check and edit before Enter,
+  unless `auto_submit` is on.
+- `[voice.speak]` maps a language code to a command that reads text on stdin
+  and plays it. A reply can mix languages: the model wraps target-language
+  spans in `[cs]...[/cs]` style tags and each span goes to that language's
+  command; untagged text uses `speak_default`. Any key stops playback.
+
+Voice commands run with the same scrubbed environment as Bash commands and
+hooks, so they never see provider credentials. The REPL and one-shot modes do
+not use voice.
 
 ## Hooks
 

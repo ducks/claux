@@ -597,8 +597,20 @@ fn draw_input_and_status(
         " ".to_string()
     };
 
+    let voice_badge = match app.voice_badge.as_deref() {
+        Some(badge) => format!("[{badge}] "),
+        None => String::new(),
+    };
     let status = Paragraph::new(Line::from(vec![
         Span::styled(thinking_indicator, Style::default().fg(app.theme.success)),
+        Span::styled(
+            voice_badge,
+            Style::default().fg(if app.voice_badge.as_deref() == Some("REC") {
+                app.theme.tool_error
+            } else {
+                app.theme.assistant
+            }),
+        ),
         Span::styled(
             if app.save_error.is_some() {
                 " UNSAVED · Ctrl+S retry · keep this chat open ".to_string()

@@ -13,6 +13,7 @@ use crate::db::Db;
 use crate::permissions::PermissionResponse;
 use crate::query::{Engine, SteeringQueue, StreamEvent};
 use crate::theme::{Theme, ThemeName};
+use crate::voice::{Recording, Speaking, VoiceConfig};
 
 use super::screen::Action;
 use super::ui;
@@ -99,6 +100,9 @@ pub struct ChatApp {
     /// Displayed in the header. Defaults to CARGO_PKG_VERSION; overridable
     /// so snapshot tests can pin it to a stable value across version bumps.
     pub version: String,
+    /// Voice-mode badge shown at the left of the status bar: None when voice
+    /// is off, otherwise a short state like "voice", "REC", or "speaking".
+    pub voice_badge: Option<String>,
 }
 
 impl ChatApp {
@@ -134,6 +138,7 @@ impl ChatApp {
             messages_rev: 0,
             history_cache: None,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            voice_badge: None,
         }
     }
 
@@ -478,6 +483,7 @@ impl ChatApp {
 }
 
 /// Run the chat screen. Returns an Action when the user exits or goes home.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     engine: &mut Engine,
     session_id: &str,
@@ -485,15 +491,20 @@ pub async fn run(
     terminal: &mut super::terminal::AppTerminal,
     theme: Theme,
     models: &[ResolvedModel],
+    voice: &VoiceConfig,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> Result<Action> {
     let jobs = engine.jobs();
     jobs.enable();
-    let result = run_session(engine, session_id, db, terminal, theme, models, shutdown).await;
+    let result = run_session(
+        engine, session_id, db, terminal, theme, models, voice, shutdown,
+    )
+    .await;
     jobs.shutdown().await;
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     engine: &mut Engine,
     session_id: &str,
@@ -501,6 +512,7 @@ async fn run_session(
     terminal: &mut super::terminal::AppTerminal,
     theme: Theme,
     models: &[ResolvedModel],
+    voice: &VoiceConfig,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> Result<Action> {
     // Clear engine state and load this session's messages. repair_history
@@ -543,6 +555,15 @@ async fn run_session(
     }
     let mut needs_redraw = true;
     let mut pending_submit: Option<String> = None;
+    let mut voice_on = voice.enabled && (voice.can_listen() || voice.can_speak());
+    let mut recording: Option<Recording> = None;
+    if voice.enabled && !voice_on {
+        app.add_message(
+            "system",
+            "voice.enabled is set but no record/transcribe or speak command is configured.",
+        );
+    }
+    app.voice_badge = voice_on.then(|| "voice".to_string());
 
     loop {
         let jobs = engine.jobs();
@@ -595,9 +616,37 @@ async fn run_session(
                 return Ok(Action::Home);
             }
 
+            // A submit while the microphone is open discards the capture:
+            // the typed text is what the user meant to send.
+            if recording.take().is_some() {
+                app.add_message("system", "Discarded the open recording.");
+            }
+
             // Check slash commands
             if let Some(result) = commands::parse_command(&trimmed, commands::Surface::Tui) {
                 match result {
+                    CommandResult::Text(ref text) if text == "__voice__" => {
+                        if !voice.can_listen() && !voice.can_speak() {
+                            app.add_message(
+                                "error",
+                                "Voice mode needs [voice] record_cmd + transcribe_cmd and/or [voice.speak] commands in the global config.",
+                            );
+                        } else {
+                            voice_on = !voice_on;
+                            app.voice_badge = voice_on.then(|| "voice".to_string());
+                            app.add_message(
+                                "system",
+                                &if voice_on {
+                                    format!(
+                                        "Voice mode on ({}). Ctrl+T starts and stops recording; any key stops speech.",
+                                        voice.describe()
+                                    )
+                                } else {
+                                    "Voice mode off.".to_string()
+                                },
+                            );
+                        }
+                    }
                     CommandResult::Text(ref text) if text == "__cost__" => {
                         app.add_message("system", &commands::format_cost(engine));
                     }
@@ -698,6 +747,7 @@ async fn run_session(
             app.manual_scroll = false;
 
             app.status = format!("{} | {}", app.model, engine.context_status());
+            let turn_start = app.messages.len();
 
             let submit_result = drive_streaming(
                 engine,
@@ -711,6 +761,13 @@ async fn run_session(
 
             if let Err(e) = submit_result {
                 app.add_message("error", &format!("Error: {e}"));
+            }
+
+            if voice_on && voice.can_speak() {
+                let reply = assistant_text_since(&app, turn_start);
+                if let Some(speaking) = Speaking::start(voice, &reply) {
+                    speak_reply(speaking, &mut app, terminal, &mut CrosstermKeys, shutdown).await?;
+                }
             }
 
             // Snapshot the full conversation, tool rounds included, even on
@@ -747,6 +804,64 @@ async fn run_session(
                     if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
                         if app.save_session(db, session_id, engine) {
                             app.status = "Session saved".to_string();
+                        }
+                        needs_redraw = true;
+                        continue;
+                    }
+                    if key.modifiers == KeyModifiers::CONTROL
+                        && key.code == KeyCode::Char('t')
+                        && app.mode == Mode::Input
+                    {
+                        if !voice_on || !voice.can_listen() {
+                            app.status = if voice_on {
+                                "No record/transcribe command configured".to_string()
+                            } else {
+                                "Voice mode is off: /voice to enable".to_string()
+                            };
+                        } else if let Some(open) = recording.take() {
+                            app.voice_badge = Some("transcribing".to_string());
+                            app.set_activity("Transcribing");
+                            terminal.draw(|f| ui::draw_chat(f, &mut app))?;
+                            match open.stop_and_transcribe(voice).await {
+                                Ok(text) if text.is_empty() => {
+                                    app.status = "Heard nothing".to_string();
+                                }
+                                Ok(text) => {
+                                    if voice.auto_submit {
+                                        pending_submit = Some(text);
+                                    } else {
+                                        super::input::insert_text(
+                                            &mut app.input,
+                                            &mut app.cursor,
+                                            &text,
+                                        );
+                                        app.status =
+                                            "Transcript ready: edit, then Enter".to_string();
+                                    }
+                                }
+                                Err(error) => {
+                                    app.add_message(
+                                        "error",
+                                        &format!("Voice input failed: {error:#}"),
+                                    );
+                                }
+                            }
+                            app.activity = None;
+                            app.voice_badge = Some("voice".to_string());
+                        } else {
+                            match Recording::start(voice) {
+                                Ok(open) => {
+                                    recording = Some(open);
+                                    app.voice_badge = Some("REC".to_string());
+                                    app.status = "Recording: Ctrl+T to stop".to_string();
+                                }
+                                Err(error) => {
+                                    app.add_message(
+                                        "error",
+                                        &format!("Could not start recording: {error:#}"),
+                                    );
+                                }
+                            }
                         }
                         needs_redraw = true;
                         continue;
@@ -791,6 +906,58 @@ async fn run_session(
             return Ok(Action::Home);
         }
     }
+}
+
+/// Assistant text produced since `start`, joined in order. Tool bubbles and
+/// system notices are skipped: only the reply is spoken.
+fn assistant_text_since(app: &ChatApp, start: usize) -> String {
+    app.messages
+        .iter()
+        .skip(start)
+        .filter_map(|m| match m {
+            ChatMessage::Text { role, content } if role == "assistant" => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Play a reply segment by segment while drawing; any key press (or
+/// shutdown) interrupts the rest.
+async fn speak_reply<B: ratatui::backend::Backend>(
+    mut speaking: Speaking,
+    app: &mut ChatApp,
+    terminal: &mut Terminal<B>,
+    keys: &mut dyn KeySource,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    app.voice_badge = Some("speaking".to_string());
+    app.status = "Speaking: any key to stop".to_string();
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    loop {
+        if shutdown.is_cancelled() {
+            speaking.interrupt();
+            break;
+        }
+        match speaking.step().await {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(error) => {
+                app.add_message("error", &format!("Speech failed: {error:#}"));
+                break;
+            }
+        }
+        if let Some(Event::Key(key)) = keys.poll_event()? {
+            if key.kind != event::KeyEventKind::Release {
+                speaking.interrupt();
+                break;
+            }
+        }
+        terminal.draw(|f| ui::draw_chat(f, app))?;
+        tick.tick().await;
+    }
+    app.voice_badge = Some("voice".to_string());
+    Ok(())
 }
 
 /// Drive one turn through the engine's event protocol.
@@ -1305,6 +1472,60 @@ mod tests {
         assert!(app.expand_tool_output);
         assert!(app.messages_rev > revision);
         assert_eq!(app.input, "draft");
+    }
+
+    #[test]
+    fn spoken_reply_is_only_the_assistant_text_of_the_turn() {
+        let mut app = test_app();
+        app.add_message("assistant", "earlier reply");
+        let start = app.messages.len();
+        app.add_message("user", "question");
+        app.add_message("assistant", "first part");
+        app.add_tool("Bash", "ls", ToolStatus::Success);
+        app.add_message("system", "notice");
+        app.add_message("assistant", "[cs]Ahoj.[/cs]");
+        assert_eq!(
+            assistant_text_since(&app, start),
+            "first part\n[cs]Ahoj.[/cs]"
+        );
+        assert_eq!(assistant_text_since(&app, app.messages.len()), "");
+    }
+
+    #[test]
+    fn voice_command_is_tui_only_and_completes() {
+        match commands::parse_command("/voice", commands::Surface::Tui) {
+            Some(CommandResult::Text(text)) => assert_eq!(text, "__voice__"),
+            _ => panic!("expected the TUI marker"),
+        }
+        match commands::parse_command("/voice", commands::Surface::Repl) {
+            Some(CommandResult::Text(text)) => assert!(text.contains("only available")),
+            _ => panic!("expected an explanation in the REPL"),
+        }
+        let mut app = test_app();
+        type_str(&mut app, "/voi");
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/voice");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_key_press_interrupts_speech_and_restores_the_badge() {
+        let mut config = crate::voice::VoiceConfig::default();
+        config.speak.insert("en".into(), "sleep 30".into());
+        config.speak_default = Some("en".into());
+        let speaking = Speaking::start(&config, "long reply").unwrap();
+        let mut app = test_app();
+        app.voice_badge = Some("voice".into());
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let started = std::time::Instant::now();
+        let mut keys = SingleEvent(Some(Event::Key(key(KeyCode::Char('x')))));
+        speak_reply(speaking, &mut app, &mut terminal, &mut keys, &shutdown)
+            .await
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(app.voice_badge.as_deref(), Some("voice"));
     }
 
     #[test]

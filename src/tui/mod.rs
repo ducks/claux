@@ -134,6 +134,7 @@ pub async fn run(
                             terminal_guard.terminal_mut(),
                             theme,
                             &models,
+                            &config.voice,
                             &shutdown.token,
                         )
                         .await?;
