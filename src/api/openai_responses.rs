@@ -561,7 +561,10 @@ mod tests {
         }]);
         let saved = serde_json::to_string(&message).unwrap();
         let restored: Message = serde_json::from_str(&saved).unwrap();
-        assert_eq!(convert_messages(&[restored.clone()], false), vec![item]);
+        assert_eq!(
+            convert_messages(std::slice::from_ref(&restored), false),
+            vec![item]
+        );
         assert!(convert_messages(&[restored], true).is_empty());
     }
 
@@ -781,7 +784,7 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let _ = read_responses_sse(
+        read_responses_sse(
             response,
             tx,
             CancellationToken::new(),
@@ -889,7 +892,7 @@ mod tests {
         .await;
         let (tx, mut rx) = mpsc::channel(10);
 
-        let _ = read_responses_sse(
+        read_responses_sse(
             response,
             tx,
             CancellationToken::new(),

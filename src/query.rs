@@ -3118,7 +3118,7 @@ mod tests {
             if call < self.failures_before_success {
                 // Alternate pre-stream and mid-stream failures so both
                 // recovery paths are exercised.
-                if call % 2 == 0 {
+                if call.is_multiple_of(2) {
                     return Err(anyhow::Error::new(self.failure.clone()));
                 }
                 let (tx, rx) = mpsc::channel(4);

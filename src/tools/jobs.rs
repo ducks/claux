@@ -288,6 +288,54 @@ impl Drop for JobManager {
     }
 }
 
+pub struct JobsTool(pub Arc<JobManager>);
+
+#[async_trait]
+impl Tool for JobsTool {
+    fn name(&self) -> &str {
+        "Jobs"
+    }
+    fn description(&self) -> &str {
+        "List session background Bash jobs, inspect bounded output, or cancel a job. Use this to check actual completion; launch acknowledgements do not mean success."
+    }
+    fn input_schema(&self) -> Value {
+        json!({"type":"object", "properties":{"action":{"type":"string","enum":["list","output","cancel"]},"job_id":{"type":"string"}}, "required":["action"]})
+    }
+    fn is_read_only(&self) -> bool {
+        false
+    }
+    async fn execute(&self, input: Value, cancel: CancellationToken) -> Result<ToolOutput> {
+        if cancel.is_cancelled() {
+            return Ok(super::interrupted_output());
+        }
+        let args = match input["action"].as_str() {
+            Some("list") => String::new(),
+            Some(action @ ("output" | "cancel")) => {
+                let id = input["job_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("job_id is required"))?;
+                if !id.starts_with("job-")
+                    || id.len() != 36
+                    || !id[4..].chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    bail!("Invalid job ID");
+                }
+                if action == "cancel" {
+                    format!("cancel {id}")
+                } else {
+                    id.into()
+                }
+            }
+            _ => bail!("action must be list, output, or cancel"),
+        };
+        Ok(ToolOutput {
+            sub_agent: None,
+            content: self.0.command(&args)?,
+            is_error: false,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,53 +559,5 @@ mod tests {
             .is_err());
         manager.reset();
         assert!(manager.snapshots().is_empty());
-    }
-}
-
-pub struct JobsTool(pub Arc<JobManager>);
-
-#[async_trait]
-impl Tool for JobsTool {
-    fn name(&self) -> &str {
-        "Jobs"
-    }
-    fn description(&self) -> &str {
-        "List session background Bash jobs, inspect bounded output, or cancel a job. Use this to check actual completion; launch acknowledgements do not mean success."
-    }
-    fn input_schema(&self) -> Value {
-        json!({"type":"object", "properties":{"action":{"type":"string","enum":["list","output","cancel"]},"job_id":{"type":"string"}}, "required":["action"]})
-    }
-    fn is_read_only(&self) -> bool {
-        false
-    }
-    async fn execute(&self, input: Value, cancel: CancellationToken) -> Result<ToolOutput> {
-        if cancel.is_cancelled() {
-            return Ok(super::interrupted_output());
-        }
-        let args = match input["action"].as_str() {
-            Some("list") => String::new(),
-            Some(action @ ("output" | "cancel")) => {
-                let id = input["job_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("job_id is required"))?;
-                if !id.starts_with("job-")
-                    || id.len() != 36
-                    || !id[4..].chars().all(|c| c.is_ascii_hexdigit())
-                {
-                    bail!("Invalid job ID");
-                }
-                if action == "cancel" {
-                    format!("cancel {id}")
-                } else {
-                    id.into()
-                }
-            }
-            _ => bail!("action must be list, output, or cancel"),
-        };
-        Ok(ToolOutput {
-            sub_agent: None,
-            content: self.0.command(&args)?,
-            is_error: false,
-        })
     }
 }
