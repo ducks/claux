@@ -88,6 +88,11 @@ pub struct McpTool {
     upstream_name: String,
     tool_description: String,
     tool_schema: Value,
+    /// The server's `readOnlyHint` annotation. A server you chose to run
+    /// is trusted to describe its own tools; this only decides whether a
+    /// call is auto-allowed under the default permission mode, the same
+    /// way claux's built-in Read and Grep are. Absent means not read-only.
+    read_only: bool,
     client: Arc<McpClient>,
 }
 
@@ -107,8 +112,15 @@ impl McpTool {
             upstream_name,
             tool_description,
             tool_schema,
+            read_only: false,
             client,
         }
+    }
+
+    /// Honor the server's `readOnlyHint` annotation.
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
     }
 }
 
@@ -127,7 +139,7 @@ impl Tool for McpTool {
     }
 
     fn is_read_only(&self) -> bool {
-        false
+        self.read_only
     }
 
     fn summarize(&self, _input: &Value) -> String {
@@ -311,6 +323,16 @@ where
     tools
 }
 
+/// Whether a server marked this tool read-only via its `readOnlyHint`
+/// annotation. Absent or false means it may mutate and prompts like any
+/// other non-read-only tool.
+fn hint_read_only(tool: &rmcp::model::Tool) -> bool {
+    tool.annotations
+        .as_ref()
+        .and_then(|a| a.read_only_hint)
+        .unwrap_or(false)
+}
+
 async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> {
     anyhow::ensure!(valid_name(&config.name), "Invalid MCP server name");
     let timeout = Duration::from_secs(config.timeout_seconds.unwrap_or(120));
@@ -369,6 +391,7 @@ async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> 
             let schema = Value::Object((*t.input_schema).clone());
             validate_schema(&schema)?;
 
+            let read_only = hint_read_only(&t);
             let mut tool = McpTool::new(
                 config.name.clone(),
                 exposed_name,
@@ -376,7 +399,8 @@ async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> 
                 description,
                 schema,
                 client.clone(),
-            );
+            )
+            .with_read_only(read_only);
             tool.timeout = timeout;
             Ok(Box::new(tool) as Box<dyn Tool>)
         })
@@ -412,6 +436,20 @@ mod tests {
             &serde_json::json!({"type":"object","properties":{"x":{"type":"string"}}})
         )
         .is_ok());
+    }
+
+    #[test]
+    fn read_only_hint_is_honored_and_absent_means_mutating() {
+        use rmcp::model::{Tool as McpToolDef, ToolAnnotations};
+        let schema = Arc::new(serde_json::Map::new());
+        let plain = McpToolDef::new("t", "d", schema.clone());
+        assert!(!hint_read_only(&plain));
+        let read = McpToolDef::new("t", "d", schema.clone())
+            .annotate(ToolAnnotations::new().read_only(true));
+        assert!(hint_read_only(&read));
+        let write =
+            McpToolDef::new("t", "d", schema).annotate(ToolAnnotations::new().read_only(false));
+        assert!(!hint_read_only(&write));
     }
 
     #[test]

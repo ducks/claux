@@ -750,7 +750,10 @@ warning.
 | `plan` | auto | denied | denied |
 
 In `accept-edits` mode, Agent, MCP, and other non-read-only tools still require
-explicit approval. Sub-agents inherit the parent permission mode; because they
+explicit approval. An MCP tool whose server marks it `readOnlyHint: true` is
+treated as read-only and auto-allowed in every mode except `plan`; a server
+you chose to run is trusted to describe its own tools, and the hint changes
+only prompting, never containment. Sub-agents inherit the parent permission mode; because they
 are non-interactive, operations that would require another prompt are denied.
 
 `auto` mode also runs sandboxed development commands, including compound local
