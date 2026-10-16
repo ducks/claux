@@ -78,6 +78,9 @@ pub struct ProviderConfig {
     /// Ask compatible APIs to cache the stable prompt prefix across turns.
     #[serde(default)]
     pub prompt_caching: bool,
+    /// Replay assistant reasoning using the compatible reasoning_content field.
+    #[serde(default)]
+    pub replay_reasoning_content: bool,
     /// Accept a clean SSE EOF even when a compatible endpoint omits both a
     /// finish reason and the `[DONE]` marker. Strict by default because EOF
     /// alone cannot prove that a response was complete.
@@ -116,6 +119,8 @@ pub struct ModelBinding {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub prompt_caching: bool,
+    #[serde(default)]
+    pub replay_reasoning_content: bool,
     #[serde(default)]
     pub allow_eof_without_finish_reason: bool,
 }
@@ -360,6 +365,9 @@ pub struct Config {
     /// Legacy equivalent of providers.<name>.allow_eof_without_finish_reason.
     #[serde(default)]
     pub openai_allow_eof_without_finish_reason: bool,
+    /// Legacy equivalent of providers.<name>.replay_reasoning_content.
+    #[serde(default)]
+    pub openai_replay_reasoning_content: bool,
 
     /// Per-model pricing overrides in USD per million tokens.
     #[serde(default)]
@@ -562,6 +570,7 @@ impl Default for Config {
             openai_protocol: OpenAIProtocol::default(),
             openai_reasoning_effort: None,
             openai_allow_eof_without_finish_reason: false,
+            openai_replay_reasoning_content: false,
             model_pricing: std::collections::HashMap::new(),
             openai_provider_name: None,
             plugins: Vec::new(),
@@ -739,6 +748,7 @@ impl Config {
                     .unwrap_or_else(|| default_env.to_string()),
                 reasoning_effort: profile.reasoning_effort.clone(),
                 prompt_caching: provider.prompt_caching,
+                replay_reasoning_content: provider.replay_reasoning_content,
                 allow_eof_without_finish_reason: provider.allow_eof_without_finish_reason,
             },
             metadata: self.resolve_metadata(Some(profile), &profile.model),
@@ -788,6 +798,7 @@ impl Config {
                 api_key_env: key_env,
                 reasoning_effort: self.openai_reasoning_effort.clone(),
                 prompt_caching: false,
+                replay_reasoning_content: self.openai_replay_reasoning_content,
                 allow_eof_without_finish_reason: self.openai_allow_eof_without_finish_reason,
             },
             metadata: self.resolve_metadata(None, model),
@@ -1272,6 +1283,54 @@ name = "ollama"
         );
         assert!(models[1].binding.prompt_caching);
         assert!(models[1].binding.allow_eof_without_finish_reason);
+    }
+
+    #[test]
+    fn reasoning_replay_defaults_off_and_refreshes_old_session_bindings() {
+        let mut config: Config = toml::from_str(
+            r#"
+            [providers.hosted]
+            type = "openai"
+            base_url = "http://localhost/v1"
+            [model_profiles.hosted]
+            provider = "hosted"
+            model = "model"
+        "#,
+        )
+        .unwrap();
+        let binding = config.resolve_model("hosted").unwrap().binding;
+        assert!(!binding.replay_reasoning_content);
+        let mut saved = serde_json::to_value(&binding).unwrap();
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("replay_reasoning_content");
+        let old: ModelBinding = serde_json::from_value(saved).unwrap();
+        assert!(!old.replay_reasoning_content);
+        config
+            .providers
+            .get_mut("hosted")
+            .unwrap()
+            .replay_reasoning_content = true;
+        let restored = config.resolve_binding(&old).unwrap();
+        assert!(restored.binding.replay_reasoning_content);
+        let roundtrip: ModelBinding =
+            serde_json::from_str(&serde_json::to_string(&restored.binding).unwrap()).unwrap();
+        assert!(roundtrip.replay_reasoning_content);
+        let legacy: Config = toml::from_str(
+            r#"
+            openai_base_url = "http://localhost/v1"
+            openai_replay_reasoning_content = true
+        "#,
+        )
+        .unwrap();
+        assert!(
+            legacy
+                .resolve_model(&legacy.model)
+                .unwrap()
+                .binding
+                .replay_reasoning_content
+        );
     }
 
     #[test]

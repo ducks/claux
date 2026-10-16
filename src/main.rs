@@ -508,6 +508,7 @@ fn build_provider(resolved: &config::ResolvedModel) -> Result<Box<dyn api::Provi
                         binding.reasoning_effort.as_deref(),
                     )
                     .with_prompt_caching(binding.prompt_caching)
+                    .with_reasoning_content_replay(binding.replay_reasoning_content)
                     .with_eof_without_finish_reason(binding.allow_eof_without_finish_reason),
                 )),
                 config::OpenAIProtocol::Responses => {

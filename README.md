@@ -157,6 +157,14 @@ init` enables it by default and sends an ephemeral top-level cache control on
 each request. Provider-reported cache reads and writes appear in Claux usage
 output when the selected model supports them.
 
+For Chat Completions endpoints that require reasoning history during tool use
+(such as hosted DeepSeek), set `replay_reasoning_content = true` under the
+provider. Claux then sends saved assistant reasoning as `reasoning_content` on
+subsequent requests, including after session resume. It does not enable thinking
+or set reasoning effort. Leave it off for endpoints that do not accept this
+field; OpenRouter retains its existing reasoning replay format by default.
+Legacy configurations can use `openai_replay_reasoning_content = true`.
+
 ## Auth
 
 OpenRouter users can authorize Claux without manually copying an API key:
