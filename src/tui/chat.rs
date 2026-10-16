@@ -566,6 +566,7 @@ async fn run_session(
     app.voice_badge = voice_on.then(|| "voice".to_string());
 
     loop {
+        crate::diagnostics::phase(crate::diagnostics::Phase::Chat);
         let jobs = engine.jobs();
         app.refresh_jobs(&jobs);
         needs_redraw |= !app.jobs.is_empty();
@@ -792,7 +793,7 @@ async fn run_session(
 
         // Poll terminal events
         if crate::terminal_input::poll(std::time::Duration::from_millis(50))? {
-            match event::read()? {
+            match crate::terminal_input::read_ready()? {
                 Event::Key(key) => {
                     if app.job_key(key, &jobs) {
                         needs_redraw = true;
@@ -975,6 +976,7 @@ async fn drive_streaming<B: ratatui::backend::Backend>(
     keys: &mut dyn KeySource,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
+    crate::diagnostics::phase(crate::diagnostics::Phase::Turn);
     app.set_activity("Waiting for model response");
     let steering = engine.steering_queue();
     let steer_buf = app.steer_buf.clone();
@@ -1284,7 +1286,7 @@ pub struct CrosstermKeys;
 impl KeySource for CrosstermKeys {
     fn poll_event(&mut self) -> Result<Option<Event>> {
         if crate::terminal_input::poll(std::time::Duration::from_millis(0))? {
-            return Ok(Some(event::read()?));
+            return Ok(Some(crate::terminal_input::read_ready()?));
         }
         Ok(None)
     }

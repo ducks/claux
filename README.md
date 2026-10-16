@@ -809,3 +809,32 @@ see [`evals/README.md`](evals/README.md).
 ## License
 
 MIT
+
+### Runtime diagnostics
+
+Claux writes content-free runtime diagnostics to
+`~/.local/share/claux/diagnostics/` on Linux (under `XDG_DATA_HOME` when set).
+Other platforms use their local application-data directory. Each run has its own
+`PID-UUID.jsonl` file, with private directory/file permissions on Unix.
+
+The startup record includes the PID, version, executable path, file size,
+modification time, and Unix device/inode identity. Lifecycle records show the
+home/chat/turn state, terminal
+input errors, received TUI shutdown signals, restoration, and orderly exit. A
+separate OS thread writes a heartbeat every 30 seconds with cumulative process
+CPU time on Unix, terminal poll/read state, progress count, and dropped diagnostic
+event count. It does not depend on the UI loop or Tokio making progress.
+
+A rising CPU counter with unchanged terminal progress points toward a stuck input
+operation. The log is diagnostic evidence, not a stack trace. If a process gets
+stuck, retain its log and capture its executable path and stack before killing it.
+`SIGKILL` cannot write an exit record, but records already written remain on disk.
+
+These logs do not include prompts, responses, tool arguments, environment values,
+API keys, or arbitrary error text. Verbose/debug console logging remains separate.
+Each file rotates at 1 MiB, retaining one `.previous.jsonl` file and repeating the
+startup identity in the new file. On Unix, startup cleanup retains at most 40
+inactive log files and removes inactive logs older than seven days; live processes
+are excluded. Platforms without process-liveness checks retain old runs for manual
+cleanup. Diagnostic events use a bounded queue; a full queue drops events rather
+than blocking the UI. File failures produce a warning and stop diagnostic writing.

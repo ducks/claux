@@ -1,5 +1,9 @@
 #![cfg(unix)]
 
+#[allow(dead_code)]
+#[path = "../src/diagnostics.rs"]
+mod diagnostics;
+
 #[path = "../src/terminal_input.rs"]
 mod terminal_input;
 
@@ -171,6 +175,25 @@ fn tui_still_exits_on_sigterm_with_a_connected_terminal() {
     kill(Pid::from_raw(process.child.id() as i32), Signal::SIGTERM).unwrap();
     process.assert_exits();
     assert!(process.child.wait().unwrap().success());
+    let directory = process._storage.path().join("data/claux/diagnostics");
+    let paths: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(paths.len(), 1);
+    let text = std::fs::read_to_string(&paths[0]).unwrap();
+    let records: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records[0]["event"], "process_start");
+    assert!(records[0]["executable_bytes"].as_u64().unwrap() > 0);
+    assert!(records[0]["executable_inode"].is_number());
+    assert!(records.iter().any(|record| record["event"] == "sigterm"));
+    assert!(records
+        .iter()
+        .any(|record| record["event"] == "terminal_restored"));
+    assert_eq!(records.last().unwrap()["event"], "process_exit");
 }
 
 #[test]

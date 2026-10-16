@@ -1,7 +1,7 @@
 //! Home screen: session browser and project navigator.
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
@@ -220,7 +220,7 @@ impl HomeScreen {
             terminal.draw(|f| self.draw(f))?;
 
             if crate::terminal_input::poll(std::time::Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
+                if let Event::Key(key) = crate::terminal_input::read_ready()? {
                     match self.mode.clone() {
                         Mode::Browse => {
                             if let Some(action) = self.handle_browse_key(key)? {
