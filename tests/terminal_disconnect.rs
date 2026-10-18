@@ -127,16 +127,18 @@ impl TuiProcess {
         }
     }
 
-    fn drain_output(&mut self) {
+    fn drain_output(&mut self) -> bool {
         let Some(master) = self.master.as_mut() else {
-            return;
+            return false;
         };
+        let mut progressed = false;
         // Bound each drain so a noisy child cannot prevent deadline checks.
         for _ in 0..16 {
             let mut buffer = [0; 8192];
             match master.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
+                    progressed = true;
                     self.output.extend_from_slice(&buffer[..count]);
                     if self.output.len() > 65536 {
                         self.output.drain(..self.output.len() - 65536);
@@ -156,12 +158,13 @@ impl TuiProcess {
                 Err(error) => panic!("PTY read failed: {error}"),
             }
         }
+        progressed
     }
 
     fn wait_for_output(&mut self, expected: &[u8]) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            self.drain_output();
+            let progressed = self.drain_output();
             if self
                 .output
                 .windows(expected.len())
@@ -179,7 +182,9 @@ impl TuiProcess {
                 "TUI exited during startup: {}",
                 String::from_utf8_lossy(&self.output)
             );
-            std::thread::sleep(Duration::from_millis(10));
+            if !progressed {
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 
@@ -187,7 +192,7 @@ impl TuiProcess {
         let deadline = Instant::now() + timeout;
         loop {
             // Keep consuming output while the child restores and flushes its PTY.
-            self.drain_output();
+            let progressed = self.drain_output();
             if let Some(status) = self.child.try_wait()? {
                 return Ok(status);
             }
@@ -197,7 +202,9 @@ impl TuiProcess {
                     "PTY child did not exit",
                 ));
             }
-            std::thread::sleep(Duration::from_millis(10));
+            if !progressed {
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 
