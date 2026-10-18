@@ -294,10 +294,44 @@ fn lifecycle_probe_child() {
     io::stdout().flush().unwrap();
     match mode.as_str() {
         "output" => {
-            for _ in 0..256 {
-                io::stdout().write_all(&[b'x'; 8192]).unwrap();
+            crossterm::terminal::enable_raw_mode().unwrap();
+            let ready = std::env::var_os("CLAUX_PTY_OUTPUT_READY").unwrap();
+            let stdout = io::stdout();
+            let fd = stdout.as_raw_fd();
+            // Fill the actual kernel queue without blocking or assuming its capacity.
+            let flags = unsafe { nix::libc::fcntl(fd, nix::libc::F_GETFL) };
+            assert_ne!(flags, -1);
+            assert_ne!(
+                unsafe { nix::libc::fcntl(fd, nix::libc::F_SETFL, flags | nix::libc::O_NONBLOCK) },
+                -1
+            );
+            let bytes = [b'x'; 8192];
+            let mut written = 0;
+            loop {
+                // SAFETY: fd is live and bytes is valid for the entire write.
+                let count = unsafe { nix::libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+                if count < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+                    break;
+                }
+                assert!(count > 0);
+                written += count as usize;
+                assert!(written < 16 * 1024 * 1024, "PTY never applied backpressure");
             }
+            assert!(written > 0);
+            assert_ne!(
+                unsafe { nix::libc::fcntl(fd, nix::libc::F_SETFL, flags) },
+                -1
+            );
+            std::fs::write(ready, written.to_string()).unwrap();
+            // This write needs the parent's exit wait to consume queued output.
+            io::stdout().write_all(b"OUTPUT COMPLETE\n").unwrap();
             io::stdout().flush().unwrap();
+            crossterm::terminal::disable_raw_mode().unwrap();
         }
         "stopped" => {
             kill(Pid::this(), Signal::SIGSTOP).unwrap();
@@ -316,9 +350,36 @@ fn lifecycle_probe(mode: &str) -> TuiProcess {
 }
 
 #[test]
-fn exit_wait_drains_output_larger_than_the_pty_buffer() {
-    let mut process = lifecycle_probe("output");
+fn exit_wait_drains_a_full_pty_buffer() {
+    let storage = tempfile::tempdir().unwrap();
+    let ready = storage.path().join("output-ready");
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "lifecycle_probe_child", "--nocapture"])
+        .env("CLAUX_PTY_LIFECYCLE_PROBE", "output")
+        .env("CLAUX_PTY_OUTPUT_READY", &ready);
+    let mut process = TuiProcess::spawn(command);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // Do not drain until the child has observed backpressure.
+    while !ready.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "PTY probe did not fill its buffer"
+        );
+        assert!(
+            process.child.try_wait().unwrap().is_none(),
+            "PTY probe exited before filling its buffer"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(process.assert_exits().success());
+    assert!(
+        std::fs::read_to_string(ready)
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            > 0
+    );
     assert!(process.output.len() <= 65536);
 }
 
