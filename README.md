@@ -484,7 +484,7 @@ lists stored metadata without loading full conversations. Session saves retain
 unchanged rows, including inline images, and replace only the changed suffix.
 
 Headless invocations can use `--config PATH` (or `CLAUX_CONFIG`, with the flag
-taking precedence), `--base-url URL`, `--protocol chat_completions|responses|anthropic`,
+taking precedence), `--base-url URL`, `--protocol chat_completions|openrouter|responses|anthropic`,
 and `--reasoning-effort LEVEL`. These transport overrides apply to the selected
 model for this invocation and do not rewrite configuration. Credentials still
 come from the selected provider. A missing explicitly selected config is an error.
@@ -494,7 +494,10 @@ as project configuration; loosening containment requires `--trust-project` or
 an already trusted project.
 
 Chat Completions uses `reasoning_effort` for generic endpoints. OpenRouter's
-reasoning and cache extensions are sent only to `openrouter.ai`; OpenAI's
+reasoning replay, effort, and cache extensions are enabled for `openrouter.ai`
+or an explicit `protocol = "openrouter"` / `--protocol openrouter`. Use the
+explicit protocol when a local credential proxy forwards to OpenRouter;
+changing the endpoint must not discard reasoning between tool rounds. OpenAI's
 endpoint uses `max_completion_tokens`. Anthropic thinking is not yet supported:
 setting `reasoning_effort` there produces a warning rather than enabling thinking.
 

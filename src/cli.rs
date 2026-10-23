@@ -13,7 +13,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub base_url: Option<String>,
     /// Override the selected provider protocol
-    #[arg(long, global = true, value_parser = ["chat_completions", "responses", "anthropic"])]
+    #[arg(long, global = true, value_parser = ["chat_completions", "openrouter", "responses", "anthropic"])]
     pub protocol: Option<String>,
     #[arg(long, global = true)]
     pub reasoning_effort: Option<String>,

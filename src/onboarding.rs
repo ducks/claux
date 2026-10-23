@@ -322,6 +322,7 @@ impl<'a> ProviderSpecification<'a> {
             base_url: (descriptor.kind != ProviderKind::Anthropic).then_some(descriptor.base_url),
             protocol: match descriptor.protocol {
                 crate::config::OpenAIProtocol::ChatCompletions => "chat_completions",
+                crate::config::OpenAIProtocol::OpenRouter => "openrouter",
                 crate::config::OpenAIProtocol::Responses => "responses",
             },
             api_key_env: descriptor.api_key_env,
