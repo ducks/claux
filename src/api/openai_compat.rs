@@ -20,6 +20,7 @@ pub struct OpenAICompatProvider {
     provider_name: String,
     reasoning_effort: Option<String>,
     prompt_caching: bool,
+    openrouter_compat: bool,
     replay_reasoning_content: bool,
     allow_eof_without_finish_reason: bool,
     http: reqwest::Client,
@@ -42,6 +43,7 @@ impl OpenAICompatProvider {
             provider_name: name.to_string(),
             reasoning_effort: reasoning_effort.map(str::to_string),
             prompt_caching: false,
+            openrouter_compat: false,
             replay_reasoning_content: false,
             allow_eof_without_finish_reason: false,
             http: reqwest::Client::new(),
@@ -50,6 +52,13 @@ impl OpenAICompatProvider {
 
     pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
         self.prompt_caching = enabled;
+        self
+    }
+
+    /// Preserve OpenRouter wire semantics when the transport uses a proxy URL.
+    /// Provider display names do not select protocol extensions.
+    pub fn with_openrouter_compat(mut self, enabled: bool) -> Self {
+        self.openrouter_compat = enabled;
         self
     }
 
@@ -217,7 +226,7 @@ impl OpenAICompatProvider {
     ) -> serde_json::Value {
         let endpoint = reqwest::Url::parse(&self.base_url).ok();
         let host = endpoint.as_ref().and_then(|url| url.host_str());
-        let openrouter = host == Some("openrouter.ai");
+        let openrouter = self.openrouter_compat || host == Some("openrouter.ai");
         let openai = host == Some("api.openai.com");
         let mut messages = Self::convert_messages(messages, system, self.replay_reasoning_content);
         for message in &mut messages {
@@ -904,6 +913,35 @@ mod tests {
             assert!(body.get("reasoning").is_none());
             assert!(body.get("cache_control").is_none());
         }
+    }
+
+    #[test]
+    fn explicit_openrouter_protocol_preserves_reasoning_through_local_proxy() {
+        let provider = OpenAICompatProvider::new(
+            "http://127.0.0.1:19091/api/v1",
+            "placeholder",
+            "model",
+            "proxy",
+            Some("high"),
+        )
+        .with_openrouter_compat(true)
+        .with_prompt_caching(true);
+        let messages = vec![Message::assistant_blocks(vec![
+            ContentBlock::Reasoning {
+                text: Some("reasoning state".into()),
+                details: vec![json!({"type": "reasoning.text", "text": "state", "index": 0})],
+            },
+            ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "Read".into(),
+                input: json!({"file_path": "/tmp/test"}),
+            },
+        ])];
+        let body = provider.request_body(&messages, "system", &[], 1000);
+        assert_eq!(body["messages"][1]["reasoning_details"][0]["text"], "state");
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["cache_control"]["type"], "ephemeral");
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]

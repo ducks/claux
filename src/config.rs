@@ -49,6 +49,9 @@ impl AnthropicApiKey {
 pub enum OpenAIProtocol {
     #[default]
     ChatCompletions,
+    /// OpenRouter Chat Completions extensions, including through a proxy.
+    #[serde(rename = "openrouter")]
+    OpenRouter,
     Responses,
 }
 
@@ -824,6 +827,10 @@ impl Config {
                     resolved.binding.provider_kind = ProviderKind::Openai;
                     resolved.binding.protocol = OpenAIProtocol::ChatCompletions;
                 }
+                "openrouter" => {
+                    resolved.binding.provider_kind = ProviderKind::Openai;
+                    resolved.binding.protocol = OpenAIProtocol::OpenRouter;
+                }
                 _ => unreachable!("CLI validates protocols"),
             }
         }
@@ -1051,6 +1058,33 @@ fn apply_project_overrides(config: &mut Config, project: &toml::Value, trusted: 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn openrouter_protocol_survives_proxy_override_and_serialization() {
+        let mut config: Config = toml::from_str(
+            r#"
+default_profile = "test"
+[providers.proxy]
+type = "openai"
+base_url = "http://localhost:19091/api/v1"
+protocol = "openrouter"
+[model_profiles.test]
+provider = "proxy"
+model = "test/model"
+"#,
+        )
+        .unwrap();
+        let resolved = config.resolve_model("test").unwrap();
+        assert_eq!(resolved.binding.protocol, OpenAIProtocol::OpenRouter);
+        let encoded = serde_json::to_string(&resolved.binding).unwrap();
+        let decoded: ModelBinding = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.protocol, OpenAIProtocol::OpenRouter);
+        config.transport_overrides.protocol = Some("openrouter".into());
+        assert_eq!(
+            config.resolve_model("test").unwrap().binding.protocol,
+            OpenAIProtocol::OpenRouter
+        );
+    }
+
     #[test]
     fn credential_debug_output_is_redacted() {
         let config = Config {
