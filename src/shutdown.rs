@@ -23,17 +23,21 @@ impl TuiShutdown {
             let mut hangup = signal(SignalKind::hangup())?;
             let mut interrupt = signal(SignalKind::interrupt())?;
             tokio::spawn(async move {
-                tokio::select! {
-                    _ = terminate.recv() => {}
-                    _ = hangup.recv() => {}
-                    _ = interrupt.recv() => {}
-                }
+                let signal = tokio::select! {
+                    _ = terminate.recv() => "sigterm",
+                    _ = hangup.recv() => "sighup",
+                    _ = interrupt.recv() => "sigint",
+                };
+                crate::diagnostics::event(signal);
+                crate::diagnostics::phase(crate::diagnostics::Phase::Shutdown);
                 shutdown.cancel();
             })
         };
         #[cfg(not(unix))]
         let listener = tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
+                crate::diagnostics::event("ctrl_c");
+                crate::diagnostics::phase(crate::diagnostics::Phase::Shutdown);
                 shutdown.cancel();
             }
         });

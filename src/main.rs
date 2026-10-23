@@ -10,6 +10,7 @@ mod config;
 mod context;
 mod cost;
 mod db;
+mod diagnostics;
 #[cfg(test)]
 mod evals;
 mod image_input;
@@ -65,6 +66,19 @@ async fn run() -> Result<std::process::ExitCode> {
     if matches!(args.command, Some(cli::CliCommand::SandboxProbe)) {
         return command_sandbox::run_probe().map(|()| ExitCode::SUCCESS);
     }
+
+    let _diagnostics = match diagnostics::start() {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "Runtime diagnostics unavailable: {:?}",
+                error.kind()
+            );
+            None
+        }
+    };
 
     // Init logging
     let filter = if args.debug {
@@ -498,6 +512,7 @@ fn build_provider(resolved: &config::ResolvedModel) -> Result<Box<dyn api::Provi
                             binding.protocol == config::OpenAIProtocol::OpenRouter,
                         )
                         .with_prompt_caching(binding.prompt_caching)
+                        .with_reasoning_content_replay(binding.replay_reasoning_content)
                         .with_eof_without_finish_reason(binding.allow_eof_without_finish_reason),
                     ))
                 }

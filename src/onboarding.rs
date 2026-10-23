@@ -224,6 +224,12 @@ fn migrate_legacy_model(document: &mut DocumentMut) {
             "openai_allow_eof_without_finish_reason",
             "allow_eof_without_finish_reason",
         );
+        copy_value(
+            document,
+            &mut provider,
+            "openai_replay_reasoning_content",
+            "replay_reasoning_content",
+        );
     } else {
         provider["name"] = value("anthropic");
         copy_value(document, &mut provider, "api_key", "api_key");
@@ -839,6 +845,27 @@ mod tests {
         assert_eq!(
             parsed.default_profile.as_deref(),
             Some("anthropic-claude-existing")
+        );
+    }
+
+    #[test]
+    fn additive_init_preserves_legacy_reasoning_replay() {
+        let existing = r#"
+            model = "hosted-model"
+            openai_provider_name = "hosted"
+            openai_base_url = "http://localhost/v1"
+            openai_replay_reasoning_content = true
+        "#;
+        let updated =
+            add_model_profile(existing, ConfigProvider::OpenRouter, Some("another-model")).unwrap();
+        let parsed: Config = toml::from_str(&updated).unwrap();
+        assert!(parsed.providers["hosted"].replay_reasoning_content);
+        assert!(
+            parsed
+                .resolve_model("hosted-hosted-model")
+                .unwrap()
+                .binding
+                .replay_reasoning_content
         );
     }
 

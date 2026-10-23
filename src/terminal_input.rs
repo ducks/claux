@@ -3,6 +3,15 @@ use std::{io, time::Duration};
 /// Keep terminal loss out of Crossterm's event parser. Its alternate Unix
 /// backend bounds the read even if the terminal disconnects after this check.
 pub fn poll(timeout: Duration) -> io::Result<bool> {
+    let _operation = crate::diagnostics::InputOperation::enter(false);
+    let result = poll_inner(timeout);
+    if result.is_err() {
+        crate::diagnostics::input_error();
+    }
+    result
+}
+
+fn poll_inner(timeout: Duration) -> io::Result<bool> {
     #[cfg(unix)]
     {
         use std::{fs::File, io::IsTerminal, os::fd::AsRawFd};
@@ -47,7 +56,16 @@ pub fn poll(timeout: Duration) -> io::Result<bool> {
 pub fn read() -> io::Result<crossterm::event::Event> {
     loop {
         if poll(Duration::from_millis(50))? {
-            return crossterm::event::read();
+            return read_ready();
         }
     }
+}
+
+pub fn read_ready() -> io::Result<crossterm::event::Event> {
+    let _operation = crate::diagnostics::InputOperation::enter(true);
+    let result = crossterm::event::read();
+    if result.is_err() {
+        crate::diagnostics::input_error();
+    }
+    result
 }

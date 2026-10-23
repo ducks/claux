@@ -67,6 +67,7 @@ pub async fn run(
                 tracing::debug!("TUI action: {next_action:?}");
                 match next_action {
                     Action::Home => {
+                        crate::diagnostics::phase(crate::diagnostics::Phase::Home);
                         let mut home_screen =
                             home::HomeScreen::new(Db::open(&db_path)?, theme, models.clone());
                         if let Some(notice) = home_notice.take() {
@@ -76,6 +77,7 @@ pub async fn run(
                             home_screen.run(terminal_guard.terminal_mut(), &shutdown.token)?;
                     }
                     Action::Chat { session_id } => {
+                        crate::diagnostics::phase(crate::diagnostics::Phase::Chat);
                         let session = db.get_session(&session_id)?.ok_or_else(|| {
                             anyhow::anyhow!("session {session_id} no longer exists")
                         })?;
@@ -190,6 +192,7 @@ pub async fn run(
                 match tokio::time::timeout(std::time::Duration::from_secs(5), &mut run).await {
                     Ok(result) => result,
                     Err(_) => {
+                        crate::diagnostics::event("shutdown_timeout");
                         forced_shutdown = true;
                         Err(anyhow::anyhow!("Shutdown did not complete within five seconds."))
                     }
@@ -198,7 +201,13 @@ pub async fn run(
         }
     };
 
+    crate::diagnostics::phase(crate::diagnostics::Phase::Restore);
     let restore_result = terminal_guard.restore();
+    crate::diagnostics::event(if restore_result.is_ok() {
+        "terminal_restored"
+    } else {
+        "terminal_restore_error"
+    });
     // Drop the guard before flushing diagnostics, including on restore errors.
     drop(terminal_guard);
     drop(tui_logs);

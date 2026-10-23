@@ -21,6 +21,7 @@ pub struct OpenAICompatProvider {
     reasoning_effort: Option<String>,
     prompt_caching: bool,
     openrouter_compat: bool,
+    replay_reasoning_content: bool,
     allow_eof_without_finish_reason: bool,
     http: reqwest::Client,
 }
@@ -43,6 +44,7 @@ impl OpenAICompatProvider {
             reasoning_effort: reasoning_effort.map(str::to_string),
             prompt_caching: false,
             openrouter_compat: false,
+            replay_reasoning_content: false,
             allow_eof_without_finish_reason: false,
             http: reqwest::Client::new(),
         }
@@ -65,8 +67,17 @@ impl OpenAICompatProvider {
         self
     }
 
+    pub fn with_reasoning_content_replay(mut self, enabled: bool) -> Self {
+        self.replay_reasoning_content = enabled;
+        self
+    }
+
     /// Convert our message format to OpenAI's format.
-    fn convert_messages(messages: &[Message], system: &str) -> Vec<serde_json::Value> {
+    fn convert_messages(
+        messages: &[Message],
+        system: &str,
+        replay_reasoning_content: bool,
+    ) -> Vec<serde_json::Value> {
         let mut out = vec![json!({
             "role": "system",
             "content": system,
@@ -81,6 +92,7 @@ impl OpenAICompatProvider {
                     }));
                 }
                 MessageContent::Blocks(blocks) => {
+                    let previous_len = out.len();
                     // Flatten blocks into OpenAI format
                     let mut text_parts = Vec::new();
                     let mut image_parts = Vec::new();
@@ -142,18 +154,16 @@ impl OpenAICompatProvider {
                         if !text_parts.is_empty() {
                             assistant_msg["content"] = json!(text_parts.join("\n"));
                         }
-                        if !reasoning_details.is_empty() {
-                            assistant_msg["reasoning_details"] = json!(reasoning_details);
-                        } else if !reasoning_text.is_empty() {
-                            assistant_msg["reasoning"] = json!(reasoning_text);
-                        }
                         assistant_msg["tool_calls"] = json!(tool_calls);
                         out.push(assistant_msg);
                     } else if !tool_results.is_empty() {
                         for result in tool_results {
                             out.push(result);
                         }
-                    } else if !text_parts.is_empty() || !image_parts.is_empty() {
+                    } else if !text_parts.is_empty()
+                        || !image_parts.is_empty()
+                        || (replay_reasoning_content && !reasoning_text.is_empty())
+                    {
                         if image_parts.is_empty() {
                             out.push(json!({
                                 "role": msg.role,
@@ -169,6 +179,18 @@ impl OpenAICompatProvider {
                                 "role": msg.role,
                                 "content": content,
                             }));
+                        }
+                    }
+                    if msg.role == "assistant" && out.len() > previous_len {
+                        let assistant = out.last_mut().expect("message just appended");
+                        if replay_reasoning_content {
+                            if !reasoning_text.is_empty() {
+                                assistant["reasoning_content"] = json!(reasoning_text);
+                            }
+                        } else if !reasoning_details.is_empty() {
+                            assistant["reasoning_details"] = json!(reasoning_details);
+                        } else if !reasoning_text.is_empty() {
+                            assistant["reasoning"] = json!(reasoning_text);
                         }
                     }
                 }
@@ -206,9 +228,9 @@ impl OpenAICompatProvider {
         let host = endpoint.as_ref().and_then(|url| url.host_str());
         let openrouter = self.openrouter_compat || host == Some("openrouter.ai");
         let openai = host == Some("api.openai.com");
-        let mut messages = Self::convert_messages(messages, system);
+        let mut messages = Self::convert_messages(messages, system, self.replay_reasoning_content);
         for message in &mut messages {
-            if openrouter {
+            if openrouter && !self.replay_reasoning_content {
                 if let Some(details) = message
                     .get_mut("reasoning_details")
                     .and_then(|v| v.as_array_mut())
@@ -698,9 +720,14 @@ async fn read_openai_sse_body(
 
                 if let Some(text) = delta
                     .get("reasoning")
-                    .or_else(|| delta.get("reasoning_content"))
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        delta
+                            .get("reasoning_content")
+                            .and_then(|value| value.as_str())
+                            .filter(|value| !value.is_empty())
+                    })
                 {
                     reasoning_text.push_str(text);
                 }
@@ -844,7 +871,7 @@ mod tests {
                 data: "aGVsbG8=".to_string(),
             }],
         )];
-        let converted = OpenAICompatProvider::convert_messages(&messages, "system");
+        let converted = OpenAICompatProvider::convert_messages(&messages, "system", false);
         let content = converted[1]["content"].as_array().unwrap();
         assert_eq!(content[0], json!({"type": "text", "text": "describe it"}));
         assert_eq!(content[1]["type"], "image_url");
@@ -951,6 +978,115 @@ mod tests {
         );
         assert!(body["messages"][1].get("reasoning").is_none());
         assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call-1");
+    }
+
+    #[tokio::test]
+    async fn reasoning_content_replay_survives_streaming_and_saved_tool_history() {
+        for enabled in [false, true] {
+            let first = [
+                json!({"choices": [{"delta": {"reasoning": null, "reasoning_content": "Inspect "}, "finish_reason": null}]}),
+                json!({"choices": [{"delta": {"reasoning_content": "the file first.", "tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "Read", "arguments": "{\"file_path\":\"/tmp/example\"}"}}]}, "finish_reason": "tool_calls"}]}),
+            ].iter().map(|event| format!("data: {event}\n\n")).collect::<String>() + "data: [DONE]\n\n";
+            let second = format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({"choices": [{"delta": {"content": "Done."}, "finish_reason": "stop"}]})
+            );
+            let server = crate::test_support::RecordingSseServer::start(vec![first, second]).await;
+            let provider = OpenAICompatProvider::new(
+                &server.base_url,
+                "test-key",
+                "test-model",
+                "hosted",
+                None,
+            )
+            .with_reasoning_content_replay(enabled);
+            let mut history = vec![Message::user("Inspect the file")];
+            let mut stream = provider
+                .stream(&history, "system", &[], 1000, CancellationToken::new())
+                .await
+                .unwrap();
+            let mut blocks = Vec::new();
+            while let Some(event) = stream.recv().await {
+                match event {
+                    ApiEvent::Reasoning { text, details } => {
+                        blocks.push(ContentBlock::Reasoning { text, details })
+                    }
+                    ApiEvent::ToolUse { id, name, input } => {
+                        blocks.push(ContentBlock::ToolUse { id, name, input })
+                    }
+                    ApiEvent::Error(error) => panic!("{error:?}"),
+                    ApiEvent::Done => break,
+                    _ => {}
+                }
+            }
+            history.push(Message::assistant_blocks(blocks));
+            history.push(Message::tool_results(vec![ContentBlock::ToolResult {
+                tool_use_id: "call-1".into(),
+                content: "example contents".into(),
+                is_error: None,
+            }]));
+            let restored: Vec<Message> =
+                serde_json::from_str(&serde_json::to_string(&history).unwrap()).unwrap();
+            let mut stream = provider
+                .stream(&restored, "system", &[], 1000, CancellationToken::new())
+                .await
+                .unwrap();
+            while let Some(event) = stream.recv().await {
+                match event {
+                    ApiEvent::Error(error) => panic!("{error:?}"),
+                    ApiEvent::Done => break,
+                    _ => {}
+                }
+            }
+            let requests = server.requests();
+            assert_eq!(requests.len(), 2);
+            let assistant = &requests[1]["messages"][2];
+            if enabled {
+                assert_eq!(assistant["reasoning_content"], "Inspect the file first.");
+            } else {
+                assert!(assistant.get("reasoning_content").is_none());
+            }
+            assert!(assistant.get("reasoning").is_none());
+            assert!(assistant.get("reasoning_details").is_none());
+            assert_eq!(assistant["tool_calls"][0]["id"], "call-1");
+            assert_eq!(requests[1]["messages"][3]["tool_call_id"], "call-1");
+            assert_eq!(requests[1]["messages"][3]["content"], "example contents");
+        }
+    }
+
+    #[test]
+    fn reasoning_content_replay_preserves_text_and_reasoning_only_assistant_messages() {
+        let provider =
+            OpenAICompatProvider::new("http://localhost/v1", "", "model", "hosted", None)
+                .with_reasoning_content_replay(true);
+        let history = vec![
+            Message::assistant_blocks(vec![
+                ContentBlock::Reasoning {
+                    text: Some("The task is complete.".into()),
+                    details: vec![],
+                },
+                ContentBlock::Text {
+                    text: "Done.".into(),
+                },
+            ]),
+            Message::user("Continue"),
+            Message::assistant_blocks(vec![ContentBlock::Reasoning {
+                text: Some("Check the next task.".into()),
+                details: vec![],
+            }]),
+        ];
+        let body = provider.request_body(&history, "system", &[], 1000);
+        assert_eq!(
+            body["messages"][1]["reasoning_content"],
+            "The task is complete."
+        );
+        assert_eq!(body["messages"][1]["content"], "Done.");
+        assert!(body["messages"][2].get("reasoning_content").is_none());
+        assert_eq!(
+            body["messages"][3]["reasoning_content"],
+            "Check the next task."
+        );
+        assert_eq!(body["messages"][3]["role"], "assistant");
     }
 
     #[tokio::test]
