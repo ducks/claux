@@ -1,0 +1,42 @@
+name = "managed-pair"
+description = "Run two independent Claux tasks in isolated worktrees"
+timeout = 1200000
+
+[args.claux]
+required = true
+description = "Absolute path to the Claux spike binary"
+[args.repo]
+required = true
+description = "Absolute path to the repository"
+[args.model]
+required = true
+description = "Configured Claux model profile"
+[args.prompt]
+required = true
+description = "Task for two independent agents"
+
+# Launch both before waiting. llm-mux stores the task records in its run ledger.
+[[steps]]
+name = "first"
+type = "shell"
+run = "{{ args.claux | shell_escape }} task start {{ args.prompt | shell_escape }} --cwd {{ args.repo | shell_escape }} --model {{ args.model | shell_escape }} --worktree --permission-mode accept-edits"
+
+[[steps]]
+name = "second"
+type = "shell"
+run = "{{ args.claux | shell_escape }} task start {{ args.prompt | shell_escape }} --cwd {{ args.repo | shell_escape }} --model {{ args.model | shell_escape }} --worktree --permission-mode accept-edits"
+depends_on = ["first"]
+
+[[steps]]
+name = "wait-first"
+type = "shell"
+run = "{{ args.claux | shell_escape }} task wait $(printf '%s' {{ steps.first.output | shell_escape }} | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"id\"])')"
+depends_on = ["second"]
+timeout = 1000000
+
+[[steps]]
+name = "wait-second"
+type = "shell"
+run = "{{ args.claux | shell_escape }} task wait $(printf '%s' {{ steps.second.output | shell_escape }} | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"id\"])')"
+depends_on = ["wait-first"]
+timeout = 1000000

@@ -15,6 +15,7 @@ mod diagnostics;
 mod evals;
 mod image_input;
 mod logging;
+mod managed;
 mod model;
 mod model_catalog;
 mod onboarding;
@@ -95,6 +96,10 @@ async fn run() -> Result<std::process::ExitCode> {
 
     if let Some(command) = &args.command {
         match command {
+            cli::CliCommand::Task { command } => {
+                managed::handle(&args, command).await?;
+                return Ok(ExitCode::SUCCESS);
+            }
             cli::CliCommand::Archive { session: prefix } => {
                 let (_, path) = session::find_session(prefix)?
                     .ok_or_else(|| anyhow::anyhow!("Session not found: {prefix}"))?;

@@ -36,6 +36,7 @@ url = "2.5"
 
 # Error handling
 anyhow = "1.0"
+fs2 = "0.4"
 thiserror = "2.0"
 
 # Terminal
