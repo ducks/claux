@@ -138,6 +138,11 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 pub enum CliCommand {
+    /// Experimental local background agent tasks
+    Task {
+        #[command(subcommand)]
+        command: crate::managed::TaskCommand,
+    },
     /// Export the original conversation archive, independently of active context
     Archive {
         /// Session ID or unique prefix

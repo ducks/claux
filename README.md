@@ -289,6 +289,12 @@ openai_api_key_cmd = "op read 'op://vault/OpenAI/key'"
 openai_provider_name = "openai"
 ```
 
+## Experimental background tasks
+
+The [managed agent spike](docs/managed-agent-spike.md) adds `claux task` commands
+for detached tasks, isolated worktrees, JSON events, and conversational follow-ups,
+with an example llm-mux workflow.
+
 ## Usage
 
 ```bash
