@@ -138,6 +138,10 @@ impl Tool for McpTool {
         self.tool_schema.clone()
     }
 
+    fn mcp_server(&self) -> Option<&str> {
+        Some(&self.server_name)
+    }
+
     fn is_read_only(&self) -> bool {
         self.read_only
     }
@@ -331,6 +335,17 @@ fn hint_read_only(tool: &rmcp::model::Tool) -> bool {
         .as_ref()
         .and_then(|a| a.read_only_hint)
         .unwrap_or(false)
+}
+
+/// Fail visibly and within a bound for an interactive owner request.
+/// Do not forward subprocess error bodies into the conversation/UI.
+pub async fn connect_live_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> {
+    tokio::time::timeout(MCP_CONNECT_TIMEOUT, connect_server(config))
+        .await
+        .map_err(|_| anyhow::anyhow!("MCP connection timed out after 15 seconds"))?
+        .map_err(|_| {
+            anyhow::anyhow!("MCP connection or tool discovery failed; check server configuration")
+        })
 }
 
 async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> {

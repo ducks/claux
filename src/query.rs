@@ -649,6 +649,18 @@ impl Engine {
         &self.messages
     }
 
+    pub async fn manage_mcp(&mut self, args: &str) -> Result<String> {
+        let (notice, changed) = self.tools.manage_mcp(args).await?;
+        if changed {
+            self.fixed_context_overhead = Self::estimate_tool_overhead(&self.tools);
+            self.last_request_usage = None;
+            // A Responses cursor may describe the old tool schema. Resend history.
+            self.provider.reset_session();
+            self.permissions.reset_session();
+        }
+        Ok(notice)
+    }
+
     pub fn jobs(&self) -> std::sync::Arc<crate::tools::jobs::JobManager> {
         self.tools.jobs.clone()
     }
