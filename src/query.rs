@@ -651,6 +651,11 @@ impl Engine {
 
     pub async fn manage_mcp(&mut self, args: &str) -> Result<String> {
         let (notice, changed) = self.tools.manage_mcp(args).await?;
+        self.refresh_mcp_context(changed);
+        Ok(notice)
+    }
+
+    fn refresh_mcp_context(&mut self, changed: bool) {
         if changed {
             self.fixed_context_overhead = Self::estimate_tool_overhead(&self.tools);
             self.last_request_usage = None;
@@ -658,7 +663,6 @@ impl Engine {
             self.provider.reset_session();
             self.permissions.reset_session();
         }
-        Ok(notice)
     }
 
     pub fn jobs(&self) -> std::sync::Arc<crate::tools::jobs::JobManager> {
@@ -2158,7 +2162,7 @@ impl Engine {
             let started = Instant::now();
             let output = match perm {
                 PermissionResult::Allow => {
-                    self.execute_tool_reporting(idx, name, input, tx, cancel)
+                    self.execute_authorized_tool(idx, name, input, tx, cancel)
                         .await
                 }
                 PermissionResult::Deny(reason) => crate::tools::ToolOutput {
@@ -2289,6 +2293,50 @@ impl Engine {
         crate::permissions::apply_hook_verdicts(tool_name, input, result, &verdicts)
     }
 
+    async fn execute_authorized_tool(
+        &mut self,
+        index: usize,
+        name: &str,
+        input: &serde_json::Value,
+        tx: &mpsc::Sender<StreamEvent>,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> crate::tools::ToolOutput {
+        if name != "McpManage" || !self.tools.has_mcp_management() {
+            return self
+                .execute_tool_reporting(index, name, input, tx, cancel)
+                .await;
+        }
+        let _ = tx.send(StreamEvent::ToolRunning { index }).await;
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(anyhow::anyhow!(Self::INTERRUPTED_BY_USER)),
+            result = self.tools.manage_mcp_from_model(input.clone()) => result,
+        };
+        let output = match result {
+            Ok((content, changed)) => {
+                self.refresh_mcp_context(changed);
+                crate::tools::ToolOutput {
+                    content,
+                    is_error: false,
+                    sub_agent: None,
+                }
+            }
+            Err(error) => crate::tools::ToolOutput {
+                content: format!("McpManage failed: {error}"),
+                is_error: true,
+                sub_agent: None,
+            },
+        };
+        let _ = tx
+            .send(StreamEvent::ToolFinished {
+                index,
+                is_error: output.is_error,
+                content: output.content.clone(),
+            })
+            .await;
+        output
+    }
+
     async fn execute_tool_reporting(
         &self,
         index: usize,
@@ -2370,7 +2418,7 @@ impl Engine {
 
         match response {
             Ok(PermissionResponse::Allow) => {
-                self.execute_tool_reporting(index, name, input, tx, cancel)
+                self.execute_authorized_tool(index, name, input, tx, cancel)
                     .await
             }
             Ok(PermissionResponse::AlwaysAllow) => {
@@ -2384,17 +2432,17 @@ impl Engine {
                     }
                     _ => {}
                 }
-                self.execute_tool_reporting(index, name, input, tx, cancel)
+                self.execute_authorized_tool(index, name, input, tx, cancel)
                     .await
             }
             Ok(PermissionResponse::AlwaysAllowCommand(ref cmd)) => {
                 self.permissions.always_allow_command(cmd);
-                self.execute_tool_reporting(index, name, input, tx, cancel)
+                self.execute_authorized_tool(index, name, input, tx, cancel)
                     .await
             }
             Ok(PermissionResponse::AlwaysAllowCommandType(ref command_type)) => {
                 self.permissions.always_allow_command_type(command_type);
-                self.execute_tool_reporting(index, name, input, tx, cancel)
+                self.execute_authorized_tool(index, name, input, tx, cancel)
                     .await
             }
             // DenyAndCancel queues the typed message as steering; the
@@ -2570,6 +2618,177 @@ mod tests {
         calls: Arc<AtomicUsize>,
         systems: Arc<Mutex<Vec<String>>>,
         recover: bool,
+    }
+
+    struct SelfToolingProvider {
+        round: AtomicUsize,
+        resets: Arc<AtomicUsize>,
+        root: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SelfToolingProvider {
+        fn name(&self) -> &str {
+            "self-tooling-fixture"
+        }
+        fn set_model(&mut self, _: &str) {}
+        fn reset_session(&mut self) {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+        }
+        async fn stream(
+            &self,
+            messages: &[Message],
+            _: &str,
+            tools: &[ToolDefinition],
+            _: u32,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<ProviderStream> {
+            let round = self.round.fetch_add(1, Ordering::SeqCst);
+            let has_slug = tools.iter().any(|t| t.name == "mcp__self__slugify");
+            assert_eq!(has_slug, matches!(round, 4 | 5));
+            assert!(tools.iter().any(|t| t.name == "McpManage"));
+            // Every preceding request must retain complete paired history even
+            // after resetting the provider's incremental-session cursor.
+            assert_eq!(messages.len(), 1 + round * 2);
+            let invocation = match round {
+                0 => Some((
+                    "Write",
+                    serde_json::json!({
+                        "file_path": self.root.join("server.py"),
+                        "content": include_str!("../examples/live-mcp/server.py")
+                    }),
+                )),
+                1 => Some((
+                    "McpManage",
+                    serde_json::json!({"action":"load", "name":"self"}),
+                )),
+                2 => Some((
+                    "Write",
+                    serde_json::json!({
+                        "file_path": self.root.join(".mcp.json"),
+                        "content": serde_json::json!({"mcpServers":{"self":{
+                            "command":"python3", "args":[self.root.join("server.py")]
+                        }}}).to_string()
+                    }),
+                )),
+                3 => Some((
+                    "McpManage",
+                    serde_json::json!({"action":"load", "name":"self"}),
+                )),
+                4 => Some((
+                    "mcp__self__slugify",
+                    serde_json::json!({"text":"Hello Self Tools"}),
+                )),
+                5 => Some((
+                    "McpManage",
+                    serde_json::json!({"action":"unload", "name":"self"}),
+                )),
+                6 => None,
+                _ => panic!("unexpected model round"),
+            };
+            let (tx, rx) = mpsc::channel(2);
+            let event = if let Some((name, input)) = invocation {
+                ApiEvent::ToolUse {
+                    id: format!("self-{round}"),
+                    name: name.into(),
+                    input,
+                }
+            } else {
+                ApiEvent::Text("done".into())
+            };
+            tx.send(event).await.unwrap();
+            tx.send(ApiEvent::Done).await.unwrap();
+            Ok(ProviderStream::new(rx, cancel.child_token()))
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires python3 on PATH; deterministic local MCP workflow"]
+    async fn model_writes_loads_calls_and_unloads_its_own_mcp_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let resets = Arc::new(AtomicUsize::new(0));
+        let provider = SelfToolingProvider {
+            round: AtomicUsize::new(0),
+            resets: resets.clone(),
+            root: dir.path().into(),
+        };
+        let mut engine = Engine::for_tests(
+            Box::new(provider),
+            SteeringQueue::default(),
+            PermissionMode::Bypass,
+        );
+        let config = crate::config::Config {
+            project_trust: Some(crate::config::ProjectTrust::for_test(
+                dir.path().into(),
+                true,
+            )),
+            ..Default::default()
+        };
+        engine.tools.configure_live_mcp(&config);
+        assert_eq!(
+            engine
+                .submit(
+                    "Build and use a tool",
+                    tokio_util::sync::CancellationToken::new()
+                )
+                .await
+                .unwrap(),
+            "done"
+        );
+        let trace = engine.tool_trace();
+        assert_eq!(trace.len(), 6);
+        assert!(trace[1].is_error); // Missing definition is repairable.
+        assert!(!trace[3].is_error, "{}", trace[3].output);
+        assert_eq!(trace[4].output, "hello-self-tools");
+        assert!(!trace[4].read_only); // Generated readOnlyHint grants no authority.
+        assert!(!trace[5].is_error);
+        assert_eq!(resets.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn model_mcp_management_obeys_permissions_and_project_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers":{"local":{"command":"must-not-run"}}}"#,
+        )
+        .unwrap();
+        for mode in [PermissionMode::Default, PermissionMode::Bypass] {
+            let mut engine =
+                Engine::for_tests(Box::new(MockProvider), SteeringQueue::default(), mode);
+            engine.tools.configure_live_mcp(&crate::config::Config {
+                project_trust: Some(crate::config::ProjectTrust::for_test(
+                    dir.path().into(),
+                    false,
+                )),
+                ..Default::default()
+            });
+            let (tx, _rx) = mpsc::channel(32);
+            let (blocks, _) = engine
+                .execute_tool_batch(
+                    &[(
+                        "load".into(),
+                        "McpManage".into(),
+                        serde_json::json!({"action":"load","name":"local"}),
+                    )],
+                    &tx,
+                    false,
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await;
+            let ContentBlock::ToolResult {
+                content, is_error, ..
+            } = &blocks[0]
+            else {
+                panic!("missing result")
+            };
+            assert_eq!(*is_error, Some(true));
+            if mode == PermissionMode::Default {
+                assert!(content.contains("Permission denied"));
+            } else {
+                assert!(content.contains("requires project trust"));
+            }
+        }
     }
 
     struct DuplicateToolIdProvider {
