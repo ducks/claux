@@ -384,6 +384,10 @@ pub struct Config {
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
 
+    /// Default directory for model-authored MCP servers, relative to the project.
+    #[serde(default = "default_generated_mcp_dir")]
+    pub generated_mcp_dir: PathBuf,
+
     /// MCP server configuration
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -545,6 +549,10 @@ pub struct TransportOverrides {
     pub reasoning_effort: Option<String>,
 }
 
+fn default_generated_mcp_dir() -> PathBuf {
+    PathBuf::from(".claux/tools")
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -578,6 +586,7 @@ impl Default for Config {
             openai_provider_name: None,
             plugins: Vec::new(),
             mcp_servers: Vec::new(),
+            generated_mcp_dir: default_generated_mcp_dir(),
             trusted_projects: Vec::new(),
             project_trust: None,
         }
@@ -931,6 +940,15 @@ impl Config {
 }
 
 fn apply_project_overrides(config: &mut Config, project: &toml::Value, trusted: bool) {
+    if trusted {
+        if let Some(directory) = project
+            .get("generated_mcp_dir")
+            .and_then(|value| value.as_str())
+        {
+            config.generated_mcp_dir = PathBuf::from(directory);
+        }
+    }
+
     if let Some(model) = project.get("model").and_then(|v| v.as_str()) {
         if config.model_profiles.is_empty() {
             config.model = model.to_string();
@@ -1058,6 +1076,30 @@ fn apply_project_overrides(config: &mut Config, project: &toml::Value, trusted: 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generated_mcp_directory_defaults_and_trusted_overrides() {
+        let legacy: Config = toml::from_str("").unwrap();
+        assert_eq!(legacy.generated_mcp_dir, PathBuf::from(".claux/tools"));
+        assert_eq!(
+            Config::default().generated_mcp_dir,
+            legacy.generated_mcp_dir
+        );
+        let mut config: Config = toml::from_str("generated_mcp_dir = 'custom/tools'").unwrap();
+        assert_eq!(config.generated_mcp_dir, PathBuf::from("custom/tools"));
+        let project = toml::from_str("generated_mcp_dir = 'project/tools'").unwrap();
+        apply_project_overrides(&mut config, &project, false);
+        assert_eq!(config.generated_mcp_dir, PathBuf::from("custom/tools"));
+        apply_project_overrides(&mut config, &project, true);
+        assert_eq!(config.generated_mcp_dir, PathBuf::from("project/tools"));
+        let serialized = toml::to_string(&config).unwrap();
+        assert_eq!(
+            toml::from_str::<Config>(&serialized)
+                .unwrap()
+                .generated_mcp_dir,
+            config.generated_mcp_dir
+        );
+    }
+
     #[test]
     fn openrouter_protocol_survives_proxy_override_and_serialization() {
         let mut config: Config = toml::from_str(

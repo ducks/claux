@@ -10,12 +10,28 @@ The TUI and REPL accept these owner-issued commands between turns:
 
 The model can also write and load tools itself during a conversation:
 
-1. Write a stdio MCP server using `Write`/`Edit`.
+1. Write a stdio MCP server using `Write`/`Edit`, normally in
+   `.claux/tools/<server-name>/server.py`.
 2. Add its definition to the trusted project's `.mcp.json`.
 3. Call `McpManage` with `{"action":"load","name":"local-slug"}`.
 4. Call a discovered tool in the next round, such as `mcp__local-slug__slugify`.
 5. Use `{"action":"unload","name":"local-slug"}`, edit the implementation,
    and load again to replace it. `{"action":"list"}` lists connected servers.
+
+Generated servers default to `.claux/tools/<server-name>/` under the project
+where Claux started. Override the base directory in the global `config.toml`,
+or in a trusted project's `.claux.toml`:
+
+```toml
+generated_mcp_dir = ".claux/tools" # or "dev/agent-tools", or an absolute path
+```
+
+Relative paths resolve from the captured project directory; absolute paths are
+used directly. `McpManage` includes the resolved default in its model-visible
+description. This is a default convention, not a restriction on existing server
+locations: the user can request another location. Directories are created by
+normal file writes when needed. Choosing a directory does not grant permission
+to write there or relax containment. `.mcp.json` remains at the project root.
 
 `McpManage` follows normal mutation permissions and permission hooks. One-shot
 sessions deny requests requiring confirmation. Failed loads return paired tool

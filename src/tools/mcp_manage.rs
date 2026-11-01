@@ -6,7 +6,25 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-pub struct McpManageTool;
+pub struct McpManageTool {
+    description: String,
+}
+
+impl McpManageTool {
+    pub fn new(config: &crate::config::Config) -> Self {
+        let project = config
+            .project_trust
+            .as_ref()
+            .map(|trust| trust.project_file(""))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+        let directory = project.join(&config.generated_mcp_dir);
+        let directory =
+            serde_json::to_string(&directory.to_string_lossy()).expect("path serializes");
+        Self { description: format!(
+            "Load, list, or unload MCP servers during this conversation. Default generated server directory: {directory}. When creating a server, write its files under a subdirectory named after the server in that directory (for example <directory>/<name>/server.py), unless the user requests another location. Create directories through normal file tools as needed. Add its launch definition to the trusted project's .mcp.json, then load its name here. Successful discovery exposes its tools on the next round. On failure, repair the files and retry. Unload before changing/reloading a server. Model-loaded servers inherit Bash filesystem containment; their tools require normal mutation permissions regardless of read-only hints. Loading executes the configured program."
+        ) }
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,7 +58,7 @@ impl Tool for McpManageTool {
         "McpManage"
     }
     fn description(&self) -> &str {
-        "Load, list, or unload MCP servers during this conversation. To create a tool, write a stdio MCP server and its definition in the trusted project's .mcp.json, then load its name here. Successful discovery exposes its tools on the next round. On failure, repair the files and retry. Unload before changing/reloading a server. Model-loaded servers inherit Bash filesystem containment; their tools require normal mutation permissions regardless of read-only hints. Loading executes the configured program."
+        &self.description
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object", "properties":{
@@ -59,6 +77,34 @@ impl Tool for McpManageTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_directory_is_resolved_against_captured_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config {
+            project_trust: Some(crate::config::ProjectTrust::for_test(
+                dir.path().into(),
+                true,
+            )),
+            ..Default::default()
+        };
+        let expected = dir.path().join(".claux/tools");
+        assert!(McpManageTool::new(&config)
+            .description()
+            .contains(expected.to_str().unwrap()));
+        assert!(
+            !expected.exists(),
+            "configuring the default must not write files"
+        );
+        config.generated_mcp_dir = "custom-tools".into();
+        assert!(McpManageTool::new(&config)
+            .description()
+            .contains(dir.path().join("custom-tools").to_str().unwrap()));
+        config.generated_mcp_dir = dir.path().join("absolute-tools");
+        assert!(McpManageTool::new(&config)
+            .description()
+            .contains(config.generated_mcp_dir.to_str().unwrap()));
+    }
+
     #[test]
     fn rejects_invalid_lifecycle_requests() {
         for input in [

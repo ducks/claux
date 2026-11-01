@@ -204,9 +204,9 @@ impl ToolRegistry {
     }
 
     pub fn configure_live_mcp(&mut self, config: &crate::config::Config) {
-        if !self.has_mcp_management() {
-            self.tools.push(Box::new(mcp_manage::McpManageTool));
-        }
+        self.tools.retain(|tool| tool.name() != "McpManage");
+        self.tools
+            .push(Box::new(mcp_manage::McpManageTool::new(config)));
         self.live_mcp = config
             .project_trust
             .clone()
