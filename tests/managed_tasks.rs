@@ -33,6 +33,15 @@ fn json_output(output: Output) -> Value {
 
 #[test]
 fn detached_followups_worktrees_and_event_replay() {
+    run_scenario(false);
+}
+
+#[test]
+fn structured_handoff_holds_queued_inputs_until_explicit_resume() {
+    run_scenario(true);
+}
+
+fn run_scenario(structured_report: bool) {
     let home = tempfile::tempdir().unwrap();
     let repo = home.path().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -62,6 +71,7 @@ fn detached_followups_worktrees_and_event_replay() {
     let port = listener.local_addr().unwrap().port();
     let (requests_tx, requests_rx) = mpsc::channel();
     let (stop_tx, stop_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
     let server = std::thread::spawn(move || {
         let mut count = 0;
         loop {
@@ -96,6 +106,9 @@ fn detached_followups_worktrees_and_event_replay() {
             let request: Value = serde_json::from_slice(&body).unwrap();
             requests_tx.send(request).unwrap();
             count += 1;
+            if count == 1 {
+                release_rx.recv_timeout(Duration::from_secs(15)).unwrap();
+            }
             if count == 3 {
                 // Leave this stream open long enough to exercise cancellation.
                 std::thread::sleep(Duration::from_secs(2));
@@ -105,6 +118,12 @@ fn detached_followups_worktrees_and_event_replay() {
                 "first answer"
             } else {
                 "follow-up answer"
+            };
+            let report_text = json!({"state":if count == 1 {"waiting"} else {"ready_for_review"}, "summary":text}).to_string();
+            let text = if structured_report {
+                report_text.as_str()
+            } else {
+                text
             };
             let payload = format!(
                 "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
@@ -132,6 +151,11 @@ context_window = 32000
         ),
     )
     .unwrap();
+    let report_args: &[&str] = if structured_report {
+        &["--structured-report"]
+    } else {
+        &[]
+    };
     let started = json_output(cli(
         home.path(),
         &[
@@ -147,7 +171,11 @@ context_window = 32000
             "test",
             "--timeout",
             "20",
-        ],
+        ]
+        .into_iter()
+        .chain(report_args.iter().copied())
+        .collect::<Vec<_>>()
+        .as_slice(),
     ));
     let id = started["id"].as_str().unwrap();
     assert!(started["cwd"].as_str().unwrap().ends_with("worktree"));
@@ -155,13 +183,38 @@ context_window = 32000
         .as_str()
         .unwrap()
         .starts_with("claux-task/"));
-    let first = json_output(cli(home.path(), &["task", "wait", id, "--timeout", "30"]));
-    assert_eq!(first["result"], "first answer");
-    cli(home.path(), &["task", "send", id, "continue that thought"]);
+    let first_request = requests_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    // Enqueue while the first model request is held open: no second worker and
+    // no interruption of the active conversation.
+    let queued = json_output(cli(
+        home.path(),
+        &["task", "send", id, "continue that thought"],
+    ));
+    assert_eq!(queued["queued_inputs"], 1);
+    assert_eq!(queued["worker_active"], true);
+    if structured_report {
+        let queued = json_output(cli(
+            home.path(),
+            &["task", "send", id, "third queued request"],
+        ));
+        assert_eq!(queued["queued_inputs"], 2);
+    }
+    release_tx.send(()).unwrap();
     let second = json_output(cli(home.path(), &["task", "wait", id, "--timeout", "30"]));
-    assert_eq!(second["result"], "follow-up answer");
-    let first_request = requests_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let second_request = requests_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    if structured_report {
+        assert_eq!(second["task_report"]["state"], "ready_for_review");
+        let state = json_output(cli(home.path(), &["task", "status", id]));
+        assert_eq!(state["stage"], "ready_for_review");
+        assert_eq!(state["queued_inputs"], 1);
+        assert!(requests_rx.try_recv().is_err());
+        assert!(first_request
+            .to_string()
+            .contains("Managed task report contract"));
+    } else {
+        assert_eq!(second["result"], "follow-up answer");
+        assert_eq!(second["task_report"]["state"], "waiting");
+    }
     assert!(
         second_request["messages"].as_array().unwrap().len()
             > first_request["messages"].as_array().unwrap().len()
@@ -191,7 +244,11 @@ context_window = 32000
             & 0o777,
         0o600
     );
-    cli(home.path(), &["task", "send", id, "wait for cancellation"]);
+    if structured_report {
+        cli(home.path(), &["task", "resume", id]);
+    } else {
+        cli(home.path(), &["task", "send", id, "wait for cancellation"]);
+    }
     requests_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     cli(home.path(), &["task", "cancel", id]);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -232,7 +289,11 @@ context_window = 32000
     .unwrap();
     cli(home.path(), &["task", "retry", id]);
     let retried = json_output(cli(home.path(), &["task", "wait", id, "--timeout", "30"]));
-    assert_eq!(retried["result"], "follow-up answer");
+    if structured_report {
+        assert_eq!(retried["task_report"]["state"], "ready_for_review");
+    } else {
+        assert_eq!(retried["result"], "follow-up answer");
+    }
     requests_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     stop_tx.send(()).unwrap();
     server.join().unwrap();

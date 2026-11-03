@@ -24,6 +24,9 @@ pub enum TaskCommand {
         /// Create an isolated worktree and branch from HEAD
         #[arg(long)]
         worktree: bool,
+        /// Require a structured final report (waiting, needs_input, ready_for_review, failed)
+        #[arg(long)]
+        structured_report: bool,
         /// Named model profile, resolved and pinned when the task is created
         #[arg(long)]
         model: Option<String>,
@@ -46,6 +49,8 @@ pub enum TaskCommand {
     },
     /// Continue an idle task in the same conversation
     Send { id: String, prompt: String },
+    /// Resume queued follow-ups after a report handoff or cancellation
+    Resume { id: String },
     /// Retry a launch that failed before a turn began (never replays an evaluated turn)
     Retry { id: String },
     /// Cooperatively cancel the current turn; does not delete worktrees
@@ -63,6 +68,8 @@ pub enum TaskCommand {
 #[derive(Serialize, Deserialize)]
 struct Task {
     schema_version: u8,
+    #[serde(default)]
+    structured_report: bool,
     id: String,
     cwd: PathBuf,
     session: PathBuf,
@@ -72,6 +79,94 @@ struct Task {
     timeout: u64,
     branch: Option<String>,
 }
+
+// One atomic snapshot owns queue transitions. Claimed inputs are never replayed.
+#[derive(Clone, Serialize, Deserialize)]
+struct Input {
+    id: String,
+    prompt: String,
+    phase: String,
+}
+
+fn inbox(dir: &Path) -> Result<Vec<Input>> {
+    let path = dir.join("inbox.json");
+    if path.exists() {
+        return Ok(serde_json::from_reader(File::open(path)?)?);
+    }
+    // Read old tasks without modifying them. The first queue write migrates them.
+    if dir.join("pending.json").exists() {
+        let pending: Value = serde_json::from_reader(File::open(dir.join("pending.json"))?)?;
+        return Ok(vec![Input {
+            id: "legacy".into(),
+            prompt: pending["prompt"]
+                .as_str()
+                .context("missing pending prompt")?
+                .into(),
+            phase: "queued".into(),
+        }]);
+    }
+    Ok(Vec::new())
+}
+
+fn save_inbox(dir: &Path, inputs: &[Input]) -> Result<()> {
+    write_json(&dir.join("inbox.json"), &inputs)?;
+    // inbox.json becomes authoritative before removing the legacy pending file.
+    if dir.join("pending.json").exists() {
+        fs::remove_file(dir.join("pending.json"))?;
+    }
+    Ok(())
+}
+
+fn claim_input(dir: &Path) -> Result<Input> {
+    let mut inputs = inbox(dir)?;
+    ensure!(
+        !inputs.iter().any(|i| i.phase == "claimed"),
+        "previous turn may have run; inspect checkpoint before recovery"
+    );
+    let input = inputs
+        .iter_mut()
+        .find(|i| i.phase == "queued")
+        .context("no queued input")?;
+    input.phase = "claimed".into();
+    let claimed = input.clone();
+    save_inbox(dir, &inputs)?;
+    Ok(claimed)
+}
+
+fn finish_input(dir: &Path, id: &str) -> Result<()> {
+    let mut inputs = inbox(dir)?;
+    let input = inputs
+        .iter_mut()
+        .find(|i| i.id == id && i.phase == "claimed")
+        .context("missing claimed input")?;
+    input.phase = "finished".into();
+    save_inbox(dir, &inputs)
+}
+
+fn report(text: &str, structured: bool) -> Value {
+    if !structured {
+        return json!({"state":"waiting", "summary":"Turn ended; no structured task report requested", "advisory":true});
+    }
+    let parsed = serde_json::from_str::<Value>(text);
+    if let Ok(value) = parsed {
+        let state = value["state"].as_str().unwrap_or_default();
+        let summary = value["summary"].as_str().unwrap_or_default();
+        let question = value.get("question").and_then(Value::as_str);
+        if matches!(
+            state,
+            "waiting" | "needs_input" | "ready_for_review" | "failed"
+        ) && !summary.trim().is_empty()
+            && summary.len() <= 8000
+            && question.is_none_or(|q| q.len() <= 2000)
+            && (state != "needs_input" || question.is_some_and(|q| !q.trim().is_empty()))
+        {
+            return json!({"state":state,"summary":summary,"question":question,"advisory":true});
+        }
+    }
+    json!({"state":"needs_input", "summary":"Worker did not produce a valid structured report; inspect result.json", "question":"Review the worker result before resuming queued work", "invalid_report":true,"advisory":true})
+}
+
+const REPORT_INSTRUCTIONS: &str = "\n\nManaged task report contract: Finish your turn with a single JSON object, without markdown fences, with fields state, summary, and optional question. state must be waiting (this turn is done), needs_input (a specific human answer is required; include question), ready_for_review (a usable result awaits review), or failed (work could not be completed). Report actual evidence and uncertainty in summary; never imply that a successful model turn proves the work correct. This report does not grant permissions or authorize external actions.";
 
 fn root() -> Result<PathBuf> {
     Ok(dirs::data_local_dir()
@@ -136,16 +231,32 @@ fn status(dir: &Path) -> Result<Value> {
     let task = read_task(dir)?;
     let state: Value = serde_json::from_reader(File::open(dir.join("state.json"))?)?;
     let active = worker_active(dir)?;
+    let inputs = inbox(dir)?;
+    let queued = inputs.iter().filter(|i| i.phase == "queued").count();
+    let claimed = inputs.iter().any(|i| i.phase == "claimed");
+    let report = dir.join("report.json");
+    let report: Value = if report.exists() {
+        serde_json::from_reader(File::open(report)?)?
+    } else {
+        Value::Null
+    };
     let starting = state["status"] == "starting"
         && state["started_at_ms"].as_i64().is_some_and(|start| {
             chrono::Utc::now().timestamp_millis().saturating_sub(start) < 10_000
         });
-    let interrupted =
-        !active && !starting && matches!(state["status"].as_str(), Some("starting" | "running"));
+    let interrupted = !active
+        && !starting
+        && (claimed || matches!(state["status"].as_str(), Some("starting" | "running")));
     Ok(json!({"schema_version":1, "id":task.id, "cwd":task.cwd,
         "model":task.binding.model, "branch":task.branch,
         "session":task.session, "worker_active":active,
         "status":if interrupted { json!("interrupted") } else {state["status"].clone()},
+        "queued_inputs":queued, "report":report,
+        "inputs":inputs.iter().map(|i| json!({"id":i.id,"phase":i.phase})).collect::<Vec<_>>(),
+        "stage":if interrupted { json!("interrupted") }
+            else if active || starting { json!("working") }
+            else if matches!(state["status"].as_str(), Some("failed" | "cancelled")) {state["status"].clone()}
+            else {report.get("state").cloned().unwrap_or(json!("waiting"))},
         "artifacts":dir}))
 }
 
@@ -200,23 +311,48 @@ fn enqueue(dir: &Path, prompt: &str) -> Result<()> {
         !prompt.trim().is_empty() && prompt.len() <= 40_000,
         "prompt must contain 1–40000 bytes"
     );
+    let active = worker_active(dir)?;
+    let state = status(dir)?;
     ensure!(
-        !worker_active(dir)?,
-        "task is active; wait before sending a follow-up"
-    );
-    let state: Value = serde_json::from_reader(File::open(dir.join("state.json"))?)?;
-    ensure!(
-        state["status"] != "interrupted"
-            && !matches!(state["status"].as_str(), Some("running" | "starting")),
+        state["status"] != "interrupted",
         "previous worker was interrupted; recover its checkpoint before continuing"
     );
+    let mut inputs = inbox(dir)?;
     ensure!(
-        !dir.join("pending.json").exists(),
-        "a turn is already pending"
+        !inputs.iter().any(|i| i.phase == "claimed") || active,
+        "previous turn may have run; inspect checkpoint before recovery"
     );
-    // The caller holds control.lock, serializing send/cancel/start operations.
+    ensure!(
+        inputs.iter().filter(|i| i.phase == "queued").count() < 32,
+        "task inbox has 32 queued inputs; wait for work to finish"
+    );
+    ensure!(
+        inputs.len() < 256,
+        "task reached 256 input receipts; create a new task"
+    );
+    inputs.push(Input {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        prompt: prompt.into(),
+        phase: "queued".into(),
+    });
+    save_inbox(dir, &inputs)?;
+    if active || state["status"] == "starting" {
+        return Ok(());
+    }
+    start_queued(dir)
+}
+
+fn start_queued(dir: &Path) -> Result<()> {
+    let inputs = inbox(dir)?;
+    ensure!(
+        !inputs.iter().any(|i| i.phase == "claimed"),
+        "turn already began; inspect the checkpoint instead of replaying it"
+    );
+    ensure!(
+        inputs.iter().any(|i| i.phase == "queued"),
+        "no queued inputs"
+    );
     let _ = fs::remove_file(dir.join("cancel"));
-    write_json(&dir.join("pending.json"), &json!({"prompt":prompt}))?;
     write_json(
         &dir.join("state.json"),
         &json!({"status":"starting", "started_at_ms":chrono::Utc::now().timestamp_millis()}),
@@ -261,6 +397,7 @@ pub async fn handle(args: &cli::Cli, command: &TaskCommand) -> Result<()> {
             prompt,
             cwd,
             worktree,
+            structured_report,
             model,
             timeout,
             permission_mode,
@@ -333,6 +470,7 @@ pub async fn handle(args: &cli::Cli, command: &TaskCommand) -> Result<()> {
             let (_, session) = session::create_session_with_model(&resolved)?;
             let task = Task {
                 schema_version: 1,
+                structured_report: *structured_report,
                 id,
                 cwd,
                 session,
@@ -376,26 +514,34 @@ pub async fn handle(args: &cli::Cli, command: &TaskCommand) -> Result<()> {
                 state["status"] == "failed" || state["status"] == "interrupted",
                 "only failed or interrupted launches can be retried"
             );
+            start_queued(&dir)?;
+            println!("{}", status(&dir)?);
+        }
+        TaskCommand::Resume { id } => {
+            let dir = task_dir(id)?;
+            let _control = control_lock(&dir)?;
+            ensure!(!worker_active(&dir)?, "task worker is active");
             ensure!(
-                dir.join("pending.json").is_file(),
-                "turn already began; do not replay it—inspect the checkpoint instead"
+                !matches!(
+                    status(&dir)?["status"].as_str(),
+                    Some("interrupted" | "starting")
+                ),
+                "task is starting or interrupted; inspect its status before resuming"
             );
-            let _ = fs::remove_file(dir.join("cancel"));
-            write_json(
-                &dir.join("state.json"),
-                &json!({"status":"starting", "started_at_ms":chrono::Utc::now().timestamp_millis()}),
-            )?;
-            launch(&dir)?;
+            start_queued(&dir)?;
             println!("{}", status(&dir)?);
         }
         TaskCommand::Cancel { id } => {
             let dir = task_dir(id)?;
             let _control = control_lock(&dir)?;
             ensure!(
-                worker_active(&dir)? || dir.join("pending.json").exists(),
+                worker_active(&dir)? || inbox(&dir)?.iter().any(|i| i.phase == "queued"),
                 "task has no active turn"
             );
             private_file(&dir.join("cancel"))?;
+            if !worker_active(&dir)? && status(&dir)?["status"] != "starting" {
+                write_json(&dir.join("state.json"), &json!({"status":"cancelled"}))?;
+            }
             println!("{}", json!({"id":id,"status":"cancel_requested"}));
         }
         TaskCommand::Attach { id, follow } => {
@@ -440,18 +586,39 @@ pub async fn handle(args: &cli::Cli, command: &TaskCommand) -> Result<()> {
             // Brief status probes must not make a newly spawned worker fail.
             // A duplicate worker waits, then exits if the first consumed the turn.
             FileExt::lock_exclusive(&lock)?;
-            if !dir.join("pending.json").is_file() {
-                return Ok(());
-            }
-            if work(&dir).await.is_err() {
-                // Do not persist configuration errors or provider response bodies.
-                write_json(&dir.join("state.json"), &json!({"status":"failed"}))?;
-                let _ = event(
-                    &dir,
-                    "failed",
-                    json!({"message":"worker failed; inspect configuration or checkpoint"}),
-                );
-                anyhow::bail!("background worker failed; inspect task state and checkpoint");
+            loop {
+                {
+                    let _control = control_lock(&dir)?;
+                    if !inbox(&dir)?.iter().any(|i| i.phase == "queued") {
+                        drop(lock);
+                        return Ok(());
+                    }
+                }
+                if work(&dir).await.is_err() {
+                    let _control = control_lock(&dir)?;
+                    write_json(&dir.join("state.json"), &json!({"status":"failed"}))?;
+                    let _ = event(
+                        &dir,
+                        "failed",
+                        json!({"message":"worker failed; inspect configuration or checkpoint"}),
+                    );
+                    anyhow::bail!("background worker failed; inspect task state and checkpoint");
+                }
+                // Release worker ownership while still holding control, so send cannot
+                // enqueue between the final empty check and worker shutdown.
+                let _control = control_lock(&dir)?;
+                let state: Value = serde_json::from_reader(File::open(dir.join("state.json"))?)?;
+                let handoff: Value = serde_json::from_reader(File::open(dir.join("report.json"))?)?;
+                if state["status"] != "idle"
+                    || matches!(
+                        handoff["state"].as_str(),
+                        Some("needs_input" | "ready_for_review" | "failed")
+                    )
+                    || !inbox(&dir)?.iter().any(|i| i.phase == "queued")
+                {
+                    drop(lock);
+                    return Ok(());
+                }
             }
         }
     }
@@ -485,27 +652,34 @@ async fn work(dir: &Path) -> Result<()> {
     }
     let plugins = Arc::new(plugins);
     let mut engine = crate::build_engine(&config, &resolved, plugins.clone()).await?;
-    engine.set_system_prompt(
-        crate::context::build_system_prompt_for_model(
-            &resolved.binding.model,
-            Some(&plugins),
-            &config::HookTrigger::OnContextBuild,
-            resolved.binding.provider_kind == config::ProviderKind::Anthropic,
-            config.is_project_trusted(),
-        )
-        .await?,
-    );
+    let mut system_prompt = crate::context::build_system_prompt_for_model(
+        &resolved.binding.model,
+        Some(&plugins),
+        &config::HookTrigger::OnContextBuild,
+        resolved.binding.provider_kind == config::ProviderKind::Anthropic,
+        config.is_project_trusted(),
+    )
+    .await?;
+    if task.structured_report {
+        system_prompt.push_str(REPORT_INSTRUCTIONS);
+    }
+    engine.set_system_prompt(system_prompt);
     let (_, messages) = session::load_session(&task.session)?;
     engine.set_messages(messages);
     engine.set_archive(session::load_archive(&task.session)?);
     engine.set_transcript_checkpoint(dir.join("checkpoint.json"));
-    let pending: Value = serde_json::from_reader(File::open(dir.join("pending.json"))?)?;
-    let prompt = pending["prompt"]
-        .as_str()
-        .context("missing pending prompt")?;
-    fs::remove_file(dir.join("pending.json"))?;
-    write_json(&dir.join("state.json"), &json!({"status":"running"}))?;
-    event(dir, "turn_started", json!({"model":engine.model()}))?;
+    let input = {
+        let _control = control_lock(dir)?;
+        let input = claim_input(dir)?;
+        write_json(&dir.join("state.json"), &json!({"status":"running"}))?;
+        input
+    };
+    let prompt = &input.prompt;
+    event(
+        dir,
+        "turn_started",
+        json!({"model":engine.model(),"input_id":input.id}),
+    )?;
     let cancel = crate::shutdown::one_shot_cancellation_token()?;
     if dir.join("cancel").exists() {
         cancel.cancel();
@@ -554,7 +728,19 @@ async fn work(dir: &Path) -> Result<()> {
         value["result"] = json!(text);
         value["outcome"]["result"] = value["result"].clone();
     }
+    let handoff = if completed {
+        report(
+            value["result"].as_str().unwrap_or_default(),
+            task.structured_report,
+        )
+    } else {
+        json!({"state":"failed", "summary":"Turn failed or was cancelled; inspect the original outcome", "advisory":true})
+    };
+    value["task_report"] = handoff.clone();
+    value["input_id"] = json!(input.id);
+    write_json(&dir.join(format!("result-{}.json", input.id)), &value)?;
     write_json(&dir.join("result.json"), &value)?;
+    write_json(&dir.join("report.json"), &handoff)?;
     event(
         dir,
         if completed {
@@ -564,6 +750,8 @@ async fn work(dir: &Path) -> Result<()> {
         },
         json!({"usage":engine.cost.usage_summary()}),
     )?;
+    let _control = control_lock(dir)?;
+    finish_input(dir, &input.id)?;
     write_json(
         &dir.join("state.json"),
         &json!({"status":if completed {"idle"} else if cancel.is_cancelled() {"cancelled"} else {"failed"}}),
@@ -621,6 +809,78 @@ fn final_text(dir: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbox_claims_are_durable_and_never_automatically_replayed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let inputs = vec![
+            Input {
+                id: "a".into(),
+                prompt: "first".into(),
+                phase: "queued".into(),
+            },
+            Input {
+                id: "b".into(),
+                prompt: "second".into(),
+                phase: "queued".into(),
+            },
+        ];
+        save_inbox(dir.path(), &inputs)?;
+        assert_eq!(claim_input(dir.path())?.id, "a");
+        // Simulate a new worker opening persisted state after a crash.
+        assert!(claim_input(dir.path()).is_err());
+        assert_eq!(inbox(dir.path())?[1].phase, "queued");
+        finish_input(dir.path(), "a")?;
+        assert_eq!(claim_input(dir.path())?.id, "b");
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_pending_migration_cannot_duplicate_an_input() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write_json(
+            &dir.path().join("pending.json"),
+            &json!({"prompt":"legacy"}),
+        )?;
+        assert_eq!(claim_input(dir.path())?.prompt, "legacy");
+        // A crash after committing the inbox but before deleting pending.json
+        // must still treat inbox.json as authoritative.
+        write_json(
+            &dir.path().join("pending.json"),
+            &json!({"prompt":"legacy"}),
+        )?;
+        assert!(claim_input(dir.path()).is_err());
+        assert_eq!(inbox(dir.path())?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn reports_require_valid_states_and_concrete_questions() {
+        let valid = report(
+            r#"{"state":"needs_input","summary":"Need a target","question":"Which cluster?"}"#,
+            true,
+        );
+        assert_eq!(valid["question"], "Which cluster?");
+        for text in [
+            "done",
+            r#"{"state":"success","summary":"done"}"#,
+            r#"{"state":"needs_input","summary":"blocked"}"#,
+            r#"{"state":"ready_for_review","summary":""}"#,
+        ] {
+            assert_eq!(report(text, true)["invalid_report"], true);
+        }
+        assert_eq!(
+            report("arbitrary ordinary output", false)["state"],
+            "waiting"
+        );
+        assert_eq!(
+            report(
+                r#"{"state":"ready_for_review","summary":"Tests passed"}"#,
+                true
+            )["advisory"],
+            true
+        );
+    }
 
     #[test]
     fn lock_tracks_liveness_without_pid_reuse() -> Result<()> {
