@@ -90,19 +90,19 @@ mod tests {
         let expected = dir.path().join(".claux/tools");
         assert!(McpManageTool::new(&config)
             .description()
-            .contains(expected.to_str().unwrap()));
+            .contains(&serde_json::to_string(&expected.to_string_lossy()).unwrap()));
         assert!(
             !expected.exists(),
             "configuring the default must not write files"
         );
         config.generated_mcp_dir = "custom-tools".into();
-        assert!(McpManageTool::new(&config)
-            .description()
-            .contains(dir.path().join("custom-tools").to_str().unwrap()));
+        assert!(McpManageTool::new(&config).description().contains(
+            &serde_json::to_string(&dir.path().join("custom-tools").to_string_lossy()).unwrap()
+        ));
         config.generated_mcp_dir = dir.path().join("absolute-tools");
-        assert!(McpManageTool::new(&config)
-            .description()
-            .contains(config.generated_mcp_dir.to_str().unwrap()));
+        assert!(McpManageTool::new(&config).description().contains(
+            &serde_json::to_string(&config.generated_mcp_dir.to_string_lossy()).unwrap()
+        ));
     }
 
     #[test]
