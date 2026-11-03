@@ -208,6 +208,12 @@ context_window = 32000
         assert_eq!(state["stage"], "ready_for_review");
         assert_eq!(state["queued_inputs"], 1);
         assert!(requests_rx.try_recv().is_err());
+        // A stale duplicate worker must not consume a held handoff.
+        cli(home.path(), &["task", "worker", id]);
+        let state = json_output(cli(home.path(), &["task", "status", id]));
+        assert_eq!(state["stage"], "ready_for_review");
+        assert_eq!(state["queued_inputs"], 1);
+        assert!(requests_rx.try_recv().is_err());
         assert!(first_request
             .to_string()
             .contains("Managed task report contract"));
@@ -295,6 +301,43 @@ context_window = 32000
         assert_eq!(retried["result"], "follow-up answer");
     }
     requests_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Simulate a worker crash after claiming an input and before the next one.
+    let inbox_path = artifact_dir.join("inbox.json");
+    let mut inbox: Value = serde_json::from_slice(&fs::read(&inbox_path).unwrap()).unwrap();
+    inbox.as_array_mut().unwrap().extend([
+        json!({"id":"interrupted-fixture","prompt":"may have run","phase":"claimed"}),
+        json!({"id":"queued-fixture","prompt":"continue after recovery","phase":"queued"}),
+    ]);
+    fs::write(&inbox_path, serde_json::to_vec(&inbox).unwrap()).unwrap();
+    fs::write(artifact_dir.join("state.json"), br#"{"status":"running"}"#).unwrap();
+    let state = json_output(cli(home.path(), &["task", "status", id]));
+    assert_eq!(state["status"], "interrupted");
+    let recovered = json_output(cli(
+        home.path(),
+        &["task", "recover", id, "--abandon", "interrupted-fixture"],
+    ));
+    assert_eq!(recovered["status"], "cancelled");
+    assert_eq!(recovered["queued_inputs"], 1);
+    assert!(requests_rx.try_recv().is_err());
+    cli(home.path(), &["task", "resume", id]);
+    let result = json_output(cli(home.path(), &["task", "wait", id, "--timeout", "30"]));
+    assert_eq!(result["input_id"], "queued-fixture");
+    let request = requests_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(request.to_string().contains("continue after recovery"));
+    assert!(!request.to_string().contains("may have run"));
+    let mut inbox: Value = serde_json::from_slice(&fs::read(&inbox_path).unwrap()).unwrap();
+    inbox
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"cancelled-fixture","prompt":"do not dispatch","phase":"queued"}));
+    fs::write(&inbox_path, serde_json::to_vec(&inbox).unwrap()).unwrap();
+    fs::write(artifact_dir.join("state.json"), br#"{"status":"starting"}"#).unwrap();
+    fs::write(artifact_dir.join("cancel"), b"").unwrap();
+    cli(home.path(), &["task", "worker", id]);
+    let state = json_output(cli(home.path(), &["task", "status", id]));
+    assert_eq!(state["status"], "cancelled");
+    assert_eq!(state["queued_inputs"], 1);
+    assert!(requests_rx.try_recv().is_err());
     stop_tx.send(()).unwrap();
     server.join().unwrap();
 }

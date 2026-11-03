@@ -422,8 +422,16 @@ fn worker_slot(root: &Path) -> Result<File> {
 
 fn control_lock(dir: &Path) -> Result<File> {
     let file = private_file(&dir.join("control.lock"))?;
-    FileExt::try_lock_exclusive(&file).context("another task command is in progress")?;
-    Ok(file)
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => return Ok(file),
+            Err(error) if lock_is_contended(&error) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error).context("could not acquire task control lock"),
+        }
+    }
 }
 
 pub async fn handle(args: &cli::Cli, command: &TaskCommand) -> Result<()> {
@@ -632,9 +640,21 @@ pub async fn handle(args: &cli::Cli, command: &TaskCommand) -> Result<()> {
             // Brief status probes must not make a newly spawned worker fail.
             // A duplicate worker waits, then exits if the first consumed the turn.
             FileExt::lock_exclusive(&lock)?;
+            {
+                let _control = control_lock(&dir)?;
+                let state: Value = serde_json::from_reader(File::open(dir.join("state.json"))?)?;
+                if state["status"] != "starting" {
+                    return Ok(());
+                }
+            }
             loop {
                 {
                     let _control = control_lock(&dir)?;
+                    if dir.join("cancel").exists() {
+                        write_json(&dir.join("state.json"), &json!({"status":"cancelled"}))?;
+                        drop(lock);
+                        return Ok(());
+                    }
                     if !inbox(&dir)?.iter().any(|i| i.phase == "queued") {
                         drop(lock);
                         return Ok(());
@@ -654,13 +674,15 @@ pub async fn handle(args: &cli::Cli, command: &TaskCommand) -> Result<()> {
                 // enqueue between the final empty check and worker shutdown.
                 let _control = control_lock(&dir)?;
                 let state: Value = serde_json::from_reader(File::open(dir.join("state.json"))?)?;
+                if state["status"] != "idle" {
+                    drop(lock);
+                    return Ok(());
+                }
                 let handoff: Value = serde_json::from_reader(File::open(dir.join("report.json"))?)?;
-                if state["status"] != "idle"
-                    || matches!(
-                        handoff["state"].as_str(),
-                        Some("needs_input" | "ready_for_review" | "failed")
-                    )
-                    || !inbox(&dir)?.iter().any(|i| i.phase == "queued")
+                if matches!(
+                    handoff["state"].as_str(),
+                    Some("needs_input" | "ready_for_review" | "failed")
+                ) || !inbox(&dir)?.iter().any(|i| i.phase == "queued")
                 {
                     drop(lock);
                     return Ok(());
@@ -716,6 +738,10 @@ async fn work(dir: &Path) -> Result<()> {
     engine.set_transcript_checkpoint(dir.join("checkpoint.json"));
     let input = {
         let _control = control_lock(dir)?;
+        if dir.join("cancel").exists() {
+            write_json(&dir.join("state.json"), &json!({"status":"cancelled"}))?;
+            return Ok(());
+        }
         let input = claim_input(dir)?;
         write_json(&dir.join("state.json"), &json!({"status":"running"}))?;
         input
@@ -797,11 +823,13 @@ async fn work(dir: &Path) -> Result<()> {
         json!({"usage":engine.cost.usage_summary()}),
     )?;
     let _control = control_lock(dir)?;
-    finish_input(dir, &input.id)?;
     write_json(
         &dir.join("state.json"),
         &json!({"status":if completed {"idle"} else if cancel.is_cancelled() {"cancelled"} else {"failed"}}),
     )?;
+    // A crash between these writes leaves a claimed input, which recovery can
+    // resolve explicitly, rather than a running state with no claimed input.
+    finish_input(dir, &input.id)?;
     Ok(())
 }
 
@@ -855,6 +883,23 @@ fn final_text(dir: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_lock_waits_for_a_concurrent_command() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let lock = control_lock(dir.path())?;
+        let path = dir.path().to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let result = control_lock(&path);
+            tx.send(result.is_ok()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(lock);
+        assert!(rx.recv_timeout(Duration::from_secs(2))?);
+        waiter.join().unwrap();
+        Ok(())
+    }
 
     #[test]
     fn inbox_claims_are_durable_and_never_automatically_replayed() -> Result<()> {

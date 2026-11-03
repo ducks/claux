@@ -36,7 +36,8 @@ queued work; `send` to an inactive, non-interrupted task adds a new message and
 releases its queue too. Existing queued messages retain FIFO order, including
 messages queued before a question or cancellation. Inspect them before resuming.
 Cancellation retains queued inputs; it does not delete them. There is no queue
-editing command in this spike.
+editing command in this spike. A cancellation received before the next input is
+claimed stops the worker without consuming that input.
 
 ## Reports and transport outcomes
 
