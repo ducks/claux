@@ -199,6 +199,25 @@ impl CommandSandbox {
         .expect("test working directory must resolve")
     }
 
+    /// Launch a program with literal arguments, using the sandbox helper only
+    /// when workspace containment is active. Direct execution on unrestricted
+    /// platforms avoids depending on a POSIX shell (notably on Windows).
+    pub fn program(&self, program: &str, args: &[String]) -> Result<Command> {
+        if self.uses_workspace_write() {
+            let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
+            let invocation = std::iter::once(program)
+                .chain(args.iter().map(String::as_str))
+                .map(quote)
+                .collect::<Vec<_>>()
+                .join(" ");
+            return self.command(&format!("exec {invocation}"));
+        }
+        let mut command = Command::new(program);
+        sanitize_command_environment(&mut command);
+        command.args(args);
+        Ok(command)
+    }
+
     pub fn command(&self, shell_command: &str) -> Result<Command> {
         if self.uses_workspace_write() {
             let executable =
@@ -517,6 +536,18 @@ fn push_canonical_if_present(roots: &mut Vec<PathBuf>, path: &Path) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unrestricted_program_uses_native_executable_and_literal_arguments() {
+        let sandbox = super::CommandSandbox::unrestricted_for_tests();
+        let args = vec!["a '$()".to_string(), "space path".to_string()];
+        let command = sandbox.program("fixture-program", &args).unwrap();
+        let command = command.as_std();
+        assert_eq!(command.get_program(), "fixture-program");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>()
+        );
+    }
     use super::*;
 
     #[test]

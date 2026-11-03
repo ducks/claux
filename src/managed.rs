@@ -123,11 +123,18 @@ fn read_task(dir: &Path) -> Result<Task> {
     Ok(serde_json::from_reader(File::open(dir.join("task.json"))?)?)
 }
 
+fn lock_is_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error
+            .raw_os_error()
+            .is_some_and(|code| Some(code) == fs2::lock_contended_error().raw_os_error())
+}
+
 fn worker_active(dir: &Path) -> Result<bool> {
     let file = private_file(&dir.join("worker.lock"))?;
     match FileExt::try_lock_shared(&file) {
         Ok(()) => Ok(false), // close releases the probe lock
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+        Err(e) if lock_is_contended(&e) => Ok(true),
         Err(e) => Err(e.into()),
     }
 }
@@ -242,7 +249,7 @@ fn worker_slot(root: &Path) -> Result<File> {
         let lock = private_file(&slots.join(format!("{index}.lock")))?;
         match FileExt::try_lock_exclusive(&lock) {
             Ok(()) => return Ok(lock),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) if lock_is_contended(&error) => continue,
             Err(error) => return Err(error.into()),
         }
     }
@@ -621,6 +628,17 @@ fn final_text(dir: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_platform_lock_contention_without_masking_other_errors() {
+        assert!(lock_is_contended(&fs2::lock_contended_error()));
+        assert!(!lock_is_contended(&std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied",
+        )));
+        #[cfg(windows)]
+        assert!(lock_is_contended(&std::io::Error::from_raw_os_error(33)));
+    }
 
     #[test]
     fn lock_tracks_liveness_without_pid_reuse() -> Result<()> {
