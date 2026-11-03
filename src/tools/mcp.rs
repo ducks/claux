@@ -388,15 +388,7 @@ async fn connect_server_inner(
         "MCP timeout_seconds must be between 1 and 3600"
     );
     let mut command = if let Some(sandbox) = sandbox {
-        // POSIX single quoting keeps every configured argument literal, including
-        // dollar signs, newlines, and quotes. CommandSandbox already uses sh.
-        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
-        let invocation = std::iter::once(&config.command)
-            .chain(config.args.iter())
-            .map(|arg| quote(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        sandbox.command(&format!("exec {invocation}"))?
+        sandbox.program(&config.command, &config.args)?
     } else {
         let mut command = Command::new(&config.command);
         sanitize_command_environment(&mut command);
