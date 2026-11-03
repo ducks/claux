@@ -6,7 +6,7 @@ use rmcp::{
         RawContent, ServerResult,
     },
     service::{PeerRequestOptions, RunningService},
-    transport::{ConfigureCommandExt, TokioChildProcess},
+    transport::TokioChildProcess,
     RoleClient, ServiceExt,
 };
 use serde_json::Value;
@@ -136,6 +136,10 @@ impl Tool for McpTool {
 
     fn input_schema(&self) -> Value {
         self.tool_schema.clone()
+    }
+
+    fn mcp_server(&self) -> Option<&str> {
+        Some(&self.server_name)
     }
 
     fn is_read_only(&self) -> bool {
@@ -268,6 +272,18 @@ pub async fn connect_mcp_servers(configs: &[McpServerConfig]) -> Vec<Box<dyn Too
     connect_mcp_servers_with_timeout(configs, MCP_CONNECT_TIMEOUT).await
 }
 
+/// Project-local definitions are writable by the model, so they must retain
+/// the same containment and permissions across session restarts.
+pub async fn connect_project_mcp_servers(
+    configs: &[McpServerConfig],
+    sandbox: &crate::command_sandbox::CommandSandbox,
+) -> Vec<Box<dyn Tool>> {
+    connect_mcp_servers_with(configs, MCP_CONNECT_TIMEOUT, |config| async move {
+        connect_model_server(&config, sandbox).await
+    })
+    .await
+}
+
 async fn connect_mcp_servers_with_timeout(
     configs: &[McpServerConfig],
     timeout: Duration,
@@ -333,25 +349,63 @@ fn hint_read_only(tool: &rmcp::model::Tool) -> bool {
         .unwrap_or(false)
 }
 
+/// Fail visibly and within a bound for an interactive owner request.
+/// Do not forward subprocess error bodies into the conversation/UI.
+pub async fn connect_live_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> {
+    tokio::time::timeout(MCP_CONNECT_TIMEOUT, connect_server(config))
+        .await
+        .map_err(|_| anyhow::anyhow!("MCP connection timed out after 15 seconds"))?
+        .map_err(|_| {
+            anyhow::anyhow!("MCP connection or tool discovery failed; check server configuration")
+        })
+}
+
 async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> {
+    connect_server_inner(config, None).await
+}
+
+/// Model-authored servers use the same containment as Bash, without fallback.
+pub async fn connect_model_server(
+    config: &McpServerConfig,
+    sandbox: &crate::command_sandbox::CommandSandbox,
+) -> Result<Vec<Box<dyn Tool>>> {
+    anyhow::ensure!(config.env.is_empty(),
+        "Model-loaded MCP servers must omit env; environment injection into the sandbox launcher is not supported");
+    tokio::time::timeout(MCP_CONNECT_TIMEOUT, connect_server_inner(config, Some(sandbox)))
+        .await
+        .map_err(|_| anyhow::anyhow!("MCP connection timed out after 15 seconds"))?
+        .map_err(|_| anyhow::anyhow!("MCP connection or tool discovery failed; check server configuration and sandbox policy"))
+}
+
+async fn connect_server_inner(
+    config: &McpServerConfig,
+    sandbox: Option<&crate::command_sandbox::CommandSandbox>,
+) -> Result<Vec<Box<dyn Tool>>> {
     anyhow::ensure!(valid_name(&config.name), "Invalid MCP server name");
     let timeout = Duration::from_secs(config.timeout_seconds.unwrap_or(120));
     anyhow::ensure!(
         !timeout.is_zero() && timeout <= Duration::from_secs(3600),
         "MCP timeout_seconds must be between 1 and 3600"
     );
-    let command = config.command.clone();
-    let args = config.args.clone();
-    let env = config.env.clone();
-
-    let transport = TokioChildProcess::new(Command::new(&command).configure(|cmd| {
-        sanitize_command_environment(cmd);
-        cmd.args(&args);
-        for (k, v) in &env {
-            cmd.env(k, v);
-        }
-    }))
-    .map_err(|e| anyhow::anyhow!("Failed to start MCP server '{}': {e}", config.name))?;
+    let mut command = if let Some(sandbox) = sandbox {
+        // POSIX single quoting keeps every configured argument literal, including
+        // dollar signs, newlines, and quotes. CommandSandbox already uses sh.
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
+        let invocation = std::iter::once(&config.command)
+            .chain(config.args.iter())
+            .map(|arg| quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        sandbox.command(&format!("exec {invocation}"))?
+    } else {
+        let mut command = Command::new(&config.command);
+        sanitize_command_environment(&mut command);
+        command.args(&config.args);
+        command
+    };
+    command.envs(&config.env);
+    let transport = TokioChildProcess::new(command)
+        .map_err(|e| anyhow::anyhow!("Failed to start MCP server '{}': {e}", config.name))?;
 
     let mut client_info = ClientInfo::default();
     client_info.client_info = Implementation::new("claux", env!("CARGO_PKG_VERSION"));
@@ -391,7 +445,7 @@ async fn connect_server(config: &McpServerConfig) -> Result<Vec<Box<dyn Tool>>> 
             let schema = Value::Object((*t.input_schema).clone());
             validate_schema(&schema)?;
 
-            let read_only = hint_read_only(&t);
+            let read_only = sandbox.is_none() && hint_read_only(&t);
             let mut tool = McpTool::new(
                 config.name.clone(),
                 exposed_name,

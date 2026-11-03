@@ -767,11 +767,14 @@ warning.
 | `plan` | auto | denied | denied |
 
 In `accept-edits` mode, Agent, MCP, and other non-read-only tools still require
-explicit approval. An MCP tool whose server marks it `readOnlyHint: true` is
-treated as read-only and auto-allowed in every mode except `plan`; a server
-you chose to run is trusted to describe its own tools, and the hint changes
-only prompting, never containment. Sub-agents inherit the parent permission mode; because they
-are non-interactive, operations that would require another prompt are denied.
+explicit approval. Globally configured MCP tools marked `readOnlyHint: true` are
+treated as read-only and auto-allowed in every mode except `plan`. Project-local
+and model-loaded MCP tools are always treated as mutating, regardless of the
+server's hint; project-local servers also use the Bash filesystem policy at
+startup and on live load, and must omit `env`. Move a server that needs explicit
+environment variables into owner-controlled global configuration. Permission
+hints affect prompting, not containment. Sub-agents inherit the parent permission
+mode; because they are non-interactive, operations requiring a prompt are denied.
 
 `auto` mode also runs sandboxed development commands, including compound local
 workflows, without prompting. It allows sub-agents, which inherit the same

@@ -152,6 +152,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         tui_only: true,
     },
     CommandSpec {
+        name: "/mcp",
+        aliases: &[],
+        summary: "Manage live MCP connections (owner only)",
+        arg: Some("list | load NAME | unload NAME"),
+        tui_only: false,
+    },
+    CommandSpec {
         name: "/jobs",
         aliases: &[],
         summary: "Background jobs: inspect output or cancel",
@@ -204,6 +211,7 @@ pub enum CommandResult {
 }
 
 pub enum AsyncCommand {
+    Mcp(String),
     Jobs(String),
     Compact,
     Auto,
@@ -245,6 +253,7 @@ pub fn parse_command(input: &str, surface: Surface) -> Option<CommandResult> {
             "/home is only available in the full-screen TUI (claux --tui).".to_string(),
         )),
         "/help" => Some(CommandResult::Text(help_text(surface))),
+        "/mcp" => Some(CommandResult::Async(AsyncCommand::Mcp(args.to_string()))),
         "/jobs" => Some(CommandResult::Async(AsyncCommand::Jobs(args.to_string()))),
         "/exit" => Some(CommandResult::Exit),
         "/clear" => Some(CommandResult::Text("\x1b[2J\x1b[H".to_string())),
@@ -300,6 +309,7 @@ pub fn parse_command(input: &str, surface: Surface) -> Option<CommandResult> {
 /// Execute an async command that needs engine access.
 pub async fn execute_async(cmd: AsyncCommand, engine: &mut Engine) -> Result<String> {
     match cmd {
+        AsyncCommand::Mcp(args) => engine.manage_mcp(&args).await,
         AsyncCommand::Compact => engine.compact().await,
         AsyncCommand::Auto => {
             let (enabled, mode) = engine.toggle_auto_mode();
@@ -472,6 +482,19 @@ fn help_text(surface: Surface) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_mcp_dispatch_is_shared_by_both_surfaces() {
+        for surface in [Surface::Tui, Surface::Repl] {
+            let Some(CommandResult::Async(AsyncCommand::Mcp(args))) =
+                parse_command("/mcp load local-tool", surface)
+            else {
+                panic!("expected MCP dispatch");
+            };
+            assert_eq!(args, "load local-tool");
+            assert!(help_text(surface).contains("/mcp"));
+        }
+    }
 
     #[test]
     fn non_command_returns_none() {

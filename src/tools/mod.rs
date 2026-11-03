@@ -5,6 +5,7 @@ mod glob;
 mod grep;
 pub(crate) mod jobs;
 pub(crate) mod mcp;
+mod mcp_manage;
 pub(crate) mod read;
 mod search_filter;
 pub(crate) mod todo;
@@ -54,6 +55,11 @@ pub trait Tool: Send + Sync {
     fn input_schema(&self) -> Value;
     fn is_read_only(&self) -> bool;
 
+    /// Present only for tools owned by an MCP connection.
+    fn mcp_server(&self) -> Option<&str> {
+        None
+    }
+
     /// Clear state that must not carry into another conversation.
     fn reset_session(&self) {}
 
@@ -82,6 +88,11 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
     pub jobs: Arc<jobs::JobManager>,
+    command_sandbox: Arc<CommandSandbox>,
+    live_mcp: Option<(
+        Vec<crate::config::McpServerConfig>,
+        crate::config::ProjectTrust,
+    )>,
 }
 
 impl ToolRegistry {
@@ -125,11 +136,13 @@ impl ToolRegistry {
                     permission_policy,
                     trusted,
                     sandbox_policy,
-                    command_sandbox,
+                    command_sandbox.clone(),
                 )),
                 Box::new(todo::TodoWriteTool::new(todo_state)),
             ],
             jobs,
+            command_sandbox,
+            live_mcp: None,
         }
     }
 
@@ -147,12 +160,17 @@ impl ToolRegistry {
                 Box::new(edit::EditTool::new(sandbox_policy.clone())),
                 Box::new(glob::GlobTool::new(sandbox_policy.clone())),
                 Box::new(grep::GrepTool::new(sandbox_policy)),
-                Box::new(bash::BashTool::with_jobs(command_sandbox, jobs.clone())),
+                Box::new(bash::BashTool::with_jobs(
+                    command_sandbox.clone(),
+                    jobs.clone(),
+                )),
                 Box::new(jobs::JobsTool(jobs.clone())),
                 Box::new(web_fetch::WebFetchTool::new()),
                 Box::new(todo::TodoWriteTool::new(todo_state)),
             ],
             jobs,
+            command_sandbox,
+            live_mcp: None,
         }
     }
 
@@ -183,6 +201,119 @@ impl ToolRegistry {
         }
         self.tools.extend(tools);
         Ok(())
+    }
+
+    pub fn configure_live_mcp(&mut self, config: &crate::config::Config) {
+        self.tools.retain(|tool| tool.name() != "McpManage");
+        self.tools
+            .push(Box::new(mcp_manage::McpManageTool::new(config)));
+        self.live_mcp = config
+            .project_trust
+            .clone()
+            .map(|trust| (config.mcp_servers.clone(), trust));
+    }
+
+    pub fn has_mcp_management(&self) -> bool {
+        self.tools.iter().any(|tool| tool.name() == "McpManage")
+    }
+
+    pub async fn manage_mcp_from_model(&mut self, input: Value) -> Result<(String, bool)> {
+        let args = mcp_manage::parse(input)?;
+        self.manage_mcp_inner(&args, true).await
+    }
+
+    fn mcp_names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self
+            .tools
+            .iter()
+            .filter_map(|t| t.mcp_server().map(str::to_owned))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn live_mcp_config(&self, name: &str) -> Result<(crate::config::McpServerConfig, bool)> {
+        let (global, trust) = self
+            .live_mcp
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("MCP configuration is unavailable"))?;
+        let mut configs: Vec<_> = global
+            .iter()
+            .cloned()
+            .map(|config| (config, false))
+            .collect();
+        configs.extend(
+            crate::config::load_mcp_json(trust)
+                .into_iter()
+                .map(|config| (config, true)),
+        );
+        let mut matches = configs
+            .into_iter()
+            .filter(|(config, _)| config.name == name);
+        let config = matches.next().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No configured MCP server by that name. Project .mcp.json requires project trust."
+            )
+        })?;
+        anyhow::ensure!(
+            matches.next().is_none(),
+            "Duplicate MCP server names must be resolved"
+        );
+        Ok(config)
+    }
+
+    /// Owner management, invoked between turns by the slash-command UI.
+    /// Global config is the session snapshot; trusted project config is read fresh.
+    pub async fn manage_mcp(&mut self, args: &str) -> Result<(String, bool)> {
+        self.manage_mcp_inner(args, false).await
+    }
+
+    async fn manage_mcp_inner(&mut self, args: &str, from_model: bool) -> Result<(String, bool)> {
+        let words: Vec<_> = args.split_whitespace().collect();
+        match words.as_slice() {
+            [] | ["list"] => {
+                let names = self.mcp_names();
+                Ok((
+                    if names.is_empty() {
+                        "No MCP servers with tools connected.".into()
+                    } else {
+                        format!("Connected MCP servers: {}", names.join(", "))
+                    },
+                    false,
+                ))
+            }
+            ["load", name] => {
+                anyhow::ensure!(
+                    !self.mcp_names().iter().any(|n| n == name),
+                    "MCP server already connected; unload it first"
+                );
+                anyhow::ensure!(
+                    self.mcp_names().len() < 16,
+                    "Live MCP server limit (16) reached"
+                );
+                let (config, project_local) = self.live_mcp_config(name)?;
+                let tools = if from_model || project_local {
+                    mcp::connect_model_server(&config, &self.command_sandbox).await?
+                } else {
+                    mcp::connect_live_server(&config).await?
+                };
+                anyhow::ensure!(!tools.is_empty(), "MCP server advertised no tools");
+                let count = tools.len();
+                self.add_tools(tools)?;
+                Ok((format!("Loaded MCP server {name} ({count} tools)."), true))
+            }
+            ["unload", name] => {
+                let before = self.tools.len();
+                self.tools.retain(|tool| tool.mcp_server() != Some(*name));
+                anyhow::ensure!(self.tools.len() < before, "MCP server is not connected");
+                Ok((
+                    format!("Unloaded MCP server {name}; connection shutdown requested."),
+                    true,
+                ))
+            }
+            _ => anyhow::bail!("Usage: /mcp [list | load NAME | unload NAME]"),
+        }
     }
 
     /// Clear conversation-scoped state held by registered tools.
@@ -268,6 +399,201 @@ impl ToolRegistry {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    struct OwnedMcpTool {
+        name: String,
+        server: String,
+    }
+
+    #[async_trait]
+    impl Tool for OwnedMcpTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "test"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn is_read_only(&self) -> bool {
+            true
+        }
+        fn mcp_server(&self) -> Option<&str> {
+            Some(&self.server)
+        }
+        async fn execute(&self, _: Value, _: CancellationToken) -> Result<ToolOutput> {
+            Ok(ToolOutput {
+                content: "ok".into(),
+                is_error: false,
+                sub_agent: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn live_mcp_unload_uses_ownership_and_preserves_other_tools() {
+        let mut reg = ToolRegistry::without_agent_for_tests();
+        for server in ["a", "a__b"] {
+            reg.add_tools(vec![Box::new(OwnedMcpTool {
+                name: format!("mcp__{server}__echo"),
+                server: server.into(),
+            })])
+            .unwrap();
+        }
+        assert_eq!(reg.mcp_names(), vec!["a", "a__b"]);
+        assert!(!reg.manage_mcp("list").await.unwrap().1);
+        assert!(reg.manage_mcp("load a").await.is_err());
+        assert!(reg.manage_mcp("unload a").await.unwrap().1);
+        assert_eq!(reg.mcp_names(), vec!["a__b"]);
+        assert!(reg.definitions().iter().any(|d| d.name == "Read"));
+        assert!(reg.manage_mcp("unload a").await.is_err());
+        assert!(reg.manage_mcp("load missing extra").await.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires python3 on PATH; manual stdio MCP smoke test"]
+    async fn live_mcp_stdio_round_trip_and_reload() {
+        use crate::config::{Config, McpServerConfig, ProjectTrust};
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.project_trust = Some(ProjectTrust::for_test(dir.path().to_path_buf(), false));
+        config.mcp_servers.push(McpServerConfig {
+            name: "local-slug".into(),
+            command: "python3".into(),
+            args: vec![format!(
+                "{}/examples/live-mcp/server.py",
+                env!("CARGO_MANIFEST_DIR")
+            )],
+            timeout_seconds: Some(5),
+            env: Default::default(),
+        });
+        let mut reg = ToolRegistry::without_agent_for_tests();
+        reg.configure_live_mcp(&config);
+        for _ in 0..2 {
+            assert!(reg.manage_mcp("load local-slug").await.unwrap().1);
+            let output = reg
+                .execute(
+                    "mcp__local-slug__slugify",
+                    json!({"text": "Hello Live Tools"}),
+                    CancellationToken::new(),
+                )
+                .await;
+            assert!(!output.is_error, "{}", output.content);
+            assert_eq!(output.content, "hello-live-tools");
+            reg.manage_mcp("unload local-slug").await.unwrap();
+            assert!(
+                reg.execute(
+                    "mcp__local-slug__slugify",
+                    json!({}),
+                    CancellationToken::new()
+                )
+                .await
+                .is_error
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_model_mcp_load_is_transactional_and_rejects_launcher_env() {
+        let mut reg = ToolRegistry::without_agent_for_tests();
+        let config = crate::config::Config {
+            project_trust: Some(crate::config::ProjectTrust::for_test(
+                std::env::current_dir().unwrap(),
+                false,
+            )),
+            mcp_servers: vec![crate::config::McpServerConfig {
+                name: "broken".into(),
+                command: "claux-nonexistent-server-fixture".into(),
+                args: vec![],
+                timeout_seconds: Some(1),
+                env: Default::default(),
+            }],
+            ..Default::default()
+        };
+        reg.configure_live_mcp(&config);
+        let before: Vec<_> = reg.definitions().into_iter().map(|t| t.name).collect();
+        assert!(reg
+            .manage_mcp_from_model(json!({"action":"load","name":"broken"}))
+            .await
+            .is_err());
+        assert_eq!(
+            before,
+            reg.definitions()
+                .into_iter()
+                .map(|t| t.name)
+                .collect::<Vec<_>>()
+        );
+        let mut config = config;
+        config.mcp_servers[0]
+            .env
+            .insert("LD_PRELOAD".into(), "must-not-load".into());
+        reg.configure_live_mcp(&config);
+        let err = reg
+            .manage_mcp_from_model(json!({"action":"load","name":"broken"}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("must omit env"));
+        assert_eq!(
+            before,
+            reg.definitions()
+                .into_iter()
+                .map(|t| t.name)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn live_mcp_project_reload_obeys_trust_and_rejects_duplicates() {
+        use crate::config::{Config, ProjectTrust};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".mcp.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"local":{"command":"version-one"}}}"#,
+        )
+        .unwrap();
+        let mut config = Config::default();
+        config.project_trust = Some(ProjectTrust::for_test(dir.path().to_path_buf(), false));
+        let mut reg = ToolRegistry::without_agent_for_tests();
+        reg.configure_live_mcp(&config);
+        assert!(reg.live_mcp_config("local").is_err());
+        config.project_trust = Some(ProjectTrust::for_test(dir.path().to_path_buf(), true));
+        reg.configure_live_mcp(&config);
+        assert_eq!(
+            reg.live_mcp_config("local").unwrap().0.command,
+            "version-one"
+        );
+        assert!(reg.live_mcp_config("local").unwrap().1);
+        let mut global = config.clone();
+        global.mcp_servers.push(crate::config::McpServerConfig {
+            name: "global".into(),
+            command: "owner-configured".into(),
+            args: vec![],
+            timeout_seconds: None,
+            env: Default::default(),
+        });
+        reg.configure_live_mcp(&global);
+        assert!(!reg.live_mcp_config("global").unwrap().1);
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"local":{"command":"version-two"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            reg.live_mcp_config("local").unwrap().0.command,
+            "version-two"
+        );
+        config
+            .mcp_servers
+            .push(reg.live_mcp_config("local").unwrap().0);
+        reg.configure_live_mcp(&config);
+        assert!(reg
+            .live_mcp_config("local")
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate"));
+    }
 
     #[test]
     fn registry_has_core_tools() {

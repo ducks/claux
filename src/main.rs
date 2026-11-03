@@ -465,9 +465,10 @@ async fn build_engine(
         permission_policy.clone(),
         config.is_project_trusted(),
         sandbox_policy,
-        command_sandbox,
+        command_sandbox.clone(),
     );
-    tool_registry.add_tools(bootstrap::connect_mcp_tools(config).await)?;
+    tool_registry.add_tools(bootstrap::connect_mcp_tools(config, &command_sandbox).await)?;
+    tool_registry.configure_live_mcp(config);
 
     let permission_checker = permission_policy.checker();
     let mut engine = query::Engine::new(provider, tool_registry, permission_checker, model);
