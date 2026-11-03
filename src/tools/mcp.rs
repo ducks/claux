@@ -272,6 +272,18 @@ pub async fn connect_mcp_servers(configs: &[McpServerConfig]) -> Vec<Box<dyn Too
     connect_mcp_servers_with_timeout(configs, MCP_CONNECT_TIMEOUT).await
 }
 
+/// Project-local definitions are writable by the model, so they must retain
+/// the same containment and permissions across session restarts.
+pub async fn connect_project_mcp_servers(
+    configs: &[McpServerConfig],
+    sandbox: &crate::command_sandbox::CommandSandbox,
+) -> Vec<Box<dyn Tool>> {
+    connect_mcp_servers_with(configs, MCP_CONNECT_TIMEOUT, |config| async move {
+        connect_model_server(&config, sandbox).await
+    })
+    .await
+}
+
 async fn connect_mcp_servers_with_timeout(
     configs: &[McpServerConfig],
     timeout: Duration,

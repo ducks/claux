@@ -67,19 +67,24 @@ loaded servers, empty tool sets, and more than 16 connected tool-bearing servers
 are rejected. Discovery has a 15-second deadline; existing per-call deadlines
 still apply. Failed discovery leaves the registered tool set unchanged.
 
-Owner-loaded and startup MCP servers retain their existing ordinary-process
-launch behavior with sanitized inherited environment and explicitly configured
-environment variables. Model-loaded servers instead use the session's Bash
-command sandbox, including its configured filesystem policy. They never retry
-an enforced sandbox failure unrestricted. An unrestricted Bash policy also means
-unrestricted model-loaded servers; this does not add network isolation.
+Globally configured MCP servers retain ordinary-process launch behavior with a
+sanitized inherited environment and explicitly configured environment variables.
+Every server from a project's `.mcp.json` uses the session's Bash command sandbox
+at startup and on owner or model live loads. Project definitions are writable by
+the model, so treating an earlier project definition as owner-authored on restart
+would let it escape the session policy. Model live loads of global definitions
+are sandboxed as well. An enforced sandbox failure is never retried unrestricted.
+An unrestricted Bash policy means unrestricted server processes; this does not
+add network isolation.
 
-Model-loaded servers must omit `env`: passing arbitrary loader environment
-variables to the containment helper would cross the enforcement boundary.
-Arguments are shell-quoted as literals. Their discovered tools are treated as
-mutating regardless of `readOnlyHint`, so generated annotations cannot grant
-auto-approval. Project configuration still requires the captured project trust.
-Loading runs the configured program, including initialization side effects.
+Project-local servers and all model-loaded servers must omit `env`: passing
+arbitrary loader environment variables to the containment helper would cross
+the enforcement boundary. Existing project configurations that need `env` must
+be moved to owner-controlled global MCP configuration. Arguments are shell-quoted
+as literals. Tools from sandboxed connections are treated as mutating regardless
+of `readOnlyHint`, including after restart. Project configuration still requires
+the captured project trust. Loading runs the configured program, including
+initialization side effects.
 
 Unload removes that server's tools using explicit ownership metadata. Dropping
 the last client requests asynchronous transport/process cleanup; the command
@@ -101,8 +106,9 @@ This verifies runtime plumbing, not a live model's ability to invent useful tool
 MCP image results remain unsupported by this spike.
 
 A Linux CLI smoke uses a local HTTP provider fixture and exercises the actual
-containment helper at server initialization and tool invocation. It also checks
-literal quoting of server paths, dynamic schemas, and unload:
+containment helper at server initialization and tool invocation, including a
+second process that loads the model-authored project server at startup. It also
+checks literal quoting of server paths, dynamic schemas, and unload:
 
 ```sh
 cargo build

@@ -13,7 +13,7 @@ import tempfile
 import threading
 
 repository = pathlib.Path(__file__).resolve().parents[2]
-binary = repository / 'target/debug/claux'
+binary = pathlib.Path(os.environ.get('CLAUX_SMOKE_BINARY', repository / 'target/debug/claux'))
 example = (repository / 'examples/live-mcp/server.py').read_text()
 with tempfile.TemporaryDirectory(prefix='.claux-live-mcp-', dir=repository) as scratch:
     root = pathlib.Path(scratch)
@@ -43,6 +43,7 @@ else:
         [('McpManage',{'action':'unload','name':'self'})],
         [],
     ]
+    expected_schemas = [False, False, True, True, False]
     received = []
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args): pass
@@ -51,7 +52,7 @@ else:
             i = len(received)
             received.append(request)
             names = [t['function']['name'] for t in request['tools']]
-            assert ('mcp__self__slugify' in names) == (i in [2,3]), (i,names)
+            assert ('mcp__self__slugify' in names) == expected_schemas[i], (i,names)
             delta = {'role':'assistant'}
             if steps[i]:
                 delta['tool_calls'] = [{'index':j,'id':f'call-{i}-{j}','type':'function','function':{'name':name,'arguments':json.dumps(args)}} for j,(name,args) in enumerate(steps[i])]
@@ -88,7 +89,20 @@ context_window = 32000
         encoded = json.dumps(trace)
         assert 'sandbox-verified' in encoded, encoded
         assert 'McpManage failed' not in encoded, encoded
-        print('PASS: actual CLI wrote and loaded MCP server; next-round schema and tool call succeeded; unload refreshed schema; writes inside allowed and outside denied at initialization and invocation; literal quote/dollar arguments preserved.')
+        # Start a new Claux process with the generated .mcp.json already on
+        # disk. Project servers must remain contained at startup, not just
+        # during the original live load. Exercise initialization and a call.
+        received.clear()
+        steps[:] = [[('mcp__self__slugify', {'text':'Restart Verified'})], []]
+        expected_schemas[:] = [True, True]
+        restart_trace = workspace/'restart-trace.json'
+        restarted = subprocess.run([str(binary),'--config',str(config),'--trust-project','--bash-fs-policy','workspace_write','--permission-mode','bypass','--transcript',str(restart_trace),'-p','Use the tool'],cwd=workspace,env=env,capture_output=True,text=True,timeout=45)
+        assert restarted.returncode == 0, restarted.stderr
+        assert len(received) == 2, (len(received),restarted.stderr)
+        assert not outside.exists(), 'server escaped containment after restart'
+        restarted_text = json.dumps(json.loads(restart_trace.read_text()))
+        assert 'restart-verified' in restarted_text, restarted_text
+        print('PASS: live-loaded and restarted project MCP servers remain contained during initialization and invocation; schema refresh and literal argument handling work.')
     finally:
         server.shutdown()
         server.server_close()

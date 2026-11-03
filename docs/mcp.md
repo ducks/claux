@@ -16,3 +16,11 @@ with a diagnostic rather than sending invalid definitions to the model.
 
 Text results are capped at 64 KiB plus a truncation marker. Non-text content is
 represented by an omission marker instead of forwarding base64 into context.
+
+Project-local `.mcp.json` servers require project trust and start under the
+configured Bash filesystem policy, including on restart and owner-issued live
+loads. They must not specify `env` and their tools are treated as mutating even
+when the server advertises `readOnlyHint`. Model-loaded global servers use the
+same containment and restrictions. Owner-loaded global MCP servers retain their
+existing process environment configuration and read-only hint behavior. An
+unrestricted Bash policy does not provide filesystem containment.

@@ -256,3 +256,30 @@ fn sandbox_setup_errors_do_not_fall_back_to_unrestricted_execution() {
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("could not resolve command sandbox workspace"));
 }
+
+#[test]
+fn model_authored_project_mcp_stays_contained_after_restart() {
+    // The fixture needs a stdlib Python interpreter for its MCP and local HTTP
+    // servers. Keep the rest of the Linux suite usable where it is not installed.
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("skipping project MCP restart regression: python3 not available");
+        return;
+    }
+    let output = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/live-mcp/smoke.py"
+        ))
+        .env("CLAUX_SMOKE_BINARY", env!("CARGO_BIN_EXE_claux"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("MCP restart fixture should start");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("restarted project MCP servers remain contained"));
+}

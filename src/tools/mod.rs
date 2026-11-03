@@ -233,14 +233,24 @@ impl ToolRegistry {
         names
     }
 
-    fn live_mcp_config(&self, name: &str) -> Result<crate::config::McpServerConfig> {
+    fn live_mcp_config(&self, name: &str) -> Result<(crate::config::McpServerConfig, bool)> {
         let (global, trust) = self
             .live_mcp
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("MCP configuration is unavailable"))?;
-        let mut configs = global.clone();
-        configs.extend(crate::config::load_mcp_json(trust));
-        let mut matches = configs.into_iter().filter(|config| config.name == name);
+        let mut configs: Vec<_> = global
+            .iter()
+            .cloned()
+            .map(|config| (config, false))
+            .collect();
+        configs.extend(
+            crate::config::load_mcp_json(trust)
+                .into_iter()
+                .map(|config| (config, true)),
+        );
+        let mut matches = configs
+            .into_iter()
+            .filter(|(config, _)| config.name == name);
         let config = matches.next().ok_or_else(|| {
             anyhow::anyhow!(
                 "No configured MCP server by that name. Project .mcp.json requires project trust."
@@ -282,8 +292,8 @@ impl ToolRegistry {
                     self.mcp_names().len() < 16,
                     "Live MCP server limit (16) reached"
                 );
-                let config = self.live_mcp_config(name)?;
-                let tools = if from_model {
+                let (config, project_local) = self.live_mcp_config(name)?;
+                let tools = if from_model || project_local {
                     mcp::connect_model_server(&config, &self.command_sandbox).await?
                 } else {
                     mcp::connect_live_server(&config).await?
@@ -550,16 +560,33 @@ mod tests {
         assert!(reg.live_mcp_config("local").is_err());
         config.project_trust = Some(ProjectTrust::for_test(dir.path().to_path_buf(), true));
         reg.configure_live_mcp(&config);
-        assert_eq!(reg.live_mcp_config("local").unwrap().command, "version-one");
+        assert_eq!(
+            reg.live_mcp_config("local").unwrap().0.command,
+            "version-one"
+        );
+        assert!(reg.live_mcp_config("local").unwrap().1);
+        let mut global = config.clone();
+        global.mcp_servers.push(crate::config::McpServerConfig {
+            name: "global".into(),
+            command: "owner-configured".into(),
+            args: vec![],
+            timeout_seconds: None,
+            env: Default::default(),
+        });
+        reg.configure_live_mcp(&global);
+        assert!(!reg.live_mcp_config("global").unwrap().1);
         std::fs::write(
             &path,
             r#"{"mcpServers":{"local":{"command":"version-two"}}}"#,
         )
         .unwrap();
-        assert_eq!(reg.live_mcp_config("local").unwrap().command, "version-two");
+        assert_eq!(
+            reg.live_mcp_config("local").unwrap().0.command,
+            "version-two"
+        );
         config
             .mcp_servers
-            .push(reg.live_mcp_config("local").unwrap());
+            .push(reg.live_mcp_config("local").unwrap().0);
         reg.configure_live_mcp(&config);
         assert!(reg
             .live_mcp_config("local")
