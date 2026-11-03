@@ -75,8 +75,13 @@ preventing a concurrent send from being stranded during normal shutdown.
 
 A crash after a claim is deliberately ambiguous: the model may have edited
 files or run commands. Status shows `interrupted`, and send/resume/retry refuse
-to replay it. Inspect the checkpoint, session, worktree, and external effects;
-automated reconciliation and an explicit recovery command are future work.
+to replay it. Inspect the checkpoint, session, worktree, and external effects.
+After inspection, `claux task recover TASK_ID --abandon INPUT_ID` records the
+exact claimed input as abandoned, without replaying it or starting queued work.
+Use the input ID from `task status`, then use `task resume TASK_ID` separately
+if the queued work is still appropriate. Recovery does not undo side effects or
+reconcile the conversation; start a new task if the saved session is unsuitable.
+Automated reconciliation remains future work.
 A launch failure before any claim can use `task retry`. The queue survives
 restart but does not start a worker automatically after an uncertain crash.
 This provides at-most-once automatic dispatch, not exactly-once external effects.

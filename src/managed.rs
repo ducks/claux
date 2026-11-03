@@ -53,6 +53,13 @@ pub enum TaskCommand {
     Resume { id: String },
     /// Retry a launch that failed before a turn began (never replays an evaluated turn)
     Retry { id: String },
+    /// Mark an inspected interrupted input abandoned; queued work remains stopped
+    Recover {
+        id: String,
+        /// Exact interrupted input ID, after inspecting its effects and checkpoint
+        #[arg(long)]
+        abandon: String,
+    },
     /// Cooperatively cancel the current turn; does not delete worktrees
     Cancel { id: String },
     /// Wait for the current turn and print its versioned JSON result
@@ -140,6 +147,27 @@ fn finish_input(dir: &Path, id: &str) -> Result<()> {
         .find(|i| i.id == id && i.phase == "claimed")
         .context("missing claimed input")?;
     input.phase = "finished".into();
+    save_inbox(dir, &inputs)
+}
+
+// Called with the control lock held after confirming the worker is inactive.
+fn abandon_interrupted(dir: &Path, id: &str) -> Result<()> {
+    let mut inputs = inbox(dir)?;
+    let claimed: Vec<_> = inputs
+        .iter()
+        .filter(|input| input.phase == "claimed")
+        .collect();
+    ensure!(
+        claimed.len() == 1 && claimed[0].id == id,
+        "expected the exact ID of the interrupted input"
+    );
+    // If interrupted between writes, the remaining claim still blocks dispatch.
+    write_json(&dir.join("state.json"), &json!({"status":"cancelled"}))?;
+    inputs
+        .iter_mut()
+        .find(|input| input.id == id && input.phase == "claimed")
+        .expect("claim checked above")
+        .phase = "abandoned".into();
     save_inbox(dir, &inputs)
 }
 
@@ -524,6 +552,17 @@ pub async fn handle(args: &cli::Cli, command: &TaskCommand) -> Result<()> {
             start_queued(&dir)?;
             println!("{}", status(&dir)?);
         }
+        TaskCommand::Recover { id, abandon } => {
+            let dir = task_dir(id)?;
+            let _control = control_lock(&dir)?;
+            ensure!(!worker_active(&dir)?, "task worker is active");
+            ensure!(
+                status(&dir)?["status"] == "interrupted",
+                "task is not interrupted"
+            );
+            abandon_interrupted(&dir, abandon)?;
+            println!("{}", status(&dir)?);
+        }
         TaskCommand::Resume { id } => {
             let dir = task_dir(id)?;
             let _control = control_lock(&dir)?;
@@ -838,6 +877,34 @@ mod tests {
         assert!(claim_input(dir.path()).is_err());
         assert_eq!(inbox(dir.path())?[1].phase, "queued");
         finish_input(dir.path(), "a")?;
+        assert_eq!(claim_input(dir.path())?.id, "b");
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_requires_exact_claim_and_preserves_queued_inputs() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        save_inbox(
+            dir.path(),
+            &[
+                Input {
+                    id: "a".into(),
+                    prompt: "first".into(),
+                    phase: "claimed".into(),
+                },
+                Input {
+                    id: "b".into(),
+                    prompt: "second".into(),
+                    phase: "queued".into(),
+                },
+            ],
+        )?;
+        assert!(abandon_interrupted(dir.path(), "b").is_err());
+        assert_eq!(inbox(dir.path())?[0].phase, "claimed");
+        abandon_interrupted(dir.path(), "a")?;
+        let inputs = inbox(dir.path())?;
+        assert_eq!(inputs[0].phase, "abandoned");
+        assert_eq!(inputs[1].phase, "queued");
         assert_eq!(claim_input(dir.path())?.id, "b");
         Ok(())
     }
