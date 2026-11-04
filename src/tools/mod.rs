@@ -4,6 +4,7 @@ mod edit;
 mod glob;
 mod grep;
 pub(crate) mod jobs;
+mod managed_task;
 pub(crate) mod mcp;
 mod mcp_manage;
 pub(crate) mod read;
@@ -96,6 +97,23 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    pub fn configure_managed_tasks(
+        &mut self,
+        config: &crate::config::Config,
+        resolved: &crate::config::ResolvedModel,
+    ) -> Result<()> {
+        if config.managed_read_only {
+            self.tools
+                .retain(|tool| matches!(tool.name(), "Read" | "Glob" | "Grep" | "WebFetch"));
+        } else {
+            self.tools.push(Box::new(managed_task::ManagedTaskTool::new(
+                config.clone(),
+                resolved.clone(),
+                std::env::current_dir()?,
+            )));
+        }
+        Ok(())
+    }
     pub fn set_max_tokens(&mut self, max_tokens: u32) {
         for tool in &mut self.tools {
             tool.set_max_tokens(max_tokens);
@@ -398,6 +416,22 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_launched_worker_has_only_read_only_tools() -> anyhow::Result<()> {
+        let mut config = crate::config::Config::default();
+        config.managed_read_only = true;
+        let resolved = config.default_resolved_model()?;
+        let mut registry = ToolRegistry::without_agent_for_tests();
+        registry.configure_managed_tasks(&config, &resolved)?;
+        let names: Vec<_> = registry
+            .definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(names, vec!["Read", "Glob", "Grep", "WebFetch"]);
+        Ok(())
+    }
     use serde_json::json;
 
     struct OwnedMcpTool {

@@ -166,6 +166,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         tui_only: false,
     },
     CommandSpec {
+        name: "/tasks",
+        aliases: &[],
+        summary: "List managed background tasks",
+        arg: None,
+        tui_only: true,
+    },
+    CommandSpec {
+        name: "/task",
+        aliases: &[],
+        summary: "Start, open, or manage a background task",
+        arg: Some("start | open | send | refresh | resume | cancel"),
+        tui_only: true,
+    },
+    CommandSpec {
         name: "/exit",
         aliases: &["/quit"],
         summary: "Exit claux",
@@ -255,6 +269,9 @@ pub fn parse_command(input: &str, surface: Surface) -> Option<CommandResult> {
         "/help" => Some(CommandResult::Text(help_text(surface))),
         "/mcp" => Some(CommandResult::Async(AsyncCommand::Mcp(args.to_string()))),
         "/jobs" => Some(CommandResult::Async(AsyncCommand::Jobs(args.to_string()))),
+        "/tasks" | "/task" => Some(CommandResult::Text(
+            "Background task controls are available in the full-screen TUI (claux --tui); use claux task from a terminal.".to_string(),
+        )),
         "/exit" => Some(CommandResult::Exit),
         "/clear" => Some(CommandResult::Text("\x1b[2J\x1b[H".to_string())),
         "/compact" => Some(CommandResult::Async(AsyncCommand::Compact)),
@@ -482,6 +499,15 @@ fn help_text(surface: Surface) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_controls_are_discoverable_in_the_tui() {
+        assert!(complete("/task", Surface::Tui)
+            .iter()
+            .any(|c| c.name == "/tasks"));
+        assert!(help_text(Surface::Tui).contains("/task"));
+        assert!(!help_text(Surface::Repl).contains("/tasks"));
+    }
 
     #[test]
     fn live_mcp_dispatch_is_shared_by_both_surfaces() {
