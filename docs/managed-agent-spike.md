@@ -28,8 +28,8 @@ exits nonzero for failed/cancelled turns. Its own timeout leaves the worker alon
 At most four managed workers run per user data directory; excess launches
 fail before evaluation and can be retried after a slot opens.
 Each turn starts a detached process, not a permanent daemon. Follow-ups between
-turns reopen the saved conversation and archive. Active-turn steering and
-queued follow-ups are deliberately absent. OS file locks enforce one worker
+turns reopen the saved conversation and archive. Follow-ups sent during an active turn now enter a durable FIFO inbox; see
+[Task coordinator spike](task-coordinator-spike.md). Active-turn steering remains absent. OS file locks enforce one worker
 and serialize control operations without trusting reusable PIDs. The initial
 launch has a ten-second grace period before a missing worker is interrupted.
 The `--timeout` on start bounds each model/tool turn (default 900, max 3600 seconds).
@@ -63,7 +63,7 @@ cancels the turn. Usage is per turn, not a cumulative task bill.
 Crashes are reported as interrupted using lock liveness. Completed and cancelled
 turns can receive follow-ups. An interrupted turn cannot be automatically sent
 again: inspect `checkpoint.json` and the session archive first, because tools
-may already have changed files. A failed launch with its original pending prompt intact can use `task retry`;
+may already have changed files. A failed launch with its original unclaimed input intact can use `task retry`;
 this never retries a turn whose prompt was already consumed.
 Automatic mid-turn crash recovery, remote access, runtime
 approval, scheduling, and task cleanup are follow-up design work. Do not open the

@@ -228,6 +228,63 @@ impl TuiProcess {
 }
 
 #[test]
+fn tui_can_list_and_start_managed_tasks() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = fixture.path().join("config.toml");
+    std::fs::write(
+        &config,
+        r#"
+default_model = "test"
+[providers.fixture]
+type = "openai"
+base_url = "http://127.0.0.1:1/v1"
+api_key_env = "CLAUX_TEST_KEY"
+[model_profiles.test]
+provider = "fixture"
+model = "fixture-model"
+context_window = 32000
+"#,
+    )
+    .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_claux"));
+    command
+        .arg("--config")
+        .arg(&config)
+        .arg("--tui")
+        .env("CLAUX_TEST_KEY", "test");
+    let mut process = TuiProcess::spawn(command);
+    process.wait_for_output(b"1049h");
+    process.master.as_mut().unwrap().write_all(b"n").unwrap();
+    process.wait_for_output(b"fixture-model");
+    process.master.as_mut().unwrap().write_all(b"\r").unwrap();
+    process.wait_for_output(b"Name:");
+    process.master.as_mut().unwrap().write_all(b"\r").unwrap();
+    process.wait_for_output(b"/help for commands");
+    process
+        .master
+        .as_mut()
+        .unwrap()
+        .write_all(b"/tasks\r")
+        .unwrap();
+    process.wait_for_output(b"Nothing");
+    process.master.as_mut().unwrap().write_all(b"\x1b").unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    process
+        .master
+        .as_mut()
+        .unwrap()
+        .write_all(b"/task start inspect this project\r")
+        .unwrap();
+    process.wait_for_output(b"Started and selected task");
+    let task_root = process._storage.path().join("data/claux/tasks");
+    assert!(std::fs::read_dir(task_root).unwrap().any(|entry| entry
+        .unwrap()
+        .path()
+        .join("task.json")
+        .exists()));
+}
+
+#[test]
 fn tui_exits_when_its_terminal_is_closed() {
     let mut process = TuiProcess::start();
     drop(process.master.take());

@@ -614,6 +614,17 @@ fn draw_input_and_status(
         Span::styled(
             if app.save_error.is_some() {
                 " UNSAVED · Ctrl+S retry · keep this chat open ".to_string()
+            } else if app.task_error.is_some() || app.task_unavailable > 0 {
+                format!(" Task status unavailable · F7 tasks · {} ", app.status)
+            } else if app.task_items.iter().any(|task| task.attention()) {
+                format!(
+                    " {} task(s) need attention · F7 · {} ",
+                    app.task_items
+                        .iter()
+                        .filter(|task| task.attention())
+                        .count(),
+                    app.status
+                )
             } else if !app.jobs.is_empty() {
                 format!(
                     " {} background job(s) running · F6 tasks · {} ",
@@ -634,6 +645,114 @@ fn draw_input_and_status(
     if app.show_jobs && app.mode != Mode::Permission {
         draw_jobs(f, app);
     }
+    if app.show_tasks && app.mode != Mode::Permission {
+        draw_tasks(f, app);
+    }
+}
+
+fn draw_tasks(f: &mut Frame, app: &ChatApp) {
+    let area = f.area();
+    f.render_widget(Clear, area);
+    let visible = app.visible_tasks();
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length((visible.len().min(8) as u16).max(1)),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .split(area);
+    let title = if app.show_all_tasks {
+        "All tasks"
+    } else {
+        "Needs your attention"
+    };
+    f.render_widget(
+        Paragraph::new(format!(
+            " {title}\n ↑/↓ select · Enter open · a all/attention · r refresh · Esc/F7 close"
+        )),
+        rows[0],
+    );
+    let start = app.selected_task_index.saturating_sub(7);
+    let lines: Vec<Line> = visible
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(8)
+        .map(|(index, task)| {
+            let id: String = task.id.chars().take(8).collect();
+            let model = crate::utils::sanitize_terminal_text(&task.model);
+            Line::from(Span::styled(
+                format!(
+                    "{} {}  {}  {}",
+                    if index == app.selected_task_index {
+                        ">"
+                    } else {
+                        " "
+                    },
+                    id,
+                    task.label(),
+                    model
+                ),
+                Style::default().fg(if index == app.selected_task_index {
+                    app.theme.warning
+                } else {
+                    app.theme.fg
+                }),
+            ))
+        })
+        .collect();
+    let empty = if app.show_all_tasks {
+        " No tasks yet. Use /task start <instructions>."
+    } else {
+        " Nothing needs your attention. Press a to see all tasks."
+    };
+    f.render_widget(
+        Paragraph::new(if lines.is_empty() {
+            vec![Line::from(empty)]
+        } else {
+            lines
+        }),
+        rows[1],
+    );
+    if let Some(task) = visible.get(app.selected_task_index) {
+        let summary = if task.summary.is_empty() {
+            match task.stage.as_str() {
+                "interrupted" => "Inspect the task and its checkpoint before recovery.",
+                "failed" => "Inspect the task's activity and result for details.",
+                "working" => "The worker is running.",
+                _ => "No report yet.",
+            }
+        } else {
+            &task.summary
+        };
+        let question = task
+            .question
+            .as_ref()
+            .map(|question| format!("\n\nQuestion: {question}"))
+            .unwrap_or_default();
+        let detail = crate::utils::sanitize_terminal_text(&format!("{}\n\n{}{}\n\n{} queued follow-up(s)\n\nEnter opens this task and selects it for /task send.", task.label(), summary, question, task.queued));
+        f.render_widget(
+            Paragraph::new(detail).wrap(Wrap { trim: false }).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {} ", task.id)),
+            ),
+            rows[2],
+        );
+    }
+    let notice = if let Some(error) = &app.task_error {
+        format!(" Could not refresh tasks: {error}")
+    } else if app.task_unavailable > 0 {
+        format!(
+            " {} task record(s) could not be read.",
+            app.task_unavailable
+        )
+    } else {
+        " Tasks keep running when this panel or session closes.".to_string()
+    };
+    f.render_widget(Paragraph::new(notice).wrap(Wrap { trim: false }), rows[3]);
 }
 
 fn draw_jobs(f: &mut Frame, app: &ChatApp) {
