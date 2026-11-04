@@ -10,6 +10,7 @@ pub mod home;
 mod input;
 pub mod markdown;
 mod screen;
+mod tasks;
 mod terminal;
 mod tool_display;
 mod ui;
@@ -33,6 +34,7 @@ pub async fn run(
     config: &Config,
     plugins: Arc<PluginRegistry>,
     models: Vec<ResolvedModel>,
+    args: &crate::cli::Cli,
 ) -> Result<()> {
     if models.is_empty() {
         anyhow::bail!("no models configured; set `model` in ~/.config/claux/config.toml");
@@ -138,6 +140,7 @@ pub async fn run(
                             &models,
                             &config.voice,
                             &shutdown.token,
+                            args,
                         )
                         .await?;
                         engine_binding = engine.model_binding().cloned();

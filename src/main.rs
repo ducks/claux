@@ -371,7 +371,7 @@ async fn run() -> Result<std::process::ExitCode> {
             });
             models.insert(0, requested_model.clone());
         }
-        return tui::run(&config, plugin_registry, models)
+        return tui::run(&config, plugin_registry, models, &args)
             .await
             .map(|()| ExitCode::SUCCESS);
     }

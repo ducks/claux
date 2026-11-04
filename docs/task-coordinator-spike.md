@@ -8,6 +8,16 @@ those of ordinary Claux tasks.
 
 ## Try it
 
+In the full-screen TUI, use `/task start <instructions>` to launch and select a
+worker, or `/task start-edit <instructions>` to create a worktree with edit
+permission. `/tasks` lists workers, `/task open <id>` selects one, and `/task
+refresh` shows its status, report, and recent activity. Use `/task send
+<instructions>` to queue a follow-up, and `/task resume` or `/task cancel` to
+control it. Workers use the current session's model but do not receive its
+conversation automatically, so include the context they need in the prompt.
+
+The CLI provides the same task records and controls:
+
 ```sh
 cargo build
 ./target/debug/claux task start 'Investigate the failing tests and implement a fix' \

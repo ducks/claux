@@ -493,11 +493,12 @@ pub async fn run(
     models: &[ResolvedModel],
     voice: &VoiceConfig,
     shutdown: &tokio_util::sync::CancellationToken,
+    args: &crate::cli::Cli,
 ) -> Result<Action> {
     let jobs = engine.jobs();
     jobs.enable();
     let result = run_session(
-        engine, session_id, db, terminal, theme, models, voice, shutdown,
+        engine, session_id, db, terminal, theme, models, voice, shutdown, args,
     )
     .await;
     jobs.shutdown().await;
@@ -514,6 +515,7 @@ async fn run_session(
     models: &[ResolvedModel],
     voice: &VoiceConfig,
     shutdown: &tokio_util::sync::CancellationToken,
+    args: &crate::cli::Cli,
 ) -> Result<Action> {
     // Clear engine state and load this session's messages. repair_history
     // makes old or crash-interrupted saves API-valid (tool_use/tool_result
@@ -555,6 +557,7 @@ async fn run_session(
     }
     let mut needs_redraw = true;
     let mut pending_submit: Option<String> = None;
+    let mut selected_task: Option<String> = None;
     let mut voice_on = voice.enabled && (voice.can_listen() || voice.can_speak());
     let mut recording: Option<Recording> = None;
     if voice.enabled && !voice_on {
@@ -589,6 +592,22 @@ async fn run_session(
             let trimmed = input.trim().to_string();
             if trimmed == "/jobs" {
                 app.show_jobs = true;
+                needs_redraw = true;
+                continue;
+            }
+
+            if trimmed == "/tasks" || trimmed == "/task" || trimmed.starts_with("/task ") {
+                match super::tasks::execute(
+                    &trimmed,
+                    &mut selected_task,
+                    args,
+                    engine.model_binding(),
+                )
+                .await
+                {
+                    Ok(text) => app.add_message("system", &text),
+                    Err(error) => app.add_message("error", &format!("Task: {error:#}")),
+                }
                 needs_redraw = true;
                 continue;
             }
