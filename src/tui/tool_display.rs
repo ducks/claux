@@ -21,6 +21,15 @@ pub fn present(name: &str, fallback: &str, input: &Value) -> ToolPresentation {
         "edit" => edit(fallback, input),
         "write" => write(fallback, input),
         "agent" => agent(fallback, input),
+        "taskmanage" => ToolPresentation {
+            summary: format!(
+                "Background task: {}",
+                string(input, "action").unwrap_or("manage")
+            ),
+            detail: string(input, "prompt")
+                .or_else(|| string(input, "task_id"))
+                .map(clipped),
+        },
         _ => generic(fallback),
     }
 }

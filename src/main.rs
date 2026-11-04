@@ -467,8 +467,11 @@ async fn build_engine(
         sandbox_policy,
         command_sandbox.clone(),
     );
+    tool_registry.configure_managed_tasks(config, resolved)?;
     tool_registry.add_tools(bootstrap::connect_mcp_tools(config, &command_sandbox).await)?;
-    tool_registry.configure_live_mcp(config);
+    if !config.managed_read_only {
+        tool_registry.configure_live_mcp(config);
+    }
 
     let permission_checker = permission_policy.checker();
     let mut engine = query::Engine::new(provider, tool_registry, permission_checker, model);

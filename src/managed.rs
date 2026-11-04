@@ -77,6 +77,8 @@ struct Task {
     schema_version: u8,
     #[serde(default)]
     structured_report: bool,
+    #[serde(default)]
+    model_restrictions: Option<config::PermissionRulesConfig>,
     id: String,
     cwd: PathBuf,
     session: PathBuf,
@@ -434,6 +436,119 @@ fn control_lock(dir: &Path) -> Result<File> {
     }
 }
 
+/// Start a workspace-scoped, read-only worker for a model tool invocation.
+pub(crate) fn start_model_task(
+    config: &config::Config,
+    resolved: &config::ResolvedModel,
+    cwd: &Path,
+    prompt: &str,
+) -> Result<Value> {
+    ensure!(
+        !config
+            .plugins
+            .iter()
+            .any(|plugin| plugin.trigger == config::HookTrigger::OnPermissionCheck),
+        "Model-launched tasks are unavailable when permission-check hooks are configured"
+    );
+    ensure!(
+        !prompt.trim().is_empty() && prompt.len() <= 40_000,
+        "prompt must contain 1–40000 bytes"
+    );
+    let cwd = cwd.canonicalize()?;
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    private_dir(&root()?)?;
+    let dir = root()?.join(&id);
+    private_dir(&dir)?;
+    let mut options = vec!["claux".to_string()];
+    if let Some(path) = &config.config_source {
+        options.extend([
+            "--config".into(),
+            path.to_str()
+                .context("configuration path must be UTF-8")?
+                .into(),
+        ]);
+    }
+    for (flag, value) in [
+        ("--base-url", &config.transport_overrides.base_url),
+        ("--protocol", &config.transport_overrides.protocol),
+        (
+            "--reasoning-effort",
+            &config.transport_overrides.reasoning_effort,
+        ),
+    ] {
+        if let Some(value) = value {
+            options.extend([flag.into(), value.clone()]);
+        }
+    }
+    options.extend([
+        "--native-fs-policy".into(),
+        "workspace_only".into(),
+        "--permission-mode".into(),
+        "plan".into(),
+    ]);
+    let (_, session) = session::create_session_with_model(resolved)?;
+    let task = Task {
+        schema_version: 1,
+        structured_report: true,
+        model_restrictions: Some(config::PermissionRulesConfig {
+            allow: Vec::new(),
+            deny: config.permissions.deny.clone(),
+            ask: config.permissions.ask.clone(),
+        }),
+        id,
+        cwd,
+        session,
+        binding: resolved.binding.clone(),
+        options,
+        timeout: 900,
+        branch: None,
+    };
+    write_json(&dir.join("task.json"), &task)?;
+    write_json(&dir.join("state.json"), &json!({"status":"idle"}))?;
+    let _control = control_lock(&dir)?;
+    enqueue(&dir, prompt)?;
+    status(&dir)
+}
+
+pub(crate) fn model_task_status(id: &str) -> Result<Value> {
+    let dir = task_dir(id)?;
+    let mut state = status(&dir)?;
+    // Only a bounded result is sent back to the model. The complete result
+    // remains available to the user via the task UI and artifacts.
+    let path = dir.join("result.json");
+    if path.exists() {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        File::open(path)?.take(32 * 1024).read_to_end(&mut bytes)?;
+        if let Ok(result) = serde_json::from_slice::<Value>(&bytes) {
+            let text = result["result"].as_str().unwrap_or("");
+            state["latest_result"] = json!(text.chars().take(8000).collect::<String>());
+        }
+    }
+    Ok(state)
+}
+
+pub(crate) fn model_task_send(id: &str, prompt: &str) -> Result<Value> {
+    let dir = task_dir(id)?;
+    let _control = control_lock(&dir)?;
+    enqueue(&dir, prompt)?;
+    status(&dir)
+}
+
+pub(crate) fn model_task_cancel(id: &str) -> Result<Value> {
+    let dir = task_dir(id)?;
+    let _control = control_lock(&dir)?;
+    ensure!(
+        worker_active(&dir)? || inbox(&dir)?.iter().any(|i| i.phase == "queued"),
+        "task has no active turn"
+    );
+    private_file(&dir.join("cancel"))?;
+    if !worker_active(&dir)? && status(&dir)?["status"] != "starting" {
+        write_json(&dir.join("state.json"), &json!({"status":"cancelled"}))?;
+    }
+    Ok(json!({"id":id,"status":"cancel_requested"}))
+}
+
 pub async fn handle(args: &cli::Cli, command: &TaskCommand) -> Result<()> {
     match command {
         TaskCommand::Start {
@@ -514,6 +629,7 @@ pub async fn handle(args: &cli::Cli, command: &TaskCommand) -> Result<()> {
             let task = Task {
                 schema_version: 1,
                 structured_report: *structured_report,
+                model_restrictions: None,
                 id,
                 cwd,
                 session,
@@ -700,6 +816,25 @@ async fn work(dir: &Path) -> Result<()> {
     let args = cli::Cli::try_parse_from(&task.options)?;
     let mut config = args.load_config()?;
     config.permission_mode = serde_json::from_value(json!(args.permission_mode))?;
+    if let Some(restrictions) = &task.model_restrictions {
+        ensure!(
+            !config
+                .plugins
+                .iter()
+                .any(|plugin| plugin.trigger == config::HookTrigger::OnPermissionCheck),
+            "Model-launched tasks cannot bypass permission-check hooks"
+        );
+        // Never allow later config changes to loosen a model-launched worker.
+        config.managed_read_only = true;
+        config.permission_mode = crate::permissions::PermissionMode::Plan;
+        config.permissions.allow.clear();
+        config.permissions.deny.extend(restrictions.deny.clone());
+        config.permissions.ask.extend(restrictions.ask.clone());
+        config.native_tool_filesystem_policy =
+            crate::sandbox::NativeToolFilesystemPolicy::WorkspaceOnly;
+        config.plugins.clear();
+        config.mcp_servers.clear();
+    }
     crate::command_sandbox::configure_child_environment(
         config.sensitive_environment_names(),
         config.strip_agent_sockets,

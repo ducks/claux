@@ -272,6 +272,11 @@ pub struct PermissionRulesConfig {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Invocation-only state; never serialized into configuration or sessions.
+    #[serde(skip)]
+    pub config_source: Option<PathBuf>,
+    #[serde(skip)]
+    pub managed_read_only: bool,
     #[serde(skip)]
     pub transport_overrides: TransportOverrides,
     #[serde(default = "default_model")]
@@ -556,6 +561,8 @@ fn default_generated_mcp_dir() -> PathBuf {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            config_source: None,
+            managed_read_only: false,
             transport_overrides: TransportOverrides::default(),
             model: default_model(),
             models: Vec::new(),

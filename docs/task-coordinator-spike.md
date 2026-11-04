@@ -16,6 +16,15 @@ refresh` shows its status, report, and recent activity. Use `/task send
 control it. Workers use the current session's model but do not receive its
 conversation automatically, so include the context they need in the prompt.
 
+The model can also use `TaskManage` to start, list, inspect, send follow-ups to,
+and cancel its own background tasks, subject to normal tool permissions. These
+model-launched workers are restricted to read-only tools in the current
+workspace, cannot launch nested workers or MCP servers, and retain the session's
+deny and ask rules. The user can inspect them through `/tasks`. The model's
+task ownership is limited to the current conversation and is cleared on session
+switch or resume; durable tasks remain available to the user. Model-launched
+tasks are unavailable when permission-check hooks are configured.
+
 The CLI provides the same task records and controls:
 
 ```sh

@@ -83,6 +83,15 @@ impl Cli {
     pub fn load_config(&self) -> anyhow::Result<crate::config::Config> {
         let path = self.config_path();
         let mut config = crate::config::Config::load(self.trust_project, path.as_deref())?;
+        config.config_source = path
+            .map(|path| {
+                if path.is_absolute() {
+                    Ok(path)
+                } else {
+                    Ok::<_, std::io::Error>(std::env::current_dir()?.join(path))
+                }
+            })
+            .transpose()?;
         self.apply_overrides(&mut config)?;
         Ok(config)
     }

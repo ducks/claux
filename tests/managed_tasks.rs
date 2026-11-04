@@ -41,6 +41,124 @@ fn structured_handoff_holds_queued_inputs_until_explicit_resume() {
     run_scenario(true);
 }
 
+#[test]
+fn model_can_start_a_restricted_background_worker() {
+    let home = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (requests_tx, requests_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut count = 0;
+        while count < 3 && std::time::Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(value) => value,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => panic!("{e}"),
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            let worker = request.to_string().contains("Managed task report contract");
+            let followup = request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["role"] == "tool");
+            let chunk = if worker {
+                json!({"choices":[{"index":0,"delta":{"content":"{\"state\":\"ready_for_review\",\"summary\":\"Research complete\"}"},"finish_reason":"stop"}]})
+            } else if followup {
+                json!({"choices":[{"index":0,"delta":{"content":"Worker started."},"finish_reason":"stop"}]})
+            } else {
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-task","type":"function","function":{"name":"TaskManage","arguments":"{\"action\":\"start\",\"prompt\":\"Inspect the project\"}"}}]},"finish_reason":"tool_calls"}]})
+            };
+            requests_tx.send((worker, request)).unwrap();
+            let payload = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", payload.len(), payload).unwrap();
+            count += 1;
+        }
+    });
+    let config = home.path().join("test.toml");
+    fs::write(
+        &config,
+        format!(
+            r#"default_model = "test"
+[providers.fixture]
+type = "openai"
+base_url = "http://127.0.0.1:{port}/v1"
+api_key_env = "CLAUX_TEST_KEY"
+[model_profiles.test]
+provider = "fixture"
+model = "fixture-model"
+context_window = 32000
+"#
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_claux"))
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path().join("data"))
+        .env("XDG_CONFIG_HOME", home.path().join("config"))
+        .env("CLAUX_TEST_KEY", "local-fixture-key")
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--permission-mode",
+            "bypass",
+            "--print",
+            "Delegate research",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests: Vec<_> = (0..3)
+        .map(|_| requests_rx.recv_timeout(Duration::from_secs(15)).unwrap())
+        .collect();
+    let worker = &requests.iter().find(|(worker, _)| *worker).unwrap().1;
+    let names: Vec<_> = worker["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert!(names.contains(&"Read"));
+    assert!(!names.contains(&"Write"));
+    assert!(!names.contains(&"Bash"));
+    assert!(!names.contains(&"TaskManage"));
+    assert!(requests.iter().any(|(worker, request)| !worker
+        && request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "tool"
+                && message.to_string().contains("queued_inputs"))));
+    server.join().unwrap();
+}
+
 fn run_scenario(structured_report: bool) {
     let home = tempfile::tempdir().unwrap();
     let repo = home.path().join("repo");
