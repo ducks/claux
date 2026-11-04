@@ -56,8 +56,20 @@ pub struct Activity {
     pub updated: std::time::Instant,
 }
 
+type TaskSnapshotReceiver =
+    std::sync::mpsc::Receiver<anyhow::Result<(Vec<serde_json::Value>, usize)>>;
+
 /// Chat screen state.
 pub struct ChatApp {
+    pub task_items: Vec<super::tasks::QueueItem>,
+    pub show_tasks: bool,
+    pub show_all_tasks: bool,
+    pub selected_task_index: usize,
+    pub task_unavailable: usize,
+    pub task_error: Option<String>,
+    task_open_request: Option<String>,
+    task_refresh_at: std::time::Instant,
+    task_refresh: Option<TaskSnapshotReceiver>,
     pub jobs: Vec<crate::tools::jobs::JobSnapshot>,
     pub show_jobs: bool,
     pub selected_job: usize,
@@ -108,6 +120,15 @@ pub struct ChatApp {
 impl ChatApp {
     pub fn new(model: &str, theme: Theme) -> Self {
         Self {
+            task_items: Vec::new(),
+            show_tasks: false,
+            show_all_tasks: false,
+            selected_task_index: 0,
+            task_unavailable: 0,
+            task_error: None,
+            task_open_request: None,
+            task_refresh_at: std::time::Instant::now(),
+            task_refresh: None,
             jobs: Vec::new(),
             show_jobs: false,
             selected_job: 0,
@@ -148,6 +169,107 @@ impl ChatApp {
             role: crate::utils::sanitize_terminal_text(role),
             content: crate::utils::sanitize_terminal_text(content),
         });
+    }
+
+    pub fn visible_tasks(&self) -> Vec<&super::tasks::QueueItem> {
+        self.task_items
+            .iter()
+            .filter(|item| self.show_all_tasks || item.attention())
+            .collect()
+    }
+
+    fn refresh_tasks(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(receiver) = &self.task_refresh {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    let selected_id = self
+                        .visible_tasks()
+                        .get(self.selected_task_index)
+                        .map(|task| task.id.clone());
+                    match result {
+                        Ok((records, unavailable)) => {
+                            self.task_items = super::tasks::queue_items(records);
+                            self.task_unavailable = unavailable;
+                            self.task_error = None;
+                        }
+                        Err(error) => {
+                            self.task_error =
+                                Some(crate::utils::sanitize_terminal_text(&format!("{error:#}")))
+                        }
+                    }
+                    let visible = self.visible_tasks();
+                    self.selected_task_index = selected_id
+                        .and_then(|id| visible.iter().position(|item| item.id == id))
+                        .unwrap_or(0);
+                    self.task_refresh = None;
+                    changed = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.task_error = Some("Task refresh stopped unexpectedly".into());
+                    self.task_refresh = None;
+                    changed = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if self.task_refresh.is_none() && std::time::Instant::now() >= self.task_refresh_at {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::managed::attention_snapshot());
+            });
+            self.task_refresh = Some(rx);
+            self.task_refresh_at = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        }
+        changed
+    }
+
+    fn task_key(&mut self, key: KeyEvent) -> bool {
+        if key.kind == event::KeyEventKind::Release || self.mode == Mode::Permission {
+            return false;
+        }
+        if key.code == KeyCode::F(7) {
+            self.show_tasks = !self.show_tasks;
+            self.show_jobs = false;
+            self.task_refresh_at = std::time::Instant::now();
+            return true;
+        }
+        if !self.show_tasks {
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc => self.show_tasks = false,
+            KeyCode::Up => self.selected_task_index = self.selected_task_index.saturating_sub(1),
+            KeyCode::Down => {
+                self.selected_task_index =
+                    (self.selected_task_index + 1).min(self.visible_tasks().len().saturating_sub(1))
+            }
+            KeyCode::Char('a') if key.modifiers.is_empty() => {
+                self.show_all_tasks = !self.show_all_tasks;
+                self.selected_task_index = 0;
+            }
+            KeyCode::Char('r') if key.modifiers.is_empty() => {
+                self.task_refresh_at = std::time::Instant::now()
+            }
+            KeyCode::Enter => {
+                if let Some(id) = self
+                    .visible_tasks()
+                    .get(self.selected_task_index)
+                    .map(|item| item.id.clone())
+                {
+                    self.task_open_request = Some(id);
+                    self.show_tasks = false;
+                    if self.mode == Mode::Streaming {
+                        self.status = "Task will open when this response ends".into();
+                    }
+                }
+            }
+            _ if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') => {
+                return false
+            }
+            _ => {}
+        }
+        true
     }
 
     fn refresh_jobs(&mut self, manager: &crate::tools::jobs::JobManager) {
@@ -572,6 +694,7 @@ async fn run_session(
         crate::diagnostics::phase(crate::diagnostics::Phase::Chat);
         let jobs = engine.jobs();
         app.refresh_jobs(&jobs);
+        needs_redraw |= app.refresh_tasks();
         needs_redraw |= !app.jobs.is_empty();
         if shutdown.is_cancelled() {
             if !app.save_session(db, session_id, engine) {
@@ -588,6 +711,20 @@ async fn run_session(
         }
 
         // Process pending submit
+        if let Some(id) = app.task_open_request.take() {
+            match super::tasks::execute(
+                &format!("/task open {id}"),
+                &mut selected_task,
+                args,
+                engine.model_binding(),
+            )
+            .await
+            {
+                Ok(text) => app.add_message("system", &text),
+                Err(error) => app.add_message("error", &format!("Task: {error:#}")),
+            }
+            needs_redraw = true;
+        }
         if let Some(input) = pending_submit.take() {
             let trimmed = input.trim().to_string();
             if trimmed == "/jobs" {
@@ -596,7 +733,14 @@ async fn run_session(
                 continue;
             }
 
-            if trimmed == "/tasks" || trimmed == "/task" || trimmed.starts_with("/task ") {
+            if trimmed == "/tasks" {
+                app.show_tasks = true;
+                app.show_jobs = false;
+                app.task_refresh_at = std::time::Instant::now();
+                needs_redraw = true;
+                continue;
+            }
+            if trimmed == "/task" || trimmed.starts_with("/task ") {
                 match super::tasks::execute(
                     &trimmed,
                     &mut selected_task,
@@ -814,6 +958,10 @@ async fn run_session(
         if crate::terminal_input::poll(std::time::Duration::from_millis(50))? {
             match crate::terminal_input::read_ready()? {
                 Event::Key(key) => {
+                    if app.task_key(key) {
+                        needs_redraw = true;
+                        continue;
+                    }
                     if app.job_key(key, &jobs) {
                         needs_redraw = true;
                         continue;
@@ -901,7 +1049,9 @@ async fn run_session(
                     }
                     needs_redraw = true;
                 }
-                Event::Paste(text) if app.mode == Mode::Input && !app.show_jobs => {
+                Event::Paste(text)
+                    if app.mode == Mode::Input && !app.show_jobs && !app.show_tasks =>
+                {
                     app.handle_paste(&text);
                     needs_redraw = true;
                 }
@@ -1170,8 +1320,9 @@ async fn drive_streaming<B: ratatui::backend::Backend>(
                 }
                 _ = tick.tick() => {
                     app.refresh_jobs(&jobs);
+                    app.refresh_tasks();
                     let event = keys.poll_event()?;
-                    let handled = match &event { Some(Event::Key(key)) => app.job_key(*key, &jobs), _ => app.show_jobs };
+                    let handled = match &event { Some(Event::Key(key)) => app.task_key(*key) || app.job_key(*key, &jobs), _ => app.show_jobs || app.show_tasks };
                     if !handled && poll_stream_key(&mut SingleEvent(event), &steer_buf, &steering)? {
                         cancel.cancel();
                         app.set_activity("Interrupting");
@@ -1473,6 +1624,27 @@ mod tests {
         for c in text.chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
+    }
+
+    #[test]
+    fn attention_queue_filters_navigates_and_opens_selected_task() {
+        let mut app = test_app();
+        app.task_items = super::super::tasks::queue_items(vec![
+            serde_json::json!({"id":"question", "stage":"needs_input"}),
+            serde_json::json!({"id":"review", "stage":"ready_for_review"}),
+            serde_json::json!({"id":"working", "stage":"working"}),
+        ]);
+        assert!(app.task_key(key(KeyCode::F(7))));
+        assert_eq!(app.visible_tasks().len(), 2);
+        assert!(app.task_key(key(KeyCode::Down)));
+        assert!(app.task_key(key(KeyCode::Enter)));
+        assert_eq!(app.task_open_request.as_deref(), Some("review"));
+        assert!(!app.show_tasks);
+        app.task_key(key(KeyCode::F(7)));
+        app.task_key(key(KeyCode::Char('a')));
+        assert_eq!(app.visible_tasks().len(), 3);
+        app.mode = Mode::Permission;
+        assert!(!app.task_key(key(KeyCode::Esc)));
     }
 
     #[test]

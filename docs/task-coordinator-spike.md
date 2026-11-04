@@ -10,7 +10,9 @@ those of ordinary Claux tasks.
 
 In the full-screen TUI, use `/task start <instructions>` to launch and select a
 worker, or `/task start-edit <instructions>` to create a worktree with edit
-permission. `/tasks` lists workers, `/task open <id>` selects one, and `/task
+permission. `/tasks` or F7 opens the attention queue; it shows questions,
+failures, interrupted workers, and review-ready results first. Press `a` to
+include all tasks, arrow keys to select one, and Enter to open it. `/task open <id>` also selects one, and `/task
 refresh` shows its status, report, and recent activity. Use `/task send
 <instructions>` to queue a follow-up, and `/task resume` or `/task cancel` to
 control it. Workers use the current session's model but do not receive its

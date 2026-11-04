@@ -266,7 +266,9 @@ context_window = 32000
         .unwrap()
         .write_all(b"/tasks\r")
         .unwrap();
-    process.wait_for_output(b"No background tasks");
+    process.wait_for_output(b"Nothing");
+    process.master.as_mut().unwrap().write_all(b"\x1b").unwrap();
+    std::thread::sleep(Duration::from_millis(150));
     process
         .master
         .as_mut()

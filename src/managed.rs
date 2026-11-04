@@ -297,6 +297,28 @@ fn status(dir: &Path) -> Result<Value> {
         "artifacts":dir}))
 }
 
+/// Snapshot tasks for the interactive attention queue. A damaged task record
+/// must not hide other tasks or prevent the TUI from opening.
+pub(crate) fn attention_snapshot() -> Result<(Vec<Value>, usize)> {
+    let root = root()?;
+    if !root.exists() {
+        return Ok((Vec::new(), 0));
+    }
+    let mut tasks = Vec::new();
+    let mut unavailable = 0;
+    for entry in fs::read_dir(root)? {
+        match entry {
+            Ok(entry) if entry.path().join("task.json").is_file() => match status(&entry.path()) {
+                Ok(record) => tasks.push(record),
+                Err(_) => unavailable += 1,
+            },
+            Ok(_) => {}
+            Err(_) => unavailable += 1,
+        }
+    }
+    Ok((tasks, unavailable))
+}
+
 fn event(dir: &Path, kind: &str, data: Value) -> Result<()> {
     let mut file = private_file(&dir.join("events.jsonl"))?;
     ensure!(
