@@ -62,19 +62,25 @@ claimed stops the worker without consuming that input.
 
 ## Reports and transport outcomes
 
-`--structured-report` asks the worker to end with a JSON object:
+`--structured-report` enables the `TaskReport` tool. The worker finishes by calling it with:
 
 ```json
 {"state":"needs_input","summary":"Both targets are available; no deployment attempted","question":"Which cluster should receive the change?"}
 ```
 
 States are `waiting`, `needs_input`, `ready_for_review`, and `failed`.
-`needs_input` requires a nonempty question. Invalid JSON, missing fields, or
-unknown states hold the queue for human review rather than guessing from prose.
-The contract is an additional system instruction, not a provider-specific
-response-format feature, so any configured model can attempt it.
+`needs_input` requires a nonempty question. The tool validates fields, lengths
+and state, rejects unknown fields and returns a normal tool error on invalid
+input so the model can correct it. It must be called alone after other tools
+finish; a valid call ends the turn after its result is paired in history.
 
-These reports are model claims, marked `advisory: true`. They are neither proof
+Narrative or JSON printed in assistant prose is no longer parsed as a report.
+A worker that ends without TaskReport holds the queue for review. Models may
+explain their work normally, but only the validated tool call creates the
+handoff. This uses ordinary tool calling, not a provider-specific response format.
+See [structured task reports](structured-task-reports.md).
+
+These reports are model claims, marked `advisory: true` by the coordinator. They are neither proof
 of test success nor authorization to deploy, push, merge, or message anyone.
 Without the option, ordinary output remains unchanged and a neutral `waiting`
 report records only that the turn ended.
