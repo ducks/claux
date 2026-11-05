@@ -5,6 +5,80 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::Duration;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueItem {
+    pub id: String,
+    pub stage: String,
+    pub model: String,
+    pub summary: String,
+    pub question: Option<String>,
+    pub queued: u64,
+}
+
+impl QueueItem {
+    pub fn attention(&self) -> bool {
+        matches!(
+            self.stage.as_str(),
+            "needs_input" | "failed" | "interrupted" | "ready_for_review"
+        )
+    }
+
+    pub fn label(&self) -> &str {
+        match self.stage.as_str() {
+            "needs_input" => "Needs an answer",
+            "failed" => "Failed",
+            "interrupted" => "Interrupted",
+            "ready_for_review" => "Ready for review",
+            "working" => "Working",
+            "cancelled" => "Cancelled",
+            _ => "Waiting",
+        }
+    }
+
+    fn rank(&self) -> u8 {
+        match self.stage.as_str() {
+            "needs_input" => 0,
+            "failed" | "interrupted" => 1,
+            "ready_for_review" => 2,
+            "working" => 3,
+            _ => 4,
+        }
+    }
+}
+
+pub fn queue_items(records: Vec<Value>) -> Vec<QueueItem> {
+    let mut items: Vec<_> = records
+        .into_iter()
+        .filter_map(|value| {
+            let id = value["id"].as_str()?.to_owned();
+            let stage = value["stage"].as_str().unwrap_or("unknown").to_owned();
+            let report = &value["report"];
+            let relevant = matches!(
+                stage.as_str(),
+                "needs_input" | "ready_for_review" | "failed"
+            ) && report["state"].as_str() == Some(stage.as_str());
+            Some(QueueItem {
+                id,
+                stage,
+                model: value["model"].as_str().unwrap_or("unknown").to_owned(),
+                summary: if relevant {
+                    report["summary"].as_str().unwrap_or("").to_owned()
+                } else {
+                    String::new()
+                },
+                question: if relevant {
+                    report["question"].as_str().map(str::to_owned)
+                } else {
+                    None
+                },
+                queued: value["queued_inputs"].as_u64().unwrap_or(0),
+            })
+        })
+        .collect();
+    items.sort_by(|a, b| a.rank().cmp(&b.rank()).then_with(|| a.id.cmp(&b.id)));
+    items
+}
+
 const HELP: &str = "Background tasks:\n/tasks — list tasks\n/task start <instructions> — start in the current directory\n/task start-worktree <instructions> — start in a new Git worktree\n/task start-edit <instructions> — start in a worktree with edit permission\n/task open <id> — select a task and view recent activity\n/task refresh — refresh the selected task\n/task send <instructions> — queue a follow-up\n/task resume — resume queued work after a handoff\n/task cancel — stop the current turn (queued inputs are kept)\nTasks use the current model and default background permissions unless start-edit is chosen. They do not inherit this conversation; include the context they need.";
 
 fn selected(id: &Option<String>) -> Result<&str> {
@@ -236,5 +310,26 @@ mod tests {
             "abc  needs_input  test-model  2 queued"
         );
         assert!(selected(&None).is_err());
+    }
+
+    #[test]
+    fn attention_items_are_prioritized_and_stale_reports_are_not_shown() {
+        let items = queue_items(vec![
+            serde_json::json!({"id":"running", "stage":"working", "report":{"state":"needs_input", "question":"old question"}}),
+            serde_json::json!({"id":"review", "stage":"ready_for_review", "report":{"state":"ready_for_review", "summary":"Ready"}}),
+            serde_json::json!({"id":"failed", "stage":"failed", "report":{"state":"ready_for_review", "summary":"old success"}}),
+            serde_json::json!({"id":"question", "stage":"needs_input", "report":{"state":"needs_input", "question":"Which target?"}}),
+        ]);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["question", "failed", "review", "running"]
+        );
+        assert_eq!(items.iter().filter(|item| item.attention()).count(), 3);
+        assert_eq!(items[0].question.as_deref(), Some("Which target?"));
+        assert!(items[1].summary.is_empty());
+        assert!(items[3].question.is_none());
     }
 }
