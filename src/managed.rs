@@ -24,7 +24,7 @@ pub enum TaskCommand {
         /// Create an isolated worktree and branch from HEAD
         #[arg(long)]
         worktree: bool,
-        /// Require a structured final report (waiting, needs_input, ready_for_review, failed)
+        /// Enable TaskReport handoffs (waiting, needs_input, ready_for_review, failed)
         #[arg(long)]
         structured_report: bool,
         /// Named model profile, resolved and pinned when the task is created
@@ -173,30 +173,14 @@ fn abandon_interrupted(dir: &Path, id: &str) -> Result<()> {
     save_inbox(dir, &inputs)
 }
 
-fn report(text: &str, structured: bool) -> Value {
+fn report(structured: bool, value: Option<crate::tools::task_report::Report>) -> Value {
     if !structured {
         return json!({"state":"waiting", "summary":"Turn ended; no structured task report requested", "advisory":true});
     }
-    let parsed = serde_json::from_str::<Value>(text);
-    if let Ok(value) = parsed {
-        let state = value["state"].as_str().unwrap_or_default();
-        let summary = value["summary"].as_str().unwrap_or_default();
-        let question = value.get("question").and_then(Value::as_str);
-        if matches!(
-            state,
-            "waiting" | "needs_input" | "ready_for_review" | "failed"
-        ) && !summary.trim().is_empty()
-            && summary.len() <= 8000
-            && question.is_none_or(|q| q.len() <= 2000)
-            && (state != "needs_input" || question.is_some_and(|q| !q.trim().is_empty()))
-        {
-            return json!({"state":state,"summary":summary,"question":question,"advisory":true});
-        }
-    }
-    json!({"state":"needs_input", "summary":"Worker did not produce a valid structured report; inspect result.json", "question":"Review the worker result before resuming queued work", "invalid_report":true,"advisory":true})
+    value.map(|report| report.handoff()).unwrap_or_else(|| json!({"state":"needs_input", "summary":"Worker ended without calling TaskReport; inspect result.json", "question":"Review the worker result before resuming queued work", "invalid_report":true,"missing_report":true,"advisory":true}))
 }
 
-const REPORT_INSTRUCTIONS: &str = "\n\nManaged task report contract: Finish your turn with a single JSON object, without markdown fences, with fields state, summary, and optional question. state must be waiting (this turn is done), needs_input (a specific human answer is required; include question), ready_for_review (a usable result awaits review), or failed (work could not be completed). Report actual evidence and uncertainty in summary; never imply that a successful model turn proves the work correct. This report does not grant permissions or authorize external actions.";
+const REPORT_INSTRUCTIONS: &str = "\n\nManaged task report contract: Finish this worker turn by calling TaskReport alone after your other tools finish. Use state waiting, needs_input (with a concrete question), ready_for_review, or failed, and a factual summary. You may explain your work normally, but prose or JSON in your answer does not create a handoff. A successful TaskReport call ends the turn. Reporting readiness never certifies verification or grants permissions to publish.";
 
 fn root() -> Result<PathBuf> {
     Ok(dirs::data_local_dir()
@@ -886,6 +870,7 @@ async fn work(dir: &Path) -> Result<()> {
     )
     .await?;
     if task.structured_report {
+        engine.enable_task_report();
         system_prompt.push_str(REPORT_INSTRUCTIONS);
     }
     engine.set_system_prompt(system_prompt);
@@ -958,10 +943,7 @@ async fn work(dir: &Path) -> Result<()> {
         value["outcome"]["result"] = value["result"].clone();
     }
     let handoff = if completed {
-        report(
-            value["result"].as_str().unwrap_or_default(),
-            task.structured_report,
-        )
+        report(task.structured_report, engine.task_report())
     } else {
         json!({"state":"failed", "summary":"Turn failed or was cancelled; inspect the original outcome", "advisory":true})
     };
@@ -1131,31 +1113,14 @@ mod tests {
     }
 
     #[test]
-    fn reports_require_valid_states_and_concrete_questions() {
-        let valid = report(
-            r#"{"state":"needs_input","summary":"Need a target","question":"Which cluster?"}"#,
-            true,
-        );
-        assert_eq!(valid["question"], "Which cluster?");
-        for text in [
-            "done",
-            r#"{"state":"success","summary":"done"}"#,
-            r#"{"state":"needs_input","summary":"blocked"}"#,
-            r#"{"state":"ready_for_review","summary":""}"#,
-        ] {
-            assert_eq!(report(text, true)["invalid_report"], true);
-        }
-        assert_eq!(
-            report("arbitrary ordinary output", false)["state"],
-            "waiting"
-        );
-        assert_eq!(
-            report(
-                r#"{"state":"ready_for_review","summary":"Tests passed"}"#,
-                true
-            )["advisory"],
-            true
-        );
+    fn reports_require_a_typed_handoff_and_keep_neutral_mode() {
+        assert_eq!(report(true, None)["missing_report"], true);
+        assert_eq!(report(false, None)["state"], "waiting");
+        let value: crate::tools::task_report::Report = serde_json::from_value(
+            json!({"state":"needs_input","summary":"Need a target","question":"Which target?"}),
+        )
+        .unwrap();
+        assert_eq!(report(true, Some(value))["question"], "Which target?");
     }
 
     #[test]

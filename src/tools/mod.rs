@@ -9,6 +9,7 @@ pub(crate) mod mcp;
 mod mcp_manage;
 pub(crate) mod read;
 mod search_filter;
+pub(crate) mod task_report;
 pub(crate) mod todo;
 mod web_fetch;
 mod write;
@@ -88,6 +89,7 @@ pub trait Tool: Send + Sync {
 /// Registry holding all available tools.
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
+    task_report: Option<task_report::SharedReport>,
     pub jobs: Arc<jobs::JobManager>,
     command_sandbox: Arc<CommandSandbox>,
     live_mcp: Option<(
@@ -114,6 +116,25 @@ impl ToolRegistry {
         }
         Ok(())
     }
+    pub(crate) fn enable_task_report(&mut self) {
+        if self.task_report.is_none() {
+            let slot = Arc::new(std::sync::Mutex::new(task_report::ReportSlot::default()));
+            self.tools
+                .push(Box::new(task_report::TaskReportTool(slot.clone())));
+            self.task_report = Some(slot);
+        }
+    }
+
+    pub(crate) fn prepare_task_report(&self, standalone: bool) {
+        if let Some(slot) = &self.task_report {
+            task_report::prepare(slot, standalone);
+        }
+    }
+
+    pub(crate) fn task_report(&self) -> Option<task_report::Report> {
+        self.task_report.as_ref().and_then(task_report::snapshot)
+    }
+
     pub fn set_max_tokens(&mut self, max_tokens: u32) {
         for tool in &mut self.tools {
             tool.set_max_tokens(max_tokens);
@@ -161,6 +182,7 @@ impl ToolRegistry {
             jobs,
             command_sandbox,
             live_mcp: None,
+            task_report: None,
         }
     }
 
@@ -189,6 +211,7 @@ impl ToolRegistry {
             jobs,
             command_sandbox,
             live_mcp: None,
+            task_report: None,
         }
     }
 

@@ -51,7 +51,8 @@ fn model_can_start_a_restricted_background_worker() {
     let server = std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut count = 0;
-        while count < 3 && std::time::Instant::now() < deadline {
+        let mut worker_reports = 0;
+        while count < 4 && std::time::Instant::now() < deadline {
             let (mut stream, _) = match listener.accept() {
                 Ok(value) => value,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -85,7 +86,12 @@ fn model_can_start_a_restricted_background_worker() {
                 .iter()
                 .any(|message| message["role"] == "tool");
             let chunk = if worker {
-                json!({"choices":[{"index":0,"delta":{"content":"{\"state\":\"ready_for_review\",\"summary\":\"Research complete\"}"},"finish_reason":"stop"}]})
+                worker_reports += 1;
+                let mut report = json!({"state":"ready_for_review","summary":"Research complete"});
+                if worker_reports == 1 {
+                    report["acceptance_checks_passed"] = json!(true);
+                }
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":format!("report-worker-{worker_reports}"),"type":"function","function":{"name":"TaskReport","arguments":report.to_string()}}]},"finish_reason":"tool_calls"}]})
             } else if followup {
                 json!({"choices":[{"index":0,"delta":{"content":"Worker started."},"finish_reason":"stop"}]})
             } else {
@@ -135,7 +141,7 @@ context_window = 32000
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let requests: Vec<_> = (0..3)
+    let requests: Vec<_> = (0..4)
         .map(|_| requests_rx.recv_timeout(Duration::from_secs(15)).unwrap())
         .collect();
     let worker = &requests.iter().find(|(worker, _)| *worker).unwrap().1;
@@ -146,6 +152,22 @@ context_window = 32000
         .filter_map(|tool| tool["function"]["name"].as_str())
         .collect();
     assert!(names.contains(&"Read"));
+    assert!(names.contains(&"TaskReport"));
+    assert_eq!(requests.iter().filter(|(worker, _)| *worker).count(), 2);
+    assert!(requests
+        .iter()
+        .filter(|(worker, _)| *worker)
+        .last()
+        .unwrap()
+        .1["messages"]
+        .to_string()
+        .contains("acceptance_checks_passed"));
+    let parent = &requests.iter().find(|(worker, _)| !*worker).unwrap().1;
+    assert!(!parent["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["function"]["name"] == "TaskReport"));
     assert!(!names.contains(&"Write"));
     assert!(!names.contains(&"Bash"));
     assert!(!names.contains(&"TaskManage"));
@@ -237,16 +259,15 @@ fn run_scenario(structured_report: bool) {
             } else {
                 "follow-up answer"
             };
-            let report_text = json!({"state":if count == 1 {"waiting"} else {"ready_for_review"}, "summary":text}).to_string();
-            let text = if structured_report {
-                report_text.as_str()
+            let delta = if structured_report {
+                json!({"role":"assistant","content":"Narration is not the handoff. ","tool_calls":[{"index":0,"id":format!("report-{count}"),"type":"function","function":{"name":"TaskReport","arguments":json!({"state":if count == 1 {"waiting"} else {"ready_for_review"},"summary":text}).to_string()}}]})
             } else {
-                text
+                json!({"role":"assistant","content":text})
             };
             let payload = format!(
                 "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-                json!({"id":"fixture","choices":[{"index":0,"delta":{"role":"assistant","content":text},"finish_reason":null}]}),
-                json!({"id":"fixture","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}})
+                json!({"id":"fixture","choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+                json!({"id":"fixture","choices":[{"index":0,"delta":{},"finish_reason":if structured_report {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":10,"completion_tokens":2}})
             );
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", payload.len(), payload).unwrap();
         }

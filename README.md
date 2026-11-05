@@ -289,6 +289,13 @@ openai_api_key_cmd = "op read 'op://vault/OpenAI/key'"
 openai_provider_name = "openai"
 ```
 
+## Structured worker handoffs
+
+Managed tasks started with `--structured-report` use the validated `TaskReport`
+tool rather than JSON extracted from assistant prose. A valid handoff ends the
+worker turn; model readiness remains advisory, not proof that tests passed.
+See [structured task reports](docs/structured-task-reports.md).
+
 ## Experimental background tasks
 
 The [managed agent spike](docs/managed-agent-spike.md) adds `claux task` commands

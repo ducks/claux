@@ -645,6 +645,15 @@ impl Engine {
         self.system_prompt = prompt;
     }
 
+    pub(crate) fn enable_task_report(&mut self) {
+        self.tools.enable_task_report();
+        self.fixed_context_overhead = Self::estimate_tool_overhead(&self.tools);
+    }
+
+    pub(crate) fn task_report(&self) -> Option<crate::tools::task_report::Report> {
+        self.tools.task_report()
+    }
+
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
@@ -715,6 +724,7 @@ impl Engine {
     }
 
     fn start_recording(&mut self) {
+        self.tools.prepare_task_report(false);
         self.tool_trace.clear();
         self.model_trace.clear();
         self.trace_duration_ms = None;
@@ -1944,6 +1954,7 @@ impl Engine {
                 break;
             }
 
+            self.tools.prepare_task_report(tool_uses.len() == 1);
             let (result_blocks, interrupted) = self
                 .execute_tool_batch(&tool_uses, &tx, interactive, &cancel)
                 .await;
@@ -1953,6 +1964,11 @@ impl Engine {
             if interrupted {
                 let _ = tx.send(StreamEvent::Interrupted).await;
                 return Ok(());
+            }
+
+            if self.tools.task_report().is_some() {
+                let _ = tx.send(StreamEvent::Done).await;
+                break;
             }
 
             // A one-shot agent can execute dozens of tool rounds inside one
