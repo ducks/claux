@@ -8,6 +8,7 @@ mod managed_task;
 pub(crate) mod mcp;
 mod mcp_manage;
 pub(crate) mod read;
+mod search_budget;
 mod search_filter;
 pub(crate) mod task_report;
 pub(crate) mod todo;
