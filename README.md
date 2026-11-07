@@ -865,3 +865,10 @@ inactive log files and removes inactive logs older than seven days; live process
 are excluded. Platforms without process-liveness checks retain old runs for manual
 cleanup. Diagnostic events use a bounded queue; a full queue drops events rather
 than blocking the UI. File failures produce a warning and stop diagnostic writing.
+
+### Filesystem search limits
+
+Glob and Grep use bounded blocking workers with cancellation checks, a five-second
+cooperative budget, entry/result limits, and explicit partial-results notices.
+Grep also bounds file reads. See [filesystem search limits](docs/filesystem-search-limits.md)
+for defaults and filesystem I/O limitations.
