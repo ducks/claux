@@ -252,13 +252,49 @@ async fn run() -> Result<std::process::ExitCode> {
 
     // One-shot mode: --print / -p
     if let Some(ref prompt) = args.prompt {
-        let mut engine = build_engine(&config, &requested_model, plugin_registry.clone()).await?;
+        let mut resolved = requested_model.clone();
+        let mut saved_session = None;
+        let mut history = None;
+        if let Some(prefix) = args.resume.as_deref() {
+            anyhow::ensure!(
+                args.model.is_none(),
+                "--model cannot override a resumed one-shot session"
+            );
+            let (id, path) = session::find_session(prefix)?
+                .ok_or_else(|| anyhow::anyhow!("Session not found: {prefix}"))?;
+            let (meta, messages) = session::load_session(&path)?;
+            anyhow::ensure!(
+                meta.recovered_messages == 0,
+                "session contains unreadable messages; inspect it before headless continuation"
+            );
+            let saved_cwd = std::path::Path::new(&meta.cwd).canonicalize()?;
+            anyhow::ensure!(
+                saved_cwd == std::env::current_dir()?.canonicalize()?,
+                "resumed one-shot session must use its original working directory"
+            );
+            resolved = match meta.model_binding.as_ref() {
+                Some(binding) => config.resolve_binding(binding)?,
+                None => config.resolve_model(&meta.model).map_err(|error| {
+                    anyhow::anyhow!("session {} model cannot be resolved: {error}", meta.id)
+                })?,
+            };
+            let archive = session::load_archive(&path)?;
+            history = Some((messages, archive));
+            saved_session = Some((id, path));
+        } else if args.persist_session {
+            saved_session = Some(session::create_session_with_model(&resolved)?);
+        }
+        let mut engine = build_engine(&config, &resolved, plugin_registry.clone()).await?;
+        if let Some((messages, archive)) = history {
+            engine.set_messages(messages);
+            engine.set_archive(archive);
+        }
 
         let system_prompt = context::build_system_prompt_for_model(
-            &requested_model.binding.model,
+            &resolved.binding.model,
             Some(&plugin_registry),
             &config::HookTrigger::OnContextBuild,
-            requested_model.binding.provider_kind == config::ProviderKind::Anthropic,
+            resolved.binding.provider_kind == config::ProviderKind::Anthropic,
             config.is_project_trusted(),
         )
         .await?;
@@ -318,15 +354,30 @@ async fn run() -> Result<std::process::ExitCode> {
             .with_archive(engine.archive());
             output::write_transcript(path, &transcript)?;
         }
+        if let Some((_, path)) = saved_session.as_ref() {
+            if let Err(error) = session::save_engine(path, &engine) {
+                let recovery = session::write_engine_recovery(path, &engine)?;
+                anyhow::bail!(
+                    "could not save session: {error}; recovery written to {}",
+                    recovery.display()
+                );
+            }
+        }
         let json = matches!(
             args.output_format.unwrap_or_default(),
             cli::OutputFormat::Json
         );
+        if !json {
+            if let Some((id, _)) = saved_session.as_ref() {
+                eprintln!("Session: {id}");
+            }
+        }
         match response {
             Ok(response) => {
                 if json {
                     let output =
-                        output::OneShotOutput::new(&response, engine.model(), &engine.cost);
+                        output::OneShotOutput::new(&response, engine.model(), &engine.cost)
+                            .with_session(saved_session.as_ref().map(|(id, _)| id.as_str()));
                     serde_json::to_writer(std::io::stdout().lock(), &output)?;
                     println!();
                 } else {
@@ -345,7 +396,8 @@ async fn run() -> Result<std::process::ExitCode> {
                         &engine.cost,
                         &message,
                         Some(&failure),
-                    );
+                    )
+                    .with_session(saved_session.as_ref().map(|(id, _)| id.as_str()));
                     serde_json::to_writer(std::io::stdout().lock(), &output)?;
                     println!();
                 }

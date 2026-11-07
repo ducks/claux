@@ -17,6 +17,8 @@ pub struct OneShotOutput<'a> {
     pub model: &'a str,
     pub usage: UsageSummary,
     pub outcome: TranscriptOutcome<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<&'a str>,
 }
 
 impl<'a> OneShotOutput<'a> {
@@ -27,6 +29,7 @@ impl<'a> OneShotOutput<'a> {
             model,
             usage: cost.usage_summary(),
             outcome: TranscriptOutcome::Completed { result },
+            session_id: None,
         }
     }
 
@@ -42,7 +45,13 @@ impl<'a> OneShotOutput<'a> {
             model,
             usage: cost.usage_summary(),
             outcome: TranscriptOutcome::Error { message, failure },
+            session_id: None,
         }
+    }
+
+    pub fn with_session(mut self, session_id: Option<&'a str>) -> Self {
+        self.session_id = session_id;
+        self
     }
 }
 

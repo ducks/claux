@@ -324,9 +324,21 @@ claux -p "explain this error" --output-format json
 claux -p "repair the service" --output-format json \
   --transcript ./artifacts/claux-transcript.json
 
+# Persist a one-shot session; JSON output includes session_id.
+claux -p "inspect this repository" --persist-session --output-format json
+claux -p "continue the investigation" --resume SESSION_ID --output-format json
+
 # Resume a session
 claux --resume 20260401-143022
 ```
+
+Headless continuation uses the saved session's model binding and original
+working directory; it rejects an explicit `--model` override or a changed
+working directory. History is saved after each one-shot turn, including a
+failed turn when possible. A hard interruption before that save can leave the
+session behind the partial `--transcript` checkpoint; inspect the transcript
+and any tool effects before retrying. Do not run concurrent continuations of
+the same session: session writes are not coordinated across processes.
 
 JSON output has a versioned contract suitable for CI, agent evaluations, and
 other automation:

@@ -49,8 +49,12 @@ pub struct Cli {
     pub model: Option<String>,
 
     /// Resume a previous session
-    #[arg(long, conflicts_with_all = ["prompt", "tui"])]
+    #[arg(long, conflicts_with = "tui")]
     pub resume: Option<String>,
+
+    /// Persist a new one-shot session and include its ID in JSON output.
+    #[arg(long, requires = "prompt", conflicts_with = "resume")]
+    pub persist_session: bool,
 
     /// Permission mode (default, accept-edits, auto, bypass, plan)
     #[arg(long)]
@@ -289,9 +293,10 @@ pub enum ConfigCommand {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn resume_cannot_be_silently_ignored_by_another_mode() {
-        assert!(Cli::try_parse_from(["claux", "--resume", "id", "--print", "hello"]).is_err());
+    fn resume_is_available_in_one_shot_but_not_tui() {
+        assert!(Cli::try_parse_from(["claux", "--resume", "id", "--print", "hello"]).is_ok());
         assert!(Cli::try_parse_from(["claux", "--resume", "id", "--tui"]).is_err());
+        assert!(Cli::try_parse_from(["claux", "--persist-session"]).is_err());
     }
     #[test]
     fn transport_flags_override_without_rewriting_config() {
