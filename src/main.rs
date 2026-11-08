@@ -14,6 +14,7 @@ mod diagnostics;
 #[cfg(test)]
 mod evals;
 mod image_input;
+mod lifecycle;
 mod logging;
 mod managed;
 mod model;
@@ -316,8 +317,36 @@ async fn run() -> Result<std::process::ExitCode> {
             engine.set_transcript_checkpoint(path.clone());
         }
 
+        let events = if let Some(path) = args.event_log.as_deref() {
+            let log = Arc::new(lifecycle::LifecycleLog::create(path)?);
+            if let Some(transcript) = args.transcript.as_ref() {
+                if let (Ok(event_path), Ok(transcript_path)) =
+                    (path.canonicalize(), transcript.canonicalize())
+                {
+                    anyhow::ensure!(
+                        event_path != transcript_path,
+                        "event log and transcript must be different files"
+                    );
+                }
+            }
+            log.started()?;
+            Some(log)
+        } else {
+            None
+        };
+
         let cancel = shutdown::one_shot_cancellation_token()?;
-        let response = if args.image.is_empty() {
+        let response = if let Some(events) = events.as_ref() {
+            let message = if args.image.is_empty() {
+                api::types::Message::user(prompt)
+            } else {
+                let images = image_input::load_images(&args.image)?;
+                api::types::Message::user_with_images(prompt, images)
+            };
+            engine
+                .submit_observed(message, cancel.clone(), events.clone())
+                .await
+        } else if args.image.is_empty() {
             engine.submit(prompt, cancel.clone()).await
         } else {
             let images = image_input::load_images(&args.image)?;
@@ -375,6 +404,9 @@ async fn run() -> Result<std::process::ExitCode> {
                     recovery.display()
                 );
             }
+        }
+        if let Some(events) = events.as_ref() {
+            events.finished(response.is_ok()).map_err(|error| anyhow::anyhow!("could not finish lifecycle log: {error}; inspect transcript and tool effects before retrying"))?;
         }
         let json = matches!(
             args.output_format.unwrap_or_default(),

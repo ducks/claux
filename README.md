@@ -358,6 +358,20 @@ wired through the gate. The gate is a synchronous decision interface, not a
 durable human approval queue, and it does not itself isolate network or host
 resources. Supervised deployments must enforce those boundaries separately.
 
+`--event-log FILE` adds a private, metadata-only JSON Lines lifecycle log to a
+one-shot run. The file must not already exist and must differ from the
+transcript. Records contain `schema_version`, a zero-based `sequence`,
+monotonic `elapsed_ms`, `event`, and event-specific `details`. Events cover
+turn start/finish, model requests and retries, and tool start/running/finish
+and result status. Prompts, model text, tool inputs and tool outputs are not
+included. Unknown tool names are reported as `other`.
+
+The log is flushed as events arrive but is not a transactional journal or a
+replacement for the transcript. A missing final event means the turn's
+outcome is unknown. If writing fails, Claux cancels the turn; a tool may
+already have changed state, so inspect the transcript and effects before
+retrying. The final event is emitted after session and transcript saves.
+
 JSON output has a versioned contract suitable for CI, agent evaluations, and
 other automation:
 

@@ -48,6 +48,10 @@ pub struct Cli {
     #[arg(long, requires = "prompt", value_name = "FILE")]
     pub permission_gate: Option<PathBuf>,
 
+    /// Write metadata-only one-shot lifecycle events as JSON lines.
+    #[arg(long, requires = "prompt", value_name = "FILE")]
+    pub event_log: Option<PathBuf>,
+
     /// Model to use
     #[arg(long)]
     pub model: Option<String>,

@@ -60,6 +60,7 @@ fn one_shot_session_persists_and_resumes_with_prior_history() {
     });
     let config = home.path().join("config.toml");
     fs::write(&config,format!("default_model = \"test\"\n[providers.fixture]\ntype = \"openai\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\napi_key_env = \"CLAUX_TEST_KEY\"\n[model_profiles.test]\nprovider = \"fixture\"\nmodel = \"fixture-model\"\ncontext_window = 32000\n")).unwrap();
+    let events = home.path().join("events.jsonl");
     let first = run(
         home.path(),
         &config,
@@ -69,10 +70,24 @@ fn one_shot_session_persists_and_resumes_with_prior_history() {
             "--persist-session",
             "--output-format",
             "json",
+            "--event-log",
+            events.to_str().unwrap(),
         ],
     );
     let id = first["session_id"].as_str().unwrap();
     assert_eq!(first["result"], "answer-0");
+    let event_text = fs::read_to_string(&events).unwrap();
+    let records: Vec<Value> = event_text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.first().unwrap()["event"], "turn_started");
+    assert_eq!(records.last().unwrap()["event"], "turn_finished");
+    assert!(records
+        .iter()
+        .any(|event| event["event"] == "model_request"));
+    assert!(!event_text.contains("first prompt"));
+    assert!(!event_text.contains("answer-0"));
     let second = run(
         home.path(),
         &config,
