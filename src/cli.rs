@@ -44,6 +44,10 @@ pub struct Cli {
     #[arg(long, value_name = "FILE", requires = "prompt")]
     pub transcript: Option<PathBuf>,
 
+    /// Require an external per-action approval executable in one-shot mode.
+    #[arg(long, requires = "prompt", value_name = "FILE")]
+    pub permission_gate: Option<PathBuf>,
+
     /// Model to use
     #[arg(long)]
     pub model: Option<String>,

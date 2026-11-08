@@ -44,6 +44,7 @@ pub struct Engine {
     steering: SteeringQueue,
     pending_images: Vec<ImageSource>,
     plugins: Option<Arc<PluginRegistry>>,
+    permission_gate: Option<PathBuf>,
     checkpoint_enabled: bool,
     pending_checkpoint: Option<PendingCheckpoint>,
     last_checkpoint: Option<TurnCheckpoint>,
@@ -367,6 +368,7 @@ impl Engine {
             steering: SteeringQueue::default(),
             pending_images: Vec::new(),
             plugins: None,
+            permission_gate: None,
             checkpoint_enabled: true,
             pending_checkpoint: None,
             last_checkpoint: None,
@@ -410,6 +412,7 @@ impl Engine {
             steering,
             pending_images: Vec::new(),
             plugins: None,
+            permission_gate: None,
             checkpoint_enabled: false,
             pending_checkpoint: None,
             last_checkpoint: None,
@@ -429,6 +432,10 @@ impl Engine {
 
     /// Attach lifecycle hooks to the engine so every frontend observes the
     /// same tool, permission, and turn events.
+    pub fn set_permission_gate(&mut self, path: PathBuf) {
+        self.permission_gate = Some(path);
+    }
+
     pub fn set_plugins(&mut self, plugins: Arc<PluginRegistry>) {
         self.plugins = Some(plugins);
     }
@@ -2270,6 +2277,39 @@ impl Engine {
         input: &serde_json::Value,
         is_read_only: bool,
     ) -> PermissionResult {
+        let result = self
+            .decide_base_permission(tool_name, input, is_read_only)
+            .await;
+        let Some(gate) = &self.permission_gate else {
+            return result;
+        };
+        if matches!(result, PermissionResult::Deny(_)) {
+            return result;
+        }
+        // These tools can launch new execution engines or install providers that
+        // are not wired to this gate. Do not create an ungated nested agent.
+        if matches!(tool_name, "Agent" | "TaskManage" | "McpManage") {
+            return PermissionResult::Deny("tool unavailable with required permission gate".into());
+        }
+        let proposed = crate::permissions::proposed_decision(&result);
+        match crate::permission_gate::authorize(gate, tool_name, input, is_read_only, proposed)
+            .await
+        {
+            Ok(true) => PermissionResult::Allow,
+            Ok(false) => PermissionResult::Deny("external permission gate denied action".into()),
+            Err(error) => {
+                tracing::warn!("external permission gate failed: {error}");
+                PermissionResult::Deny("external permission gate failed".into())
+            }
+        }
+    }
+
+    async fn decide_base_permission(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        is_read_only: bool,
+    ) -> PermissionResult {
         let result = self.permissions.check(tool_name, input, is_read_only);
         let Some(plugins) = &self.plugins else {
             return result;
@@ -3974,6 +4014,7 @@ mod tests {
             steering: SteeringQueue::default(),
             pending_images: Vec::new(),
             plugins: None,
+            permission_gate: None,
             checkpoint_enabled: false,
             pending_checkpoint: None,
             last_checkpoint: None,
@@ -4064,6 +4105,7 @@ mod tests {
             steering: SteeringQueue::default(),
             pending_images: Vec::new(),
             plugins: None,
+            permission_gate: None,
             checkpoint_enabled: false,
             pending_checkpoint: None,
             last_checkpoint: None,
@@ -5687,6 +5729,7 @@ mod tests {
             steering: SteeringQueue::default(),
             pending_images: Vec::new(),
             plugins: None,
+            permission_gate: None,
             checkpoint_enabled: false,
             pending_checkpoint: None,
             last_checkpoint: None,
@@ -5769,6 +5812,7 @@ mod tests {
             steering: SteeringQueue::default(),
             pending_images: Vec::new(),
             plugins: None,
+            permission_gate: None,
             checkpoint_enabled: false,
             pending_checkpoint: None,
             last_checkpoint: None,
@@ -5916,5 +5960,71 @@ mod tests {
             .expect("execution updates must not wait for the full batch");
         assert!(!interrupted);
         assert_eq!(blocks.len(), 2);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn required_gate_cannot_be_bypassed_by_nested_agents_or_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let gate = root.path().join("gate");
+        std::fs::write(&gate, "#!/usr/bin/python3\nimport json,sys\nr=json.load(sys.stdin)\nprint(json.dumps({'request_id':r['request_id'],'decision':'allow'}))\n").unwrap();
+        std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut engine = steering_engine(vec![], None);
+        engine.set_permission_gate(gate.clone());
+        assert!(matches!(
+            engine
+                .decide_permission("Write", &serde_json::json!({"file_path":"a"}), false)
+                .await,
+            PermissionResult::Allow
+        ));
+        for tool in ["Agent", "TaskManage", "McpManage"] {
+            assert!(matches!(
+                engine
+                    .decide_permission(tool, &serde_json::json!({}), false)
+                    .await,
+                PermissionResult::Deny(_)
+            ));
+        }
+        std::fs::write(&gate, "#!/bin/sh\nexit 1\n").unwrap();
+        assert!(matches!(
+            engine
+                .decide_permission("Write", &serde_json::json!({"file_path":"a"}), false)
+                .await,
+            PermissionResult::Deny(_)
+        ));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn required_gate_enforces_decision_before_real_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let gate = root.path().join("gate");
+        let target = root.path().join("output");
+        let tool = crate::test_support::tool_use(
+            "write-1",
+            "Write",
+            serde_json::json!({"file_path":target,"content":"approved"}),
+        );
+        std::fs::write(&gate, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut denied = steering_engine(vec![tool.clone()], None);
+        denied.set_permission_gate(gate.clone());
+        denied
+            .submit("write", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!target.exists());
+        assert!(denied
+            .tool_trace()
+            .iter()
+            .any(|entry| entry.name == "Write" && entry.is_error));
+        std::fs::write(&gate,"#!/usr/bin/python3\nimport json,sys\nr=json.load(sys.stdin)\nprint(json.dumps({'request_id':r['request_id'],'decision':'allow'}))\n").unwrap();
+        let mut allowed = steering_engine(vec![tool], None);
+        allowed.set_permission_gate(gate);
+        allowed
+            .submit("write", tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "approved");
     }
 }

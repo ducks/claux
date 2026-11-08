@@ -340,6 +340,24 @@ session behind the partial `--transcript` checkpoint; inspect the transcript
 and any tool effects before retrying. Do not run concurrent continuations of
 the same session: session writes are not coordinated across processes.
 
+For a supervised one-shot run, `--permission-gate /absolute/path/to/gate`
+requires an external decision for each otherwise-permitted tool call. Claux
+sends one JSON object on stdin containing `schema_version`, a unique
+`request_id`, `tool`, exact `input`, `cwd`, `read_only`, and
+`proposed_decision`. The executable must return exactly one JSON object such as
+`{"request_id":"<same id>","decision":"deny"}`; `allow` and `deny` are the
+only accepted decisions. A response applies only to that request. Missing,
+invalid, mismatched, oversized, failed, or timed-out responses deny the call.
+The gate has a 10-second deadline, receives an empty environment, and is a
+trusted operator-supplied executable. It does not bypass an existing deny rule
+or filesystem containment.
+
+Gate mode currently refuses plugins and configured MCP servers and blocks
+`Agent`, `TaskManage`, and `McpManage`: their nested execution is not yet
+wired through the gate. The gate is a synchronous decision interface, not a
+durable human approval queue, and it does not itself isolate network or host
+resources. Supervised deployments must enforce those boundaries separately.
+
 JSON output has a versioned contract suitable for CI, agent evaluations, and
 other automation:
 
