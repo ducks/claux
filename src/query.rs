@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -1359,6 +1359,47 @@ impl Engine {
         let text = collector.await.unwrap_or_default();
         self.finish_checkpoint();
         self.fire_hook(&HookTrigger::OnTurnEnd).await;
+        result?;
+        Ok(text)
+    }
+
+    /// Run a noninteractive turn while emitting metadata-only lifecycle events.
+    pub async fn submit_observed(
+        &mut self,
+        message: Message,
+        cancel: tokio_util::sync::CancellationToken,
+        events: Arc<crate::lifecycle::LifecycleLog>,
+    ) -> Result<String> {
+        let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
+        self.start_recording();
+        self.begin_checkpoint();
+        let collector_cancel = cancel.clone();
+        let collector = tokio::spawn(async move {
+            let mut text = String::new();
+            let mut failure = None;
+            while let Some(event) = rx.recv().await {
+                if failure.is_none() {
+                    if let Err(error) = events.record(&event) {
+                        failure = Some(error.to_string());
+                        collector_cancel.cancel();
+                    }
+                }
+                match event {
+                    StreamEvent::Text(t) => text.push_str(&t),
+                    StreamEvent::Retry(_) => text.clear(),
+                    _ => {}
+                }
+            }
+            (text, failure)
+        });
+        let result = self.run_turn(message, tx, false, cancel).await;
+        self.finish_recording();
+        let (text, failure) = collector.await.context("lifecycle collector failed")?;
+        self.finish_checkpoint();
+        self.fire_hook(&HookTrigger::OnTurnEnd).await;
+        if let Some(error) = failure {
+            anyhow::bail!("lifecycle log failed: {error}; inspect tool effects before retrying");
+        }
         result?;
         Ok(text)
     }
@@ -6026,5 +6067,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(target).unwrap(), "approved");
+    }
+    #[tokio::test]
+    async fn observed_turn_records_tool_lifecycle_without_content() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("result");
+        let events = root.path().join("events");
+        let log = Arc::new(crate::lifecycle::LifecycleLog::create(&events).unwrap());
+        log.started().unwrap();
+        let mut engine = steering_engine(
+            vec![crate::test_support::tool_use(
+                "write-1",
+                "Write",
+                serde_json::json!({"file_path":target,"content":"private-written-content"}),
+            )],
+            None,
+        );
+        let response = engine
+            .submit_observed(
+                Message::user("private-prompt"),
+                tokio_util::sync::CancellationToken::new(),
+                log.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(!response.is_empty());
+        log.finished(true).unwrap();
+        let text = std::fs::read_to_string(events).unwrap();
+        assert!(text.contains("tool_started"));
+        assert!(text.contains("tool_finished"));
+        assert!(!text.contains("private-prompt"));
+        assert!(!text.contains("private-written-content"));
     }
 }
