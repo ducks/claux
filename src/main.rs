@@ -20,6 +20,7 @@ mod model;
 mod model_catalog;
 mod onboarding;
 mod output;
+mod permission_gate;
 mod permissions;
 mod plugin;
 mod providers;
@@ -252,6 +253,13 @@ async fn run() -> Result<std::process::ExitCode> {
 
     // One-shot mode: --print / -p
     if let Some(ref prompt) = args.prompt {
+        if args.permission_gate.is_some() {
+            anyhow::ensure!(config.plugins.is_empty() && config.mcp_servers.is_empty(), "required permission gate cannot be combined with plugins or configured MCP servers");
+            anyhow::ensure!(
+                !(config.is_project_trusted() && std::path::Path::new(".mcp.json").exists()),
+                "required permission gate cannot be combined with project MCP servers"
+            );
+        }
         let mut resolved = requested_model.clone();
         let mut saved_session = None;
         let mut history = None;
@@ -285,6 +293,11 @@ async fn run() -> Result<std::process::ExitCode> {
             saved_session = Some(session::create_session_with_model(&resolved)?);
         }
         let mut engine = build_engine(&config, &resolved, plugin_registry.clone()).await?;
+        if let Some(path) = args.permission_gate.as_ref() {
+            let path = path.canonicalize()?;
+            anyhow::ensure!(path.is_file(), "permission gate must be a file");
+            engine.set_permission_gate(path);
+        }
         if let Some((messages, archive)) = history {
             engine.set_messages(messages);
             engine.set_archive(archive);
