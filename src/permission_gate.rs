@@ -99,7 +99,7 @@ mod tests {
         let path = root.join("gate");
         std::fs::write(
             &path,
-            format!("#!/usr/bin/python3\nimport json,sys,time\n{body}\n"),
+            crate::test_support::python_script(&format!("import json,sys,time\n{body}")),
         )
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();

@@ -218,6 +218,8 @@ pub fn complete(token: &str, surface: Surface) -> Vec<&'static CommandSpec> {
 pub enum CommandResult {
     /// Print text to the user
     Text(String),
+    /// Clear the display without changing the conversation context
+    Clear,
     /// Exit the REPL
     Exit,
     /// Async command that needs engine access (handled by caller)
@@ -273,7 +275,7 @@ pub fn parse_command(input: &str, surface: Surface) -> Option<CommandResult> {
             "Background task controls are available in the full-screen TUI (claux --tui); use claux task from a terminal.".to_string(),
         )),
         "/exit" => Some(CommandResult::Exit),
-        "/clear" => Some(CommandResult::Text("\x1b[2J\x1b[H".to_string())),
+        "/clear" => Some(CommandResult::Clear),
         "/compact" => Some(CommandResult::Async(AsyncCommand::Compact)),
         "/auto" => Some(CommandResult::Async(AsyncCommand::Auto)),
         "/context" => Some(CommandResult::Text("__context__".to_string())),
@@ -525,6 +527,16 @@ mod tests {
     #[test]
     fn non_command_returns_none() {
         assert!(parse_command("hello world", Surface::Tui).is_none());
+    }
+
+    #[test]
+    fn clear_is_a_display_action_on_both_surfaces() {
+        for surface in [Surface::Tui, Surface::Repl] {
+            assert!(matches!(
+                parse_command("/clear", surface),
+                Some(CommandResult::Clear)
+            ));
+        }
     }
 
     #[test]

@@ -210,3 +210,14 @@ pub async fn sse_response(body: &str) -> reqwest::Response {
 
     reqwest::get(format!("http://{address}")).await.unwrap()
 }
+#[cfg(unix)]
+pub fn python_script(body: &str) -> String {
+    // Gates clear their environment, so resolve Python before launching them.
+    let output = std::process::Command::new("python3")
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .expect("Python 3 is required for gate tests; run inside nix-shell");
+    assert!(output.status.success(), "could not locate Python 3");
+    let executable = String::from_utf8(output.stdout).expect("Python path must be UTF-8");
+    format!("#!{}\n{body}\n", executable.trim())
+}

@@ -12,6 +12,7 @@ pkgs'.mkShell {
     rust-analyzer
     pkg-config
     openssl
+    python3
   ];
 
   RUST_BACKTRACE = 1;

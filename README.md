@@ -527,7 +527,7 @@ accordingly.
 | `/model [profile]` | Show configured models or safely switch provider/model profile |
 | `/voice` | Toggle voice mode: Ctrl+T records and transcribes, replies are spoken (TUI only) |
 | `/resume [id]` | List or resume past sessions |
-| `/clear` | Clear screen |
+| `/clear` | Clear screen, keeping conversation context |
 | `/exit` | Exit |
 
 Turn checkpoints cover Git-tracked files and non-ignored untracked files.

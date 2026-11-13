@@ -171,6 +171,16 @@ impl ChatApp {
         });
     }
 
+    pub fn clear_display(&mut self) {
+        self.messages.clear();
+        self.messages_rev += 1;
+        self.history_cache = None;
+        self.stream_buffer.clear();
+        self.scroll = 0;
+        self.manual_scroll = false;
+        self.total_lines = 0;
+    }
+
     pub fn visible_tasks(&self) -> Vec<&super::tasks::QueueItem> {
         self.task_items
             .iter()
@@ -820,6 +830,7 @@ async fn run_session(
                     CommandResult::Text(text) => {
                         app.add_message("system", &text);
                     }
+                    CommandResult::Clear => app.clear_display(),
                     CommandResult::Exit => {
                         return Ok(Action::Home);
                     }

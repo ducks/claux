@@ -918,6 +918,53 @@ mod perf_probe {
     }
 
     #[test]
+    fn clear_display_removes_history_and_resumes_following_new_messages() {
+        let mut app = ChatApp::new("test-model", Theme::dark());
+        app.add_message("user", "old question");
+        app.add_message("assistant", "old answer");
+        app.add_tool("Bash", "old tool", ToolStatus::Success);
+        app.stream_buffer = "old streaming tail".into();
+        app.manual_scroll = true;
+        app.scroll = 20;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw_chat(f, &mut app)).unwrap();
+        assert!(app.history_cache.is_some());
+
+        app.clear_display();
+        assert!(app.messages.is_empty());
+        assert!(app.history_cache.is_none());
+        assert!(app.stream_buffer.is_empty());
+        assert_eq!(app.total_lines, 0);
+        assert_eq!(app.scroll, 0);
+        assert!(!app.manual_scroll);
+        terminal.draw(|f| draw_chat(f, &mut app)).unwrap();
+        let screen = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        assert!(!screen(&terminal).contains("old "));
+
+        app.add_message("user", "new question");
+        app.add_message("assistant", "new answer");
+        terminal.draw(|f| draw_chat(f, &mut app)).unwrap();
+        let rendered = screen(&terminal);
+        assert!(rendered.contains("new question"));
+        assert!(rendered.contains("new answer"));
+        assert!(!rendered.contains("old "));
+
+        app.clear_display();
+        app.clear_display();
+        terminal.draw(|f| draw_chat(f, &mut app)).unwrap();
+        assert!(!screen(&terminal).contains("new question"));
+    }
+
+    #[test]
     fn history_cache_survives_streaming_and_scrolling_but_invalidates_on_changes() {
         let mut app = large_history_app();
         let _ = tuishot::render_to_buffer(120, 40, |f| draw_chat(f, &mut app));

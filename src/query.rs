@@ -6008,7 +6008,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let gate = root.path().join("gate");
-        std::fs::write(&gate, "#!/usr/bin/python3\nimport json,sys\nr=json.load(sys.stdin)\nprint(json.dumps({'request_id':r['request_id'],'decision':'allow'}))\n").unwrap();
+        std::fs::write(&gate, crate::test_support::python_script("import json,sys\nr=json.load(sys.stdin)\nprint(json.dumps({'request_id':r['request_id'],'decision':'allow'}))")).unwrap();
         std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut engine = steering_engine(vec![], None);
         engine.set_permission_gate(gate.clone());
@@ -6059,7 +6059,7 @@ mod tests {
             .tool_trace()
             .iter()
             .any(|entry| entry.name == "Write" && entry.is_error));
-        std::fs::write(&gate,"#!/usr/bin/python3\nimport json,sys\nr=json.load(sys.stdin)\nprint(json.dumps({'request_id':r['request_id'],'decision':'allow'}))\n").unwrap();
+        std::fs::write(&gate, crate::test_support::python_script("import json,sys\nr=json.load(sys.stdin)\nprint(json.dumps({'request_id':r['request_id'],'decision':'allow'}))")).unwrap();
         let mut allowed = steering_engine(vec![tool], None);
         allowed.set_permission_gate(gate);
         allowed

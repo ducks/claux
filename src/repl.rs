@@ -127,6 +127,11 @@ pub async fn run(
                     println!("{}", commands::format_context(&engine));
                 }
                 CommandResult::Text(text) => println!("{text}"),
+                CommandResult::Clear => crossterm::execute!(
+                    stdout(),
+                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                    crossterm::cursor::MoveTo(0, 0)
+                )?,
                 CommandResult::Exit => break,
                 // /resume with an id: switch which session this REPL is
                 // writing to, so the resumed conversation continues in
